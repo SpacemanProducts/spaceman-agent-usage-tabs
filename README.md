@@ -7,6 +7,10 @@
 
 ## See it
 
+![A regular session reset](docs/regular-reset.gif)
+
+*A scheduled reset: Claude Code's session meter reset on time, so its chip flashes green with a burst of confetti.*
+
 ![A surprise Antigravity reset](docs/surprise-reset.gif)
 
 *A surprise reset: an Antigravity meter dropped before its reset time, so the chip flashes gold and the bar icon sits above a burst of rainbow confetti.*
