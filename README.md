@@ -5,65 +5,31 @@
 > work. Design calls favor what keeps the developer in flow: glanceable,
 > quiet, self-maintaining, and honest about missing data.
 
-An Omarchy bar plugin that shows AI coding agent usage in one panel: a tab per
-installed agent, limit meters with reset countdowns, tokens by model, and a
-collapsible daily history.
+An [Omarchy](https://omarchy.org) bar plugin that shows how much of your AI coding
+agents' usage limits you have used: one bar icon, one panel, and a tab for every agent
+you have installed.
 
-![Agent Usage Tabs panel](docs/screenshot.png)
-
-- **Bar icon with a number**, like the battery: the highest *session* usage
-  across all agents (amber from 60%, red above 85%).
-- **Tabs** for every installed agent, in an order you control. Each chip shows
-  two meters at a glance: the **outer border is the session meter** and the
-  **inner fill is the weekly meter** (green under 60%, amber 60–85%, red above
-  85%). An agent with one meter uses it for both; agents with only monthly or
-  daily meters use the fullest of those; gray means no data. The selected tab
-  has a thicker border, an inner ring and bold text. A chip flashes solid green
-  for 10 seconds after a reset.
-- **Models section** on every tab: every model the agent can use. Models in use come first; unused ones are dimmed with a 0; models the plan can't use say *unavailable* (never 0); announced removals carry an amber *removing Dec 14* badge. Long lists (Devin, OpenCode) show 8 rows with a *N more models* toggle.
-- **Per tab:** session / weekly / monthly meters with countdowns, tokens by
-  model, and a "Tokens by day" section that starts closed. Today's total
-  stays visible in its header. No data shows a one-line status, not an error.
-- **Reset time on every meter:** the countdown plus the local date and time
-  (`resets in 3d 2h · Tue Nov 24, 3:12 AM`) whenever the agent reports one.
-- **Resets line** (Claude and Codex): banked limit resets and when they
-  expire, shown only when the account has them.
-- **Notifications** when any agent's session or weekly limit passes 95% (once per
-  window).
-- **Reset celebration**: when a session or weekly meter drops by more than 50
-  points between refreshes, the panel opens on that agent's tab (without taking
-  keyboard focus), confetti bursts over its chip while the chip flashes green, a
-  short cha-ching plays, a desktop notification with a cash-burst picture says
-  "<Agent> reset. Go cook.", and the panel closes itself after about 5 seconds.
-  Each part has a switch in the gear settings, there is a volume control, and a
-  **Test celebration** button replays it any time.
-
-Supported agents: Claude Code, Antigravity, Grok, Codex, Copilot, Cursor Agent,
-OpenCode, Kimi, Kiro, Devin, Amp, Hermes. A tab appears only if the CLI is
-installed. Kiro and Amp have no usage source yet, so their tabs show a status
-line.
+![The panel on the Claude Code tab](docs/screenshot.png)
 
 ## Quick start (new to Omarchy?)
 
-[Omarchy](https://omarchy.org) is a Linux desktop with a bar across the top of the
-screen. This plugin adds an icon to that bar; click it to see how much of each
-AI coding tool's usage limit you have used (see the screenshot above).
+Omarchy is a Linux desktop with a bar across the top of the screen. This plugin adds an
+icon to that bar. Click it to open the panel above.
 
 **1. Install it - one command, in a terminal:**
 
 ```
-omarchy plugin add https://github.com/SpacemanProducts/spaceman.agent-usage-tabs.git --enable
+omarchy plugin add https://github.com/SpacemanProducts/spaceman-agent-usage-tabs.git --enable
 ```
 
-<!-- Update this URL once the repo is published. Until then, from a local copy of
-     the folder (it is a git repo): omarchy plugin add /path/to/spaceman.agent-usage-tabs --enable -->
+From a local copy of the repo instead: `omarchy plugin add /path/to/spaceman-agent-usage-tabs --enable`.
 
-**2. Click the robot icon in the bar.** Each tool you have installed gets a tab.
-Tools you haven't installed are hidden, and a new one shows up on its own the next
-time the panel refreshes (every 5 minutes).
+**2. Click the robot icon in the bar.** Each tool you have installed gets a tab. Tools you
+haven't installed are hidden, and a new one shows up on its own the next time the panel
+refreshes (every 5 minutes).
 
-**3. Sign in to the tools you want to see.** A tab for a tool you aren't signed in
-to says so in one line. These need a login first:
+**3. Sign in to the tools you want to see.** A tab for a tool you aren't signed in to says
+so in one line. These need a login first:
 
 | Tool | Sign in with |
 |---|---|
@@ -79,174 +45,198 @@ to says so in one line. These need a login first:
 | Amp | `amp login` |
 | Hermes | optional: sign in to Nous Portal with `hermes model` |
 
-**No login needed:** OpenCode (its free models just work) and Hermes (it shows as
-free and local until you sign in).
+**No login needed:** OpenCode (its free models just work) and Hermes (it shows as free and
+local until you sign in).
+
+## What it does
+
+**In the bar**
+- A number next to the icon, like the battery: the highest *session* usage across your
+  agents. Amber from 60%, red above 85%.
+
+**The tabs**
+- One tab per installed agent, with full names, in an order you choose.
+- Each tab chip shows two meters at a glance: the **outer border is the session meter** and
+  the **inner fill is the weekly meter**. Green under 60%, amber 60-85%, red above 85%, gray
+  when there is no data. An agent with one meter uses it for both. The selected tab has a
+  thicker border.
+- Tabs for agents that aren't installed are hidden; they appear automatically once you
+  install the tool, with a one-time notification. You can also hide any installed tab on
+  purpose (in the gear settings), and it stays hidden until you turn it back on.
+- When a hidden agent signs in for the first time, you get a one-time "now available" notice.
+
+**Inside a tab**
+- **Limits:** session, weekly and monthly meters, each with a reset countdown and the exact
+  local reset time (`resets in 3d 2h · Tue Nov 24, 3:12 AM`).
+- **Models:** every model the agent can use. Models in use come first; unused ones are
+  dimmed with a 0; models your plan can't use say *unavailable* (never 0); models with an
+  announced removal carry an amber *removing Dec 14* badge. Long lists show 8 rows with a
+  "N more models" toggle.
+- **Tokens by day:** a collapsible section, closed by default, with today's total always
+  visible.
+- **Plan and free-tier notes** from what each tool itself reports (see below).
+- **One calm status line** instead of an error card when a tool has no data. If a tab can't
+  read its data, or the data doesn't look right, it says **"Data looks wrong"** and the
+  details go to a log (see *Report a problem*).
+- Claude's tab adds a **Fable Weekly** meter only when your account reports one. A **Resets**
+  line (banked limit resets) appears only when the agent reports them; see the known gap below.
+
+**Plan notes, per agent** (shown only from what the tool reports)
+
+| Agent | What it shows |
+|---|---|
+| Copilot | The plan's monthly reset date. A meter appears only for plans with an included allowance. |
+| OpenCode | A note that free models have an unpublished daily limit. |
+| Kimi | Whichever windows your login reports; nothing without a login. |
+| Kiro | A credits meter (used of the monthly total) with its reset date. |
+| Amp | A daily allowance, only if Amp reports one. |
+| Hermes | "Free and local", or the Nous Portal free-tier note once you're signed in. |
+
+**Alerts and the reset celebration**
+- A notification when any agent's session or weekly limit passes 95%, once per window.
+- When a session or weekly meter drops by more than 50 points, that's a reset, and you
+  get a short celebration: the panel opens on that agent's tab (**without taking keyboard
+  focus**), confetti bursts over its chip while the chip flashes green, a short cha-ching
+  plays, and a desktop notification with a cash-burst picture says "*Agent* reset. Go cook."
+  The panel closes itself after about 5 seconds.
+
+**The gear icon** in the panel header opens a small settings view (shown below) with
+switches for hiding uninstalled agents, showing unused models, the reset animation, opening
+the panel on reset, the reset sound (with a volume control), a **Test celebration** button
+that replays it any time, and a switch for every tab.
+
+![The gear settings view](docs/settings.png)
+
+**Only plan limits, usage and resets are shown.** Purchasable credit balances, overage,
+on-demand spend and top-ups are deliberately never displayed.
+
+## Known gap: banked limit resets can't be read
+
+Some accounts hold banked "limit resets". The usage endpoint the Claude Code login can reach
+answers that those resets aren't offered to that kind of client (`eligible: false`, reason
+`surface`), so **a Claude Resets line will not appear for the Claude Code login**, even when
+the claude.ai web app shows resets for the same account. Codex reports its resets, so its
+Resets line shows when it has any. **This plugin never spends or triggers a reset**; there is
+no reset button.
 
 ## Requirements
 
 - Omarchy with shell plugins (`omarchy plugin` works)
 - `node` 18 or newer (it uses built-in `fetch`)
-- `notify-send` (for alerts)
+- `notify-send` for notifications, and `pw-play` (PipeWire), `paplay` or `ffplay` for the sound
 - `secret-tool` (libsecret), only for Antigravity if its login is in the keyring
-- Omarchy's own `omarchy-agent-usage-*` collectors, used for the agents that
-  have no collector of their own here (Codex, Copilot, Cursor, OpenCode, Kimi,
-  Devin, Hermes)
+- `gh` (GitHub CLI), only for Copilot's usage numbers
+- Omarchy's own `omarchy-agent-usage-*` collectors, used for Codex, Cursor, OpenCode, Kimi,
+  Devin and Hermes token history
 
-## Install
+## Install by hand
 
-The quick start above is the short way. To install by hand from a local folder instead (nothing here is published anywhere):
+If you'd rather not use the one-liner:
 
-1. Put the folder at `~/.config/omarchy/plugins/spaceman.agent-usage-tabs/`
-   (it contains `manifest.json`, `Panel.qml`, `bin/`).
-2. Confirm Omarchy sees it:
-   ```
-   omarchy plugin list | grep usage-tabs
-   ```
-3. Enable it:
-   ```
-   omarchy plugin enable spaceman.agent-usage-tabs
-   ```
-4. Restart the shell so it compiles the QML (hot reload is not reliable):
-   ```
-   omarchy-restart-shell
-   ```
-5. Click the robot icon in the bar. Middle-click cycles tabs. In the panel:
-   Left/Right switch tabs, Space toggles the daily section, `r` refreshes,
-   Esc closes.
+1. Put the folder at `~/.config/omarchy/plugins/spaceman.agent-usage-tabs/`.
+2. `omarchy plugin enable spaceman.agent-usage-tabs`
+3. `omarchy-restart-shell` (so the shell compiles the QML; hot reload isn't reliable)
+4. Click the robot icon. Middle-click cycles tabs. In the panel: Left/Right switch tabs,
+   Space toggles the daily section, `r` refreshes, Esc closes.
 
 ## Settings
 
-Set these in the plugin's entry in `~/.config/omarchy/shell.json`:
+Everything on the gear is saved to the plugin's own `settings.json` (in
+`~/.local/state/omarchy/agent-usage-tabs/`), which takes priority over `shell.json`. These
+three are set only in the plugin's entry in `~/.config/omarchy/shell.json`:
 
 ```json
 {
   "id": "spaceman.agent-usage-tabs",
   "tabOrder": "claude,antigravity,grok,codex",
   "refreshIntervalSec": 300,
-  "notifyThreshold": 95,
-  "showUnusedModels": true
+  "notifyThreshold": 95
 }
 ```
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `tabOrder` | all 12, as listed above | Comma-separated agent ids, in tab order. Ids you leave out are appended in default order, so no tab is ever hidden. Unknown ids are ignored. |
-| `refreshIntervalSec` | 300 | How often the collector runs. Minimum 60. |
+| `tabOrder` | all 12, as listed | Comma-separated agent ids, in tab order. Ids you leave out are appended in default order. |
+| `refreshIntervalSec` | 300 | How often data refreshes. Minimum 60. |
 | `notifyThreshold` | 95 | Notify when a session or weekly limit passes this percent. |
-| `showUnusedModels` | true | Show every model an agent can use, dimmed when unused or marked unavailable. `false` lists only models with recent use. The older key `showAllClaudeModels` still works. |
 
-The gear icon in the panel also saves these, to the plugin's own `settings.json`
-(in `~/.local/state/omarchy/agent-usage-tabs/`), which takes priority over
-`shell.json`. All default to on:
+Gear settings, all on by default: `hideUninstalledAgents`, `showUnusedModels`,
+`resetAnimation`, `resetSound` (with `resetVolume`, 0-100, default 60), `autoOpenOnReset`,
+and `hiddenAgents` (the tabs you hid). They also work as keys in `shell.json`.
 
-| Gear switch / key | Meaning |
-|---|---|
-| Hide agents that aren't installed (`hideUninstalledAgents`) | Only show tabs for tools found on this machine. |
-| Show unused models (`showUnusedModels`) | List unused models dimmed. |
-| Reset animation (`resetAnimation`) | The confetti burst on the chip. |
-| Reset sound (`resetSound`) and volume (`resetVolume`, 0-100, default 60) | The cha-ching. |
-| Open panel on reset (`autoOpenOnReset`) | Auto-open the panel for a reset, then close it. |
-| Tabs list (`hiddenAgents`) | Hide a tab on purpose; it stays hidden until you turn it back on. Only an installed agent can be hidden this way. |
-
-Agent ids: `claude`, `antigravity`, `grok`, `codex`, `copilot`, `cursor`,
-`opencode`, `kimi`, `kiro`, `devin`, `amp`, `hermes`.
-
-Back up `shell.json` before editing it. After changing a setting, restart the
-shell.
+Agent ids: `claude`, `antigravity`, `grok`, `codex`, `copilot`, `cursor`, `opencode`,
+`kimi`, `kiro`, `devin`, `amp`, `hermes`. Back up `shell.json` before editing it, and restart
+the shell after changing a setting there.
 
 ## Where the data comes from
 
-`bin/collect.mjs` writes one file,
-`~/.local/state/omarchy/agent-usage-tabs/data.json`, and the panel only reads
-it.
+`bin/collect.mjs` writes one file, `~/.local/state/omarchy/agent-usage-tabs/data.json`, and the
+panel only reads it.
 
 | Agent | Source |
 |---|---|
-| Claude Code | `https://api.anthropic.com/api/oauth/usage` using the OAuth login in `~/.claude/.credentials.json`, plus tokens from `~/.claude/projects` transcripts (last 7 days). Limits are cached 5 minutes because the endpoint rate-limits (HTTP 429). A **Fable Weekly** bar is added only when the payload's `limits` array carries a model-scoped entry for Fable (`scope.model.display_name` or `id` containing "fable"); Max and Ultra plans are reported to have a separate Fable weekly limit, but a Pro account's payload has no such entry, so nothing is shown and nothing is guessed. `bin/claude-limits.test.mjs` covers the parser (`node bin/claude-limits.test.mjs`). |
-| Grok | `bin/grok.mjs`, from the Grok CLI login in `~/.grok/auth.json`, against the same billing endpoints Grok's own `/usage` uses. |
-| Antigravity | `bin/agy.mjs`, from the local agy login (Secret Service entry `service=gemini username=antigravity`, or `~/.gemini/antigravity-cli/antigravity-oauth-token`), against Google's `retrieveUserQuotaSummary`. Google may report no Gemini group on some plans; the tab says so. |
-| Copilot | `bin/copilot.mjs`: GitHub's quota endpoint with the token `gh auth token` prints. A meter appears only with a limited allowance; an account with no included allowance gets one status line with the monthly reset date. |
-| Others | Omarchy's `omarchy-agent-usage-<agent>` records, refreshed by `omarchy-agent-usage-update`. |
+| Claude Code | Anthropic's OAuth usage endpoint with your Claude Code login, plus tokens from your local transcripts (last 7 days). Cached 5 minutes because the endpoint rate-limits. |
+| Grok | Grok's billing endpoints, with the Grok CLI login. |
+| Antigravity | Google's quota endpoint, with the local `agy` login. |
+| Copilot | GitHub's Copilot quota endpoint, with the token `gh auth token` prints. |
+| Kiro | `kiro-cli chat --no-interactive "/usage"`. |
+| Amp, Hermes | `amp usage` and `hermes status`, for sign-in state and the plan notes above. |
+| Codex, Cursor, OpenCode, Kimi, Devin | Omarchy's `omarchy-agent-usage-<agent>` records. |
 
-**Credentials are read-only.** The collectors never refresh or write a token.
-If one has lapsed, the tab says to start that CLI once. Tokens are sent only to
-the vendor's own endpoint listed above.
+**Expired logins refresh themselves.** Grok's and Antigravity's tokens last hours. When one has
+lapsed, the plugin runs that tool's own `models` command once in the background (headless,
+at most once every 10 minutes) so the tool refreshes its own login. The plugin never writes
+or refreshes a token itself.
 
 ## Models and `models.json`
 
 Each tab's Models list is built live-data-first:
 
 1. models the agent reported using (last 7 days for Claude, all time for the others),
-2. models the agent's own CLI says it can use, refreshed every 6 hours
-   (`agy models`, `grok models`, `opencode models`, `devin models`,
-   `kiro-cli chat --list-models`, `codex debug models`), run headless,
-3. the entries in **`models.json`**, which you can edit by hand.
+2. models the agent's own CLI says it can use, refreshed every 6 hours (`agy models`,
+   `grok models`, `opencode models`, `devin models`, `kiro-cli chat --list-models`,
+   `codex debug models`),
+3. the entries in **`models.json`**, which you can edit by hand: known models, plan and
+   free-tier notes, and announced removals.
 
-If a CLI lists its models, any `models.json` entry missing from that list is
-shown as *unavailable*. Without a CLI list (Cursor, Copilot, Kimi, Amp,
-Hermes, Claude), an entry is unavailable only if you list the plan in its
-`unavailableOn`. Put `"removing": "2026-12-14"` (or `"2026-12"`) on a model with
-an announced removal. A past date shows *past removal date*, which is how a
-model looks when it is still listed after its announced removal. A model that
-is truly gone should be deleted (note it under `removed`). Edits apply on the
-next refresh; a malformed file is ignored and live data still shows.
+If a CLI lists its models, any `models.json` entry missing from that list shows as
+*unavailable*. Without a CLI list (Cursor, Copilot, Kimi, Amp, Hermes, Claude), an entry is
+unavailable only if you list the plan in its `unavailableOn`. Put `"removing": "2026-12-14"`
+(or `"2026-12"`) on a model with an announced removal; a past date shows *past removal date*,
+which is how a model looks when it's still listed after its announced removal. Delete a model
+that is truly gone. Edits apply on the next refresh, and a malformed file is ignored.
 
-## Banked resets
+## Privacy and safety
 
-- **Claude:** Claude Code reads them from the `cedar_ember` block of the same
-  `/api/oauth/usage` response (grants with `resets_left`, `ends_at`, `paused`,
-  `usable_now`). The Resets line sums unpaused grants and shows the earliest
-  expiry. A Pro account's payload has `cedar_ember: null`, so no line shows.
-- **Codex:** the Codex login exposes `rateLimitResetCredits`; Omarchy's Codex
-  collector turns it into `resetCredits {available, nextExpiresAt}`. Each
-  reset refreshes both the 5-hour and weekly windows and moves the weekly
-  reset date. A free account has none, so no line shows.
-- Neither could be checked against a live account that holds resets; the
-  parsers are tested with payloads shaped like Claude Code's and Omarchy's own
-  code reads them.
-
-## Antigravity and Grok sign-in
-
-agy keeps its own token for an hour and refreshes it itself. The collector
-never refreshes or writes it. When the token has lapsed or expires within
-2 minutes, the collector runs `agy models` once in the background (no display
-variables, so it can never open a browser window), then reads the login again.
-It does this at most once every 10 minutes. If agy cannot refresh it, the tab
-says to run `agy` and sign in again. Grok works the same way with
-`grok models` (its token lasts six hours).
-
-## Notifications
-
-Any limit whose title contains "session" or "weekly", for every agent that
-reports one, fires a single critical notification when it passes the
-threshold. State is kept in `notified.json` beside `data.json`. A window alerts once. It is forgotten only when its meter is reported back at or below the threshold; a refresh where an agent errors or the meter is missing changes nothing, so an outage cannot cause a repeat alert.
+- Logins are read-only. Each token is sent only to its own vendor's endpoint listed above.
+- Nothing is sent anywhere else: no telemetry, no analytics.
+- Everything the plugin keeps is in `~/.local/state/omarchy/agent-usage-tabs/`.
+- The cha-ching sound and the cash-burst notification picture are self-made (see
+  `sounds/make-cha-ching.py` and `notify/cash-burst.svg`) and released to the public domain.
 
 ## Report a problem
 
 Something broken or looking wrong? Please open an issue:
-**https://github.com/SpacemanProducts/spaceman.agent-usage-tabs/issues**
-<!-- Update this link once the repo is published. -->
+**https://github.com/SpacemanProducts/spaceman-agent-usage-tabs/issues**
 
 A tab that couldn't read its data shows "Data looks wrong"; the details are in
-`~/.local/state/omarchy/agent-usage-tabs/collector.log`. Please include that and
-the version number (shown at the bottom of the gear settings). See
-[CHANGELOG.md](CHANGELOG.md) for what changed in each version.
+`~/.local/state/omarchy/agent-usage-tabs/collector.log`. Please include that and the version
+number (shown at the bottom of the gear settings). See [CHANGELOG.md](CHANGELOG.md) for what
+changed in each version.
+
+## Troubleshooting
+
+- **Icon missing from the bar:** it hides when no agent is installed. Run
+  `node ~/.config/omarchy/plugins/spaceman.agent-usage-tabs/bin/collect.mjs` and check for errors.
+- **Changes not showing:** run `omarchy-restart-shell`.
+- **QML errors:** `qs log -i <instance>` and look for `agent-usage`.
+- **Claude shows "Rate limited":** it is showing the last known limits; wait a few minutes.
 
 ## Tests
 
 ```
 for t in bin/*.test.mjs; do node "$t"; done
 ```
-
-## Troubleshooting
-
-- **Icon missing from the bar:** it hides when no agent data has loaded. Run
-  `node ~/.config/omarchy/plugins/spaceman.agent-usage-tabs/bin/collect.mjs`
-  and check for errors.
-- **Changes not showing:** run `omarchy-restart-shell`.
-- **QML errors:** `qs log -i <instance>` and look for `usage-tabs`.
-- **Claude shows "Rate limited":** it is showing the last known limits; wait a
-  few minutes.
 
 ## Uninstall
 
@@ -258,4 +248,4 @@ rm -r ~/.local/state/omarchy/agent-usage-tabs
 
 ## License
 
-MIT
+[MIT](LICENSE)

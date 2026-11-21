@@ -3,6 +3,11 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.2.1 - 2026-11-21
+- Prepared for public release: README rewritten to match what the plugin does today, new
+  screenshots, the MIT LICENSE and a Ko-fi funding file template, account-specific notes
+  generalized, and personal details removed.
+
 ## 1.2.0 - 2026-11-21
 - Reset celebration: confetti over the chip, green flash, cha-ching (own synthesized
   clip, with volume), auto-open without taking keyboard focus, and a desktop

@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "spaceman.agent-usage-tabs",
   "name": "Agent Usage Tabs",
-  "version": "1.2.0",
-  "author": "spaceman",
+  "version": "1.2.1",
+  "author": "SpacemanProducts",
   "license": "MIT",
   "description": "Per-agent tabs with session and weekly limits, tokens by model, and a collapsible daily history.",
   "kinds": [

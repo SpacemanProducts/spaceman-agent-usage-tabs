@@ -25,20 +25,18 @@ keeps the developer in flow:
 
 ## Decisions already made (don't relitigate without new facts)
 
-- **"One click fixes a wall" is NOT implemented as an automated reset.**
-  Researched: Claude Code's `/limit-reset` calls
-  `POST /api/organizations/{org}/reset_rate_limits` with the Claude Code OAuth
-  login. Declined because a reset is irreversible and expires/forfeits, and
-  using a consumer-plan OAuth token outside Claude Code is, per secondary
-  reports of Anthropic's docs, against its terms (unresolved). The safe
-  "fix" is showing the Resets line and pointing to Claude Code's own
-  `/limit-reset` or Settings > Usage. Do not call that endpoint from this
-  plugin without the user explicitly deciding to.
+- **"One click fixes a wall" is NOT implemented as an automated reset.** Claude Code has
+  a command that spends a banked reset using the OAuth login. Declined: a reset is
+  irreversible and expires/forfeits, and using a consumer-plan OAuth token outside
+  Claude Code is, per secondary reports of Anthropic's docs, against its terms
+  (unresolved). The safe "fix" is showing the Resets line when the data exists and
+  pointing to Claude Code's own command or the web Settings > Usage page. This plugin
+  must never trigger a reset without the owner explicitly deciding to.
 - **Banked resets are not readable with the Claude Code login (checked
   2026-11-21).** The plain usage payload has `cedar_ember: null`. Asking for it
   explicitly (`GET /api/oauth/usage?cedar_ember=1&skip_spend=1`, the call Claude
   Code makes) returns `eligible: false, ineligible_reason: "surface", grants: []`
-  even though the user's claude.ai app shows 3 resets expiring Dec 15. The
+  even though the claude.ai web app can show banked resets for the same account. The
   server withholds them from the Claude Code/OAuth surface; the app gets them
   through its own web session. Not pursued: spoofing a surface, or reusing
   browser cookies/session keys (credential reuse, against the same policy
@@ -48,14 +46,14 @@ keeps the developer in flow:
 - Credentials are **read-only**. Collectors never write or refresh tokens. The
   Antigravity token is refreshed by running `agy models` headless (no
   DISPLAY/WAYLAND_DISPLAY), at most once per 10 minutes (`bin/agy-login.mjs`).
-- Nothing from shuv1337 (no shuvquota, no shuv.agents code). Own collectors:
+- No third-party plugin code or helper CLIs: everything is self-written. Own collectors:
   `bin/collect.mjs`, `grok.mjs`, `agy.mjs`, `copilot.mjs`, `claude-limits.mjs`.
   Other agents come from Omarchy's own `omarchy-agent-usage-*` records.
 - Alerts: `bin/alert-state.mjs`. A window alerts once; it is forgotten only when
   its meter is reported back at or below the threshold (an outage changes
   nothing). Reset celebration: a session/weekly drop of more than 50 points
   flashes the chip green 10 s and sends a silent notification.
-  **Confirmed on a real reset:** the user saw the popup when Claude's session
+  **Confirmed on a real reset:** the popup appeared when Claude's session
   meter reset at 06:00 UTC on 2026-11-21 (95% -> 3%). The green flash itself
   was only checked on staged data.
 - **Models lists** live in `models.json` (user-editable) plus live CLI lists
@@ -82,7 +80,9 @@ keeps the developer in flow:
   `HoverHandler`) directly inside `KeyboardPanel`; after every QML edit restart the
   shell and check `qs log` for `agent-usage` errors. A refactor once deleted the
   reset block; `bin/reset-celebration.test.mjs` guards the collector's wiring.
-- Don't publish anything to GitHub unless asked.
+- The repo is public on GitHub (SpacemanProducts/spaceman-agent-usage-tabs). Scan for
+  personal info (emails, tokens, usernames in paths) before every push, and use the
+  GitHub noreply address for commits.
 
 ## Working rules
 
@@ -96,8 +96,8 @@ keeps the developer in flow:
   changed" debug lines).
 - Verify visually: open with `qs ipc -i <instance> call spaceman.agent-usage-tabs
   open`, switch tabs with `... next` (don't send keystrokes into the user's
-  session), crop screenshots with `grim -g` using LOGICAL coordinates (monitor
-  scale is 1.25) so other windows never appear. Never run the 95% alert test
+  session), crop screenshots with `grim -g` using LOGICAL coordinates (divide pixel
+  coordinates by your display scale) so other windows never appear. Never run the 95% alert test
   with a low threshold: it sends real popups.
 - Opening the panel starts a collector run that rewrites `data.json`; wait for
   it before injecting test data. `pgrep -f collect.mjs` matches its own shell.
