@@ -116,8 +116,18 @@ Panel {
   }
   // Fires the whole celebration on one agent's chip: confetti and the flash
   // (animation switch), the sound (sound switch), and a notification.
-  function fireTest(id, kind) {
+  // How big a window's celebration is: a session (or daily) reset is the baseline, a
+  // weekly one a bit bigger, a monthly one bigger still (the bigger the window, the bigger the win).
+  function magnitudeForWindow(win) { return win === "monthly" ? 1.5 : win === "weekly" ? 1.25 : 1 }
+  function magnitudeOf(a) {
+    if (!a) return 1
+    var t = testKinds[a.id]
+    if (t && t.at >= Number(a.resetAt || 0)) return t.magnitude
+    return Number(a.resetMagnitude || 1)
+  }
+  function fireTest(id, kind, win) {
     var surprise = kind === "surprise"
+    var window = win || "session"
     var target = id
     var found = false
     for (var i = 0; i < agents.length; i++) if (agents[i].id === id) found = true
@@ -126,7 +136,7 @@ Panel {
     for (var j = 0; j < rawAgents.length; j++) if (rawAgents[j].id === target) name = rawAgents[j].name
     var now = Date.now()
     var next = Object.assign({}, testResets); next[target] = now
-    var kinds = Object.assign({}, testKinds); kinds[target] = { at: now, kind: surprise ? "surprise" : "scheduled" }
+    var kinds = Object.assign({}, testKinds); kinds[target] = { at: now, kind: surprise ? "surprise" : "scheduled", magnitude: magnitudeForWindow(window) }
     flashNow = now
     testKinds = kinds
     testResets = next
@@ -134,7 +144,7 @@ Panel {
     testNotifier.command = ["notify-send", "-a", "Cook Meter", "-u", "normal", "-i", "emblem-ok-symbolic",
       "-h", "boolean:suppress-sound:true", "-h", "string:category:presence",
       "-h", "string:image-path:" + root.pluginDir + (surprise ? "/notify/surprise-burst.svg" : "/notify/cash-burst.svg"),
-      surprise ? "Antigravity just reset early, go cook." : name + " reset. Go cook.",
+      surprise ? "Antigravity " + window + " reset came early, go cook." : name + " " + window + " reset, go cook.",
       surprise ? "\u26A1 Test: a meter reset before it was due. No announcement found." : "\u{1F4B8} Test celebration"]
     testNotifier.running = true
   }
@@ -356,6 +366,8 @@ Panel {
     function testSurprise(): string { root.fireTest("antigravity", "surprise"); return "ok" }
     function testSurpriseAutoOpen(): string { root.autoCelebrate("antigravity"); root.fireTest("antigravity", "surprise"); return "ok" }
     function testCelebration(): string { root.fireTest("claude"); return "ok" }
+    function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
+    function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
     function settings(): string { root.settingsOpen = !root.settingsOpen; return root.settingsOpen ? "open" : "closed" }
     function next(): string { root.selectIndex(root.selectedIndex + 1); return "ok" }
   }
@@ -541,6 +553,7 @@ Panel {
                 readonly property bool selected: index === root.selectedIndex
                 readonly property bool flashing: root.isFlashing(modelData)
                 readonly property bool surprise: root.resetKindOf(modelData) === "surprise"
+                readonly property real magnitude: root.magnitudeOf(modelData)
                 readonly property color flashColor: surprise ? "#fbbc05" : root.green
                 // True for the first 3 s after the collector flags a reset.
                 readonly property bool celebrating: root.resetTimeOf(modelData) > 0 && root.flashNow - root.resetTimeOf(modelData) < (surprise ? 4800 : 3000)
@@ -618,11 +631,11 @@ Panel {
                   }
 
                   Repeater {
-                    model: chip.surprise ? 80 : 28
+                    model: Math.round((chip.surprise ? 80 : 28) * chip.magnitude)
                     Item {
                       required property int index
                       readonly property real ang: index * 2.399963 // golden angle spreads them evenly
-                      readonly property real speed: (Style.space(60) + ((index * 37) % 70) * Style.space(1)) * (chip.surprise ? 1.8 : 1)
+                      readonly property real speed: (Style.space(60) + ((index * 37) % 70) * Style.space(1)) * (chip.surprise ? 1.8 : 1) * (1 + (chip.magnitude - 1) * 0.8)
                       readonly property real e: 1 - Math.pow(1 - confetti.t, 2)
                       readonly property bool sparkle: index % 4 === 0
                       x: Math.cos(ang) * speed * e
@@ -776,62 +789,40 @@ Panel {
               onStep: function(delta) { root.writeSetting(["volume", String(Math.max(0, Math.min(100, root.resetVolume + delta)))]) }
               onPlay: root.playTest()
             }
-            Item {
+            // Replays each kind of celebration on demand.
+            Flow {
               width: parent.width
-              height: testButton.height + Style.space(4)
-              Rectangle {
-                id: testButton
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                width: testLabel.implicitWidth + Style.space(24)
-                height: testLabel.implicitHeight + Style.space(14)
-                radius: Style.cornerRadius
-                color: testArea.containsMouse ? root.track : "transparent"
-                border.width: 1
-                border.color: root.foreground
-                Text {
-                  id: testLabel
-                  anchors.centerIn: parent
-                  textFormat: Text.PlainText
-                  text: "\u25b6  Test celebration"
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
-                MouseArea {
-                  id: testArea
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.fireTest("claude")
-                }
-              }
-              Rectangle {
-                id: surpriseButton
-                anchors.left: testButton.right
-                anchors.leftMargin: Style.space(8)
-                anchors.verticalCenter: parent.verticalCenter
-                width: surpriseLabel.implicitWidth + Style.space(24)
-                height: testButton.height
-                radius: Style.cornerRadius
-                color: surpriseArea.containsMouse ? root.track : "transparent"
-                border.width: 1
-                border.color: root.foreground
-                Text {
-                  id: surpriseLabel
-                  anchors.centerIn: parent
-                  textFormat: Text.PlainText
-                  text: "\u26a1  Test surprise reset"
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
-                MouseArea {
-                  id: surpriseArea
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.fireTest("antigravity", "surprise")
+              spacing: Style.space(8)
+              Repeater {
+                model: [
+                  { text: "\u25b6  Test celebration", id: "claude", kind: "scheduled", win: "session" },
+                  { text: "\u25b6  Test weekly reset", id: "claude", kind: "scheduled", win: "weekly" },
+                  { text: "\u26a1  Test surprise reset", id: "antigravity", kind: "surprise", win: "weekly" }
+                ]
+                Rectangle {
+                  required property var modelData
+                  width: testLabel.implicitWidth + Style.space(24)
+                  height: testLabel.implicitHeight + Style.space(14)
+                  radius: Style.cornerRadius
+                  color: testArea.containsMouse ? root.track : "transparent"
+                  border.width: 1
+                  border.color: root.foreground
+                  Text {
+                    id: testLabel
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: modelData.text
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    id: testArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.fireTest(modelData.id, modelData.kind, modelData.win)
+                  }
                 }
               }
             }

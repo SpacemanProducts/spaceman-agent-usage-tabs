@@ -5,6 +5,14 @@
 > **The idea:** a dashboard for developers in flow state. One glance at the bar shows every
 > agent's limits, and a celebration fires the moment a reset lands.
 
+## See it
+
+![A surprise Antigravity reset](docs/surprise-reset.gif)
+
+*A surprise reset: an Antigravity meter dropped before its reset time, so the chip flashes gold and the bar icon sits above a burst of rainbow confetti.*
+
+GIFs have no sound. The real thing plays a short cha-ching for a normal reset (and a jackpot for a surprise).
+
 Cook Meter is an [Omarchy](https://omarchy.org) bar plugin (its plugin id and repo are still
 `spaceman-agent-usage-tabs`, so existing installs and links keep working) that shows how much of your AI coding
 agents' usage limits you have used: one bar icon, one panel, and a tab for every agent

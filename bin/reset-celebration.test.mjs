@@ -3,7 +3,11 @@ import fs from "node:fs"; import path from "node:path"; import { fileURLToPath }
 import { applyResets, resetNotice, resetNotifyArgs, resetAssets, SURPRISE_AGENTS, FLASH_MS } from "./reset-celebration.mjs";
 const A = (id, session, extra = {}) => ({ id, name: id.toUpperCase(), installed: true, limits: [{ title: "Session", percent: session }], ...extra });
 
-assert.deepEqual(resetNotice({ name: "Claude Code" }, ["Session"]), { title: "Claude Code reset. Go cook.", body: "\u{1F4B8} Session limit reset" });
+assert.deepEqual(resetNotice({ name: "Claude Code" }, ["Session"]), { title: "Claude Code session reset, go cook.", body: "\u{1F4B8} Session limit reset" });
+assert.equal(resetNotice({ name: "X" }, ["Session", "Weekly"]).title, "X session and weekly reset, go cook.");
+assert.equal(resetNotice({ name: "Cursor Agent" }, ["Monthly", "Auto models Monthly"]).title, "Cursor Agent monthly reset, go cook.");
+assert.equal(resetNotice({ name: "Devin" }, ["Daily"]).title, "Devin daily reset, go cook.");
+assert.equal(resetNotice({ name: "Codex" }, ["Weekly"]).title, "Codex weekly reset, go cook.", "the example from the spec, for any agent");
 assert.equal(resetNotice({ name: "X" }, ["Session", "Weekly"]).body, "\u{1F4B8} Session and Weekly limits reset");
 const args = resetNotifyArgs({ title: "T", body: "B" }, "/p/cash-burst.svg");
 assert.deepEqual(args.slice(-2), ["T", "B"], "title then body last");
@@ -32,6 +36,17 @@ assert.equal(agents[0].resetAt, undefined); assert.equal(sent.length, 1);
 agents = [A("claude", 0)]; applyResets(agents, null, () => sent.push("y"), now); assert.equal(sent.length, 1); assert.equal(agents[0].resetAt, undefined);
 applyResets(null, [], () => {}); applyResets([], undefined, () => {});
 
+// ---- the window and its size travel with the flag
+const wk = [{ id: "codex", name: "Codex", limits: [{ title: "Weekly", percent: 0 }] }];
+applyResets(wk, [{ id: "codex", limits: [{ title: "Weekly", percent: 0.9 }] }], () => {}, 1000);
+assert.equal(wk[0].resetPhrase, "weekly"); assert.equal(wk[0].resetMagnitude, 1.25);
+const se = [{ id: "codex", name: "Codex", limits: [{ title: "Session", percent: 0 }] }];
+applyResets(se, [{ id: "codex", limits: [{ title: "Session", percent: 0.9 }] }], () => {}, 1000);
+assert.equal(se[0].resetMagnitude, 1, "a session reset is the unchanged baseline"); assert.ok(wk[0].resetMagnitude > se[0].resetMagnitude, "weekly is the bigger win");
+const mo = [{ id: "cursor", name: "Cursor Agent", limits: [{ title: "Monthly", percent: 0 }] }];
+const got = []; applyResets(mo, [{ id: "cursor", limits: [{ title: "Monthly", percent: 0.95 }] }], (a, w) => got.push(w), 1000);
+assert.deepEqual(got, [["Monthly"]], "a monthly meter celebrates now"); assert.equal(mo[0].resetMagnitude, 1.5);
+
 // ---- surprise vs scheduled: two separate celebrations
 const NOW2 = Date.parse("2026-11-21T12:00:00Z"); const future = (ms) => new Date(NOW2 + ms).toISOString();
 const G = (id, title, pct, resetsAt) => ({ id, name: id === "antigravity" ? "Antigravity" : id.toUpperCase(), installed: true, limits: [{ title, percent: pct, resetsAt }] });
@@ -41,19 +56,19 @@ applyResets(ag, [G("antigravity", "Claude/GPT Weekly", 0.99, future(3 * 86400e3)
 assert.deepEqual(events, [["antigravity", ["Claude/GPT Weekly"], "surprise"]]); assert.equal(ag[0].resetKind, "surprise"); assert.equal(ag[0].resetDetails[0].surprise, true);
 // Honest wording by default: we only know OUR meter dropped early
 const n = resetNotice(ag[0], ["Claude/GPT Weekly"], { kind: "surprise", details: ag[0].resetDetails });
-assert.equal(n.title, "Antigravity just reset early, go cook."); assert.doesNotMatch(n.title + n.body, /everyone/i, "no claim about everyone without a source");
+assert.equal(n.title, "Antigravity weekly reset came early, go cook."); assert.doesNotMatch(n.title + n.body, /everyone/i, "no claim about everyone without a source");
 assert.match(n.body, /^\u26A1 Claude\/GPT Weekly reset early - it wasn't due until .*\. No announcement found\.$/);
 // ...and only with a matching announcement may it say everyone was reset
 const ann = { id: "9", source: { author: "announcer", url: "https://x.com/announcer/status/9" } };
 const n2 = resetNotice(ag[0], ["Claude/GPT Weekly"], { kind: "surprise", details: ag[0].resetDetails, confirmed: ann });
-assert.equal(n2.title, "Google just reset everyone, go cook."); assert.match(n2.body, /Announced by @announcer \(via agyresets\.com\)$/);
+assert.equal(n2.title, "Google just reset everyone's weekly limit, go cook."); assert.match(n2.body, /Announced by @announcer \(via agyresets\.com\)$/);
 // a scheduled reset never gets the surprise copy, even if someone passes `confirmed`
-assert.equal(resetNotice({ id: "antigravity", name: "Antigravity" }, ["Gemini Session"], { kind: "scheduled", details: [], confirmed: ann }).title, "Antigravity reset. Go cook.");
+assert.equal(resetNotice({ id: "antigravity", name: "Antigravity" }, ["Gemini Session"], { kind: "scheduled", details: [], confirmed: ann }).title, "Antigravity session reset, go cook.");
 // Antigravity meter drops AFTER its reset time -> a normal, scheduled celebration
 events = []; ag = [G("antigravity", "Gemini Session", 0, future(5 * 3600e3))];
 applyResets(ag, [G("antigravity", "Gemini Session", 0.95, future(-60e3))], (a, w, info) => events.push(info.kind), NOW2);
 assert.deepEqual(events, ["scheduled"]); assert.equal(ag[0].resetKind, "scheduled");
-assert.equal(resetNotice({ id: "antigravity", name: "Antigravity" }, ["Gemini Session"], { kind: "scheduled", details: [] }).title, "Antigravity reset. Go cook.");
+assert.equal(resetNotice({ id: "antigravity", name: "Antigravity" }, ["Gemini Session"], { kind: "scheduled", details: [] }).title, "Antigravity session reset, go cook.");
 // Another agent's early drop (e.g. you spent a banked reset yourself) is NOT a surprise
 events = []; const cl = [G("claude", "Session", 0, future(5 * 3600e3))];
 applyResets(cl, [G("claude", "Session", 0.9, future(2 * 3600e3))], (a, w, info) => events.push(info.kind), NOW2);

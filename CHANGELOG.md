@@ -3,6 +3,12 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.5.0 - 2026-11-21
+- Every celebration names the window that reset: "Claude Code weekly reset, go cook.", and monthly or
+  daily for agents with those meters (which now celebrate too). A weekly reset gets a bit bigger burst
+  than a session one, a monthly one bigger still. The surprise Antigravity wording names it too.
+- A Test weekly reset button in the gear settings; a GIF of the surprise reset in the README.
+
 ## 1.4.0 - 2026-11-21
 - Friendly name: the plugin's display name, the settings footer and every notification now say
   **Cook Meter**, with the tagline "Know exactly when you can go cook." The plugin id and the repo

@@ -1,7 +1,7 @@
 // The reset celebration: when a session or weekly meter fell by more than 50
 // points since the last refresh, flag the agent (`resetAt`) so the panel flashes
 // its chip green and plays the confetti burst, and send one silent notification.
-import { classifyResets } from "./reset-detect.mjs";
+import { classifyResets, windowPhrase, magnitudeOf } from "./reset-detect.mjs";
 
 export const FLASH_MS = 10000;
 
@@ -12,8 +12,8 @@ export const FLASH_MS = 10000;
 // announcement (info.confirmed) may the message say everyone was reset.
 export const SURPRISE_AGENTS = {
   antigravity: {
-    honest: "Antigravity just reset early, go cook.",
-    confirmed: "Google just reset everyone, go cook.",
+    honest: (phrase) => `Antigravity ${phrase} reset came early, go cook.`,
+    confirmed: (phrase) => `Google just reset everyone's ${phrase} limit${phrase.includes(" and ") ? "s" : ""}, go cook.`,
   },
 };
 
@@ -28,12 +28,12 @@ export function resetNotice(agent, windows, info) {
     const due = early.map((d) => Date.parse(d.dueAt)).filter(Number.isFinite).sort((a, b) => a - b)[0];
     if (info.confirmed) {
       const by = info.confirmed.source?.author ? ` by @${info.confirmed.source.author}` : "";
-      return { title: copy.confirmed, body: `\u26A1 ${titles} reset early. Announced${by} (via agyresets.com)` };
+      return { title: copy.confirmed(windowPhrase(early.map((d) => d.title))), body: `\u26A1 ${titles} reset early. Announced${by} (via agyresets.com)` };
     }
-    return { title: copy.honest, body: `\u26A1 ${titles} reset early${due ? ` - it wasn't due until ${clock(new Date(due).toISOString())}` : ""}. No announcement found.` };
+    return { title: copy.honest(windowPhrase(early.map((d) => d.title))), body: `\u26A1 ${titles} reset early${due ? ` - it wasn't due until ${clock(new Date(due).toISOString())}` : ""}. No announcement found.` };
   }
   return {
-    title: `${agent.name} reset. Go cook.`,
+    title: `${agent.name} ${windowPhrase(windows)} reset, go cook.`,
     body: `\u{1F4B8} ${windows.join(" and ")} limit${windows.length > 1 ? "s" : ""} reset`,
   };
 }
@@ -70,6 +70,8 @@ export function applyResets(agents, prevAgents, notify, now = Date.now()) {
       a.resetAt = now;
       a.resetWindows = windows;
       a.resetKind = kind;
+      a.resetMagnitude = magnitudeOf(windows);
+      a.resetPhrase = windowPhrase(windows);
       a.resetDetails = details;
       notify(a, windows, { kind, details });
     } else if (before?.resetAt && now - before.resetAt < FLASH_MS + 5000) {
@@ -77,6 +79,8 @@ export function applyResets(agents, prevAgents, notify, now = Date.now()) {
       a.resetAt = before.resetAt;
       a.resetWindows = before.resetWindows || [];
       a.resetKind = before.resetKind || "scheduled";
+      a.resetMagnitude = before.resetMagnitude || 1;
+      a.resetPhrase = before.resetPhrase || "";
       a.resetDetails = before.resetDetails || [];
     }
   }
