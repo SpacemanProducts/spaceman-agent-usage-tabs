@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "spaceman.agent-usage-tabs",
-  "name": "Agent Usage Tabs",
-  "version": "1.2.1",
+  "name": "Cook Meter",
+  "version": "1.4.0",
   "author": "SpacemanProducts",
   "license": "MIT",
-  "description": "Per-agent tabs with session and weekly limits, tokens by model, and a collapsible daily history.",
+  "description": "Cook Meter: know exactly when you can go cook. A tab per AI coding agent with limits, resets and a celebration when a reset lands.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Agent Usage Tabs",
+    "displayName": "Cook Meter",
     "description": "One bar icon, one panel: a tab per installed AI coding agent.",
     "category": "AI",
     "aliases": [

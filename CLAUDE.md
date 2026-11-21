@@ -74,6 +74,13 @@ keeps the developer in flow:
   with a "Reset ready" badge was built, then reverted at the user's request (panel
   restored byte-for-byte from a backup). Only the desktop notification got the
   cash-burst picture. Don't re-add held celebrations or chip badges unasked.
+- **Surprise resets are Antigravity-only** (`SURPRISE_AGENTS` in `bin/reset-celebration.mjs`): a
+  meter that drops more than 50 points while its previous `resetsAt` is more than 5 minutes in
+  the future. No readable previous reset time means a normal reset, never a surprise. Normal and
+  surprise celebrations have separate pictures, sounds, colors and copy (`resetAssets`); the normal
+  one must stay exactly as it is. **Wording must stay honest:** the plugin only sees its own meter,
+  so the default is "Antigravity just reset early, go cook."; "Google just reset everyone" is allowed
+  only when `bin/agy-resets.mjs` finds a matching agyresets.com announcement (credit the source).
 - **Versioning:** bump `manifest.json` (patch = fix, minor = feature), add a line to
   `CHANGELOG.md`, and commit. The plugin folder is a local git repo with no remote.
 - **QML pitfalls that already broke the plugin:** never put non-Item children (e.g.

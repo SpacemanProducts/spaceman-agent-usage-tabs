@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs"; import path from "node:path"; import { fileURLToPath } from "node:url";
-import { applyResets, resetNotice, resetNotifyArgs, FLASH_MS } from "./reset-celebration.mjs";
+import { applyResets, resetNotice, resetNotifyArgs, resetAssets, SURPRISE_AGENTS, FLASH_MS } from "./reset-celebration.mjs";
 const A = (id, session, extra = {}) => ({ id, name: id.toUpperCase(), installed: true, limits: [{ title: "Session", percent: session }], ...extra });
 
 assert.deepEqual(resetNotice({ name: "Claude Code" }, ["Session"]), { title: "Claude Code reset. Go cook.", body: "\u{1F4B8} Session limit reset" });
@@ -32,9 +32,47 @@ assert.equal(agents[0].resetAt, undefined); assert.equal(sent.length, 1);
 agents = [A("claude", 0)]; applyResets(agents, null, () => sent.push("y"), now); assert.equal(sent.length, 1); assert.equal(agents[0].resetAt, undefined);
 applyResets(null, [], () => {}); applyResets([], undefined, () => {});
 
+// ---- surprise vs scheduled: two separate celebrations
+const NOW2 = Date.parse("2026-11-21T12:00:00Z"); const future = (ms) => new Date(NOW2 + ms).toISOString();
+const G = (id, title, pct, resetsAt) => ({ id, name: id === "antigravity" ? "Antigravity" : id.toUpperCase(), installed: true, limits: [{ title, percent: pct, resetsAt }] });
+// Antigravity meter drops long before its reset time -> SURPRISE
+let events = []; let ag = [G("antigravity", "Claude/GPT Weekly", 0.02, future(7 * 86400e3))];
+applyResets(ag, [G("antigravity", "Claude/GPT Weekly", 0.99, future(3 * 86400e3))], (a, w, info) => events.push([a.id, w, info.kind]), NOW2);
+assert.deepEqual(events, [["antigravity", ["Claude/GPT Weekly"], "surprise"]]); assert.equal(ag[0].resetKind, "surprise"); assert.equal(ag[0].resetDetails[0].surprise, true);
+// Honest wording by default: we only know OUR meter dropped early
+const n = resetNotice(ag[0], ["Claude/GPT Weekly"], { kind: "surprise", details: ag[0].resetDetails });
+assert.equal(n.title, "Antigravity just reset early, go cook."); assert.doesNotMatch(n.title + n.body, /everyone/i, "no claim about everyone without a source");
+assert.match(n.body, /^\u26A1 Claude\/GPT Weekly reset early - it wasn't due until .*\. No announcement found\.$/);
+// ...and only with a matching announcement may it say everyone was reset
+const ann = { id: "9", source: { author: "announcer", url: "https://x.com/announcer/status/9" } };
+const n2 = resetNotice(ag[0], ["Claude/GPT Weekly"], { kind: "surprise", details: ag[0].resetDetails, confirmed: ann });
+assert.equal(n2.title, "Google just reset everyone, go cook."); assert.match(n2.body, /Announced by @announcer \(via agyresets\.com\)$/);
+// a scheduled reset never gets the surprise copy, even if someone passes `confirmed`
+assert.equal(resetNotice({ id: "antigravity", name: "Antigravity" }, ["Gemini Session"], { kind: "scheduled", details: [], confirmed: ann }).title, "Antigravity reset. Go cook.");
+// Antigravity meter drops AFTER its reset time -> a normal, scheduled celebration
+events = []; ag = [G("antigravity", "Gemini Session", 0, future(5 * 3600e3))];
+applyResets(ag, [G("antigravity", "Gemini Session", 0.95, future(-60e3))], (a, w, info) => events.push(info.kind), NOW2);
+assert.deepEqual(events, ["scheduled"]); assert.equal(ag[0].resetKind, "scheduled");
+assert.equal(resetNotice({ id: "antigravity", name: "Antigravity" }, ["Gemini Session"], { kind: "scheduled", details: [] }).title, "Antigravity reset. Go cook.");
+// Another agent's early drop (e.g. you spent a banked reset yourself) is NOT a surprise
+events = []; const cl = [G("claude", "Session", 0, future(5 * 3600e3))];
+applyResets(cl, [G("claude", "Session", 0.9, future(2 * 3600e3))], (a, w, info) => events.push(info.kind), NOW2);
+assert.deepEqual(events, ["scheduled"], "only Antigravity has the surprise celebration");
+// A scheduled and a surprise reset in one refresh: the agent counts as a surprise, the details keep both
+ag = [{ id: "antigravity", name: "Antigravity", limits: [{ title: "Gemini Session", percent: 0, resetsAt: future(5 * 3600e3) }, { title: "Gemini Weekly", percent: 0, resetsAt: future(7 * 86400e3) }] }];
+applyResets(ag, [{ id: "antigravity", limits: [{ title: "Gemini Session", percent: 0.9, resetsAt: future(-1000) }, { title: "Gemini Weekly", percent: 0.9, resetsAt: future(86400e3) }] }], () => {}, NOW2);
+assert.equal(ag[0].resetKind, "surprise"); assert.deepEqual(ag[0].resetDetails.map((d) => d.surprise), [false, true]);
+// the kind survives a refresh that lands inside the flash
+const kept = [{ id: "antigravity", name: "Antigravity", limits: [] }]; applyResets(kept, ag, () => assert.fail("no second notice"), NOW2 + 4000);
+assert.equal(kept[0].resetKind, "surprise");
+// each kind has its own picture and sound
+assert.deepEqual(resetAssets("surprise"), { image: "surprise-burst.svg", sound: "jackpot.wav" }); assert.deepEqual(resetAssets("scheduled"), { image: "cash-burst.svg", sound: "cha-ching.wav" }); assert.deepEqual(resetAssets(undefined), resetAssets("scheduled"));
+assert.deepEqual(Object.keys(SURPRISE_AGENTS), ["antigravity"]);
+for (const f of ["notify/surprise-burst.svg", "notify/cash-burst.svg", "sounds/jackpot.wav", "sounds/cha-ching.wav"]) assert.ok(fs.existsSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", f)), `${f} is bundled`);
+
 // WIRING GUARD: the collector must actually call the features it advertises.
 // (A refactor once deleted the celebration block and nothing noticed.)
 const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "collect.mjs"), "utf8");
-for (const needle of ["applyResets(agents, prev?.agents", "resetNotifyArgs(", "resetNotice(", "playSound(SOUND_VOLUME)", "planLoginNotices(agents", "planInstallNotices(prev?.agents", "notifyHighUsage(agents)", "diag.flush()", "planLimitsOnly(out.limits)", "buildModels({"])
+for (const needle of ["applyResets(agents, prev?.agents", "resetNotifyArgs(", "resetAssets(", "corroborate(", "resetNotice(", "playSound(SOUND_VOLUME, ", "planLoginNotices(agents", "planInstallNotices(prev?.agents", "notifyHighUsage(agents)", "diag.flush()", "planLimitsOnly(out.limits)", "buildModels({"])
   assert.ok(src.includes(needle), `collect.mjs no longer calls: ${needle}`);
 console.log("reset-celebration: all tests passed");

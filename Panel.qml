@@ -7,7 +7,7 @@ import qs.Commons
 import qs.Ui
 import "chip-meters.js" as ChipMeters
 
-// Agent Usage Tabs. Display only: bin/collect.mjs writes data.json, this file
+// Cook Meter (plugin id spaceman.agent-usage-tabs). Display only: bin/collect.mjs writes data.json, this file
 // watches it. Written from scratch; shares no code or state with other plugins.
 Panel {
   id: root
@@ -105,23 +105,37 @@ Panel {
   property var testResets: ({})
   function resetTimeOf(a) { return a ? Math.max(Number(a.resetAt || 0), Number(testResets[a.id] || 0)) : 0 }
   function isFlashing(a) { return !!a && resetTimeOf(a) > 0 && flashNow - resetTimeOf(a) < flashMs }
-  // Fires the whole celebration on one agent's chip: confetti and the green
-  // flash (animation switch), the cha-ching (sound switch), and a notification.
-  function fireTest(id) {
+  // A test can fire either kind: "scheduled" (the normal 5-hour/weekly reset) or
+  // "surprise" (an unscheduled early reset). Each has its own look, sound and text.
+  property var testKinds: ({})
+  function resetKindOf(a) {
+    if (!a) return "scheduled"
+    var t = testKinds[a.id]
+    if (t && t.at >= Number(a.resetAt || 0)) return t.kind
+    return a.resetKind || "scheduled"
+  }
+  // Fires the whole celebration on one agent's chip: confetti and the flash
+  // (animation switch), the sound (sound switch), and a notification.
+  function fireTest(id, kind) {
+    var surprise = kind === "surprise"
     var target = id
     var found = false
     for (var i = 0; i < agents.length; i++) if (agents[i].id === id) found = true
-    if (!found && agent) target = agent.id           // Claude not shown: use the selected tab
+    if (!found && agent) target = agent.id           // that tab isn't shown: use the selected tab
     var name = "Agent"
     for (var j = 0; j < rawAgents.length; j++) if (rawAgents[j].id === target) name = rawAgents[j].name
-    var next = Object.assign({}, testResets); next[target] = Date.now()
-    flashNow = Date.now()
+    var now = Date.now()
+    var next = Object.assign({}, testResets); next[target] = now
+    var kinds = Object.assign({}, testKinds); kinds[target] = { at: now, kind: surprise ? "surprise" : "scheduled" }
+    flashNow = now
+    testKinds = kinds
     testResets = next
-    if (resetSound) playTest()
-    testNotifier.command = ["notify-send", "-a", "Agent Usage Tabs", "-u", "normal", "-i", "emblem-ok-symbolic",
+    if (resetSound) playTest(surprise ? "jackpot.wav" : "")
+    testNotifier.command = ["notify-send", "-a", "Cook Meter", "-u", "normal", "-i", "emblem-ok-symbolic",
       "-h", "boolean:suppress-sound:true", "-h", "string:category:presence",
-      "-h", "string:image-path:" + root.pluginDir + "/notify/cash-burst.svg",
-      name + " reset. Go cook.", "\u{1F4B8} Test celebration"]
+      "-h", "string:image-path:" + root.pluginDir + (surprise ? "/notify/surprise-burst.svg" : "/notify/cash-burst.svg"),
+      surprise ? "Antigravity just reset early, go cook." : name + " reset. Go cook.",
+      surprise ? "\u26A1 Test: a meter reset before it was due. No announcement found." : "\u{1F4B8} Test celebration"]
     testNotifier.running = true
   }
   readonly property bool anyFlashing: {
@@ -296,8 +310,10 @@ Panel {
     id: testNotifier
     running: false
   }
-  function playTest() {
-    soundTester.command = ["node", root.pluginDir + "/bin/play-sound.mjs", String(root.resetVolume)]
+  function playTest(clip) {
+    var cmd = ["node", root.pluginDir + "/bin/play-sound.mjs", String(root.resetVolume)]
+    if (clip) cmd.push(root.pluginDir + "/sounds/" + clip)
+    soundTester.command = cmd
     soundTester.running = true
   }
 
@@ -337,6 +353,8 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { root.refreshNow(); return "ok" }
     function testAutoOpen(): string { root.autoCelebrate("claude"); root.fireTest("claude"); return "ok" }
+    function testSurprise(): string { root.fireTest("antigravity", "surprise"); return "ok" }
+    function testSurpriseAutoOpen(): string { root.autoCelebrate("antigravity"); root.fireTest("antigravity", "surprise"); return "ok" }
     function testCelebration(): string { root.fireTest("claude"); return "ok" }
     function settings(): string { root.settingsOpen = !root.settingsOpen; return root.settingsOpen ? "open" : "closed" }
     function next(): string { root.selectIndex(root.selectedIndex + 1); return "ok" }
@@ -522,14 +540,16 @@ Panel {
                 required property int index
                 readonly property bool selected: index === root.selectedIndex
                 readonly property bool flashing: root.isFlashing(modelData)
+                readonly property bool surprise: root.resetKindOf(modelData) === "surprise"
+                readonly property color flashColor: surprise ? "#fbbc05" : root.green
                 // True for the first 3 s after the collector flags a reset.
-                readonly property bool celebrating: root.resetTimeOf(modelData) > 0 && root.flashNow - root.resetTimeOf(modelData) < 3000
+                readonly property bool celebrating: root.resetTimeOf(modelData) > 0 && root.flashNow - root.resetTimeOf(modelData) < (surprise ? 4800 : 3000)
                 // Outer border = session meter, inner fill = weekly meter
                 // (an agent with one meter uses it for both). Gray = no data.
                 readonly property var meters: ChipMeters.chipMeters(modelData)
                 readonly property color gray: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
-                readonly property color sessionTint: flashing ? root.green : (meters.session < 0 ? gray : root.meterColor(meters.session))
-                readonly property color weeklyTint: flashing ? root.green : (meters.weekly < 0 ? gray : root.meterColor(meters.weekly))
+                readonly property color sessionTint: flashing ? flashColor : (meters.session < 0 ? gray : root.meterColor(meters.session))
+                readonly property color weeklyTint: flashing ? flashColor : (meters.weekly < 0 ? gray : root.meterColor(meters.weekly))
                 width: tabLabel.implicitWidth + Style.space(22)
                 height: tabLabel.implicitHeight + Style.space(14)
                 radius: Style.cornerRadius
@@ -578,14 +598,31 @@ Panel {
                   property real t: 0
                   visible: t > 0 && t < 1
                   onActiveChanged: if (active) { t = 0; confettiAnim.restart() }
-                  NumberAnimation { id: confettiAnim; target: confetti; property: "t"; from: 0; to: 1; duration: 3000 }
+                  NumberAnimation { id: confettiAnim; target: confetti; property: "t"; from: 0; to: 1; duration: chip.surprise ? 4800 : 3000 }
+
+                  // Surprise only: two expanding gold shockwave rings.
+                  Repeater {
+                    model: chip.surprise ? 2 : 0
+                    Rectangle {
+                      required property int index
+                      readonly property real tt: Math.max(0, Math.min(1, (confetti.t - index * 0.16) / 0.5))
+                      anchors.centerIn: parent
+                      width: Style.space(18) + tt * Style.space(270)
+                      height: width
+                      radius: width / 2
+                      color: "transparent"
+                      border.width: Math.max(1, Style.space(4) * (1 - tt))
+                      border.color: "#ffd700"
+                      opacity: tt > 0 && tt < 1 ? (1 - tt) * 0.9 : 0
+                    }
+                  }
 
                   Repeater {
-                    model: 28
+                    model: chip.surprise ? 80 : 28
                     Item {
                       required property int index
                       readonly property real ang: index * 2.399963 // golden angle spreads them evenly
-                      readonly property real speed: Style.space(60) + ((index * 37) % 70) * Style.space(1)
+                      readonly property real speed: (Style.space(60) + ((index * 37) % 70) * Style.space(1)) * (chip.surprise ? 1.8 : 1)
                       readonly property real e: 1 - Math.pow(1 - confetti.t, 2)
                       readonly property bool sparkle: index % 4 === 0
                       x: Math.cos(ang) * speed * e
@@ -598,14 +635,14 @@ Panel {
                         width: Style.space(5 + index % 3)
                         height: Style.space(8 + index % 4)
                         radius: 1
-                        color: ["#4caf50", "#f2a900", "#ffffff", "#7fdc8a", "#ffd54f", "#e5484d"][index % 6]
+                        color: (chip.surprise ? ["#ffd700", "#ff3b30", "#ff9500", "#ffd700", "#34c759", "#00c7be", "#0a84ff", "#bf5af2", "#ffffff", "#ffd700"] : ["#4caf50", "#f2a900", "#ffffff", "#7fdc8a", "#ffd54f", "#e5484d"])[index % (chip.surprise ? 10 : 6)]
                       }
                       Text {
                         visible: parent.sparkle
                         anchors.centerIn: parent
                         textFormat: Text.PlainText
                         text: "\u2726"
-                        color: ["#ffffff", "#ffd54f", "#7fdc8a"][index % 3]
+                        color: (chip.surprise ? ["#ffffff", "#ffd700", "#fff0a0"] : ["#ffffff", "#ffd54f", "#7fdc8a"])[index % 3]
                         font.pixelSize: Style.font.title
                       }
                     }
@@ -769,6 +806,34 @@ Panel {
                   onClicked: root.fireTest("claude")
                 }
               }
+              Rectangle {
+                id: surpriseButton
+                anchors.left: testButton.right
+                anchors.leftMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                width: surpriseLabel.implicitWidth + Style.space(24)
+                height: testButton.height
+                radius: Style.cornerRadius
+                color: surpriseArea.containsMouse ? root.track : "transparent"
+                border.width: 1
+                border.color: root.foreground
+                Text {
+                  id: surpriseLabel
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: "\u26a1  Test surprise reset"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                MouseArea {
+                  id: surpriseArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.fireTest("antigravity", "surprise")
+                }
+              }
             }
 
             PanelSectionHeader { width: parent.width; text: "TABS" }
@@ -798,7 +863,7 @@ Panel {
               visible: root.pluginVersion !== ""
               width: parent.width
               textFormat: Text.PlainText
-              text: "Agent Usage Tabs v" + root.pluginVersion
+              text: "Cook Meter v" + root.pluginVersion
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption

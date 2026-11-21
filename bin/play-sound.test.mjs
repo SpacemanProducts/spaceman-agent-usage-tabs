@@ -13,6 +13,14 @@ let peak = 0; for (let i = 44; i + 1 < b.length; i += 2) peak = Math.max(peak, M
 assert.ok(peak > 8000 && peak < 32767, "audible but not clipping");
 assert.ok(b.length < 200 * 1024, "small enough to bundle");
 
+// The surprise fanfare is held to the same limits
+for (const f of ["../sounds/jackpot.wav"]) {
+  const j = fs.readFileSync(new URL(f, import.meta.url));
+  const jr = j.readUInt32LE(24), jb = j.readUInt16LE(34), jc = j.readUInt16LE(22), jl = j.readUInt32LE(40);
+  const js = jl / (jr * jc * jb / 8); assert.ok(js > 0.3 && js < 2, `jackpot duration ${js}s must be under 2 s`);
+  let jp = 0; for (let i = 44; i + 1 < j.length; i += 2) jp = Math.max(jp, Math.abs(j.readInt16LE(i))); assert.ok(jp > 8000 && jp < 32767, "jackpot is audible and not clipping");
+}
+
 // Player choice and volume mapping
 const has = (...names) => (n) => names.includes(n);
 assert.deepEqual(buildPlayCommand(has("pw-play", "paplay"), "f.wav", 60), ["pw-play", "--volume=0.60", "f.wav"]);

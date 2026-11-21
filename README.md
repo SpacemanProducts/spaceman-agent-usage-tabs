@@ -1,11 +1,12 @@
 # Agent Usage Tabs
 
-> **Goal:** a dashboard for developers in flow state. One glance at the bar
-> shows every agent's limits, and one click fixes a wall without leaving their
-> work. Design calls favor what keeps the developer in flow: glanceable,
-> quiet, self-maintaining, and honest about missing data.
+**Cook Meter.** Know exactly when you can go cook.
 
-An [Omarchy](https://omarchy.org) bar plugin that shows how much of your AI coding
+> **The idea:** a dashboard for developers in flow state. One glance at the bar shows every
+> agent's limits, and a celebration fires the moment a reset lands.
+
+Cook Meter is an [Omarchy](https://omarchy.org) bar plugin (its plugin id and repo are still
+`spaceman-agent-usage-tabs`, so existing installs and links keep working) that shows how much of your AI coding
 agents' usage limits you have used: one bar icon, one panel, and a tab for every agent
 you have installed.
 
@@ -99,11 +100,28 @@ local until you sign in).
   focus**), confetti bursts over its chip while the chip flashes green, a short cha-ching
   plays, and a desktop notification with a cash-burst picture says "*Agent* reset. Go cook."
   The panel closes itself after about 5 seconds.
+- **Surprise resets (Antigravity):** if an Antigravity meter drops by more than 50 points
+  *before its recorded reset time has arrived* (by more than 5 minutes), it was reset early,
+  and that gets its own celebration, kept separate from the normal 5-hour and weekly ones: a
+  much bigger burst of gold and rainbow confetti with two gold shockwave rings over the chip,
+  a longer animation, a gold chip flash, a jackpot sound (a coin cascade under a rising
+  fanfare) instead of the cha-ching, and its own notification picture.
+  **The wording stays honest.** The plugin can only see your own meters, so by default the
+  message says what it knows: "Antigravity just reset early, go cook." Only if
+  [agyresets.com](https://agyresets.com/) (a free tracker of the Antigravity team's reset
+  announcements; not affiliated with Google) has an announcement from about that time that
+  covers your plan and that meter does it say "Google just reset everyone, go cook.", crediting
+  the announcer. If the lookup finds nothing or fails, the honest wording stands.
+  Agyresets is asked only when a surprise is detected, and nothing about you is sent. A drop
+  after the reset time is a normal reset. A surprise is never claimed without a readable
+  previous reset time, and other agents never get one (an early drop on them is more likely
+  you spending a banked reset yourself).
 
 **The gear icon** in the panel header opens a small settings view (shown below) with
 switches for hiding uninstalled agents, showing unused models, the reset animation, opening
-the panel on reset, the reset sound (with a volume control), a **Test celebration** button
-that replays it any time, and a switch for every tab.
+the panel on reset, the reset sound (with a volume control), a **Test celebration** button and
+a **Test surprise reset** button that replay each celebration any time, and a switch for
+every tab.
 
 ![The gear settings view](docs/settings.png)
 
@@ -209,10 +227,14 @@ that is truly gone. Edits apply on the next refresh, and a malformed file is ign
 ## Privacy and safety
 
 - Logins are read-only. Each token is sent only to its own vendor's endpoint listed above.
-- Nothing is sent anywhere else: no telemetry, no analytics.
+- Nothing is sent anywhere else: no telemetry, no analytics. The one exception is the
+  agyresets.com lookup above, made only when a surprise Antigravity reset is detected, with
+  a plain request that carries nothing about you. Reset announcements come from
+  [agyresets.com](https://agyresets.com/); please credit it if you reuse that data.
 - Everything the plugin keeps is in `~/.local/state/omarchy/agent-usage-tabs/`.
-- The cha-ching sound and the cash-burst notification picture are self-made (see
-  `sounds/make-cha-ching.py` and `notify/cash-burst.svg`) and released to the public domain.
+- The sounds (the cha-ching and the surprise jackpot) and the notification pictures (the
+  cash-burst and the surprise lightning-burst) are self-made (see `sounds/make-*.py` and
+  `notify/*.svg`) and released to the public domain.
 
 ## Report a problem
 

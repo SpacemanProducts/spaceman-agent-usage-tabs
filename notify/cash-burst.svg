@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <!-- Self-made cash-burst icon for Agent Usage Tabs reset notifications. CC0 / public domain. -->
+  <!-- Self-made cash-burst icon for Cook Meter reset notifications. CC0 / public domain. -->
   <defs>
     <radialGradient id="glow" cx="50%" cy="50%" r="50%">
       <stop offset="0" stop-color="#FFF6B0"/><stop offset="0.55" stop-color="#FFC928"/><stop offset="1" stop-color="#FF8A00"/>

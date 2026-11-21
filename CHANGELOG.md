@@ -3,6 +3,23 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.4.0 - 2026-11-21
+- Friendly name: the plugin's display name, the settings footer and every notification now say
+  **Cook Meter**, with the tagline "Know exactly when you can go cook." The plugin id and the repo
+  name (`spaceman-agent-usage-tabs`) are unchanged, so installs and links don't break.
+- The README intro now says the idea in one line: a dashboard for developers in flow state, with a
+  celebration when a reset lands.
+
+## 1.3.0 - 2026-11-21
+- Surprise resets: an Antigravity meter that drops by more than 50 points before its recorded
+  reset time (more than 5 minutes early) gets its own celebration, separate from the normal
+  5-hour and weekly ones: a much bigger gold-and-rainbow burst with shockwave rings, a longer
+  animation, a gold chip flash, a jackpot sound, and its own notification picture.
+- Honest wording: the message says "Antigravity just reset early, go cook." and only says
+  "Google just reset everyone, go cook." when agyresets.com has a matching announcement (looked
+  up only when a surprise is detected; offline or no match keeps the honest wording).
+- A **Test surprise reset** button next to Test celebration in the gear settings.
+
 ## 1.2.1 - 2026-11-21
 - Prepared for public release: README rewritten to match what the plugin does today, new
   screenshots, the MIT LICENSE and a Ko-fi funding file template, account-specific notes

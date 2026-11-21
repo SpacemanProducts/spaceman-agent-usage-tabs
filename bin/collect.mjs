@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Agent Usage Tabs collector. Writes ONE file, data.json, in this plugin's own
+// Cook Meter collector (plugin id spaceman.agent-usage-tabs). Writes ONE file, data.json, in this plugin's own
 // state directory. Nothing here reads or writes another plugin's files.
 //   claude        -> Anthropic OAuth usage endpoint + ~/.claude transcripts
 //   grok          -> bin/grok.mjs, from the Grok CLI login (~/.grok/auth.json)
@@ -11,7 +11,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseClaudeLimits, parseClaudeResets } from "./claude-limits.mjs";
-import { applyResets, resetNotice, resetNotifyArgs } from "./reset-celebration.mjs";
+import { applyResets, resetNotice, resetNotifyArgs, resetAssets } from "./reset-celebration.mjs";
+import { fetchResets, corroborate } from "./agy-resets.mjs";
 import { playSound } from "./play-sound.mjs";
 import { planLimitsOnly } from "./plan-limits.mjs";
 import { codexResets } from "./codex-resets.mjs";
@@ -283,14 +284,14 @@ for (const a of AGENTS) {
   const INSTALLS = path.join(OUT_DIR, "agent-installs.json");
   const inst = planInstallNotices(prev?.agents, agents, settings, readJson(INSTALLS));
   for (const a of inst.notify) {
-    spawnSync("notify-send", ["-a", "Agent Usage Tabs", "-u", "normal", "-i", "emblem-ok-symbolic", "-h", "boolean:suppress-sound:true",
+    spawnSync("notify-send", ["-a", "Cook Meter", "-u", "normal", "-i", "emblem-ok-symbolic", "-h", "boolean:suppress-sound:true",
       `${a.name} is now available`, "It's installed - its tab has been added."], { env: ENV, timeout: 5000 });
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(INSTALLS, JSON.stringify(inst.notified) + "\n", { mode: 0o600 });
   const { notify, seen } = planLoginNotices(agents, settings, readJson(LOGINS));
   for (const a of notify) {
-    spawnSync("notify-send", ["-a", "Agent Usage Tabs", "-u", "normal", "-i", "emblem-ok-symbolic", "-h", "boolean:suppress-sound:true",
+    spawnSync("notify-send", ["-a", "Cook Meter", "-u", "normal", "-i", "emblem-ok-symbolic", "-h", "boolean:suppress-sound:true",
       `${a.name} is now available`, "You're signed in. Its tab is hidden - turn it on in the gear settings."], { env: ENV, timeout: 5000 });
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -317,7 +318,7 @@ function notifyHighUsage(list) {
   for (const { agent: a, limit: l, key } of toSend) {
     const pct = Math.round(l.percent * 100);
     const body = [`${l.title} limit at ${pct}%`, untilReset(l.resetsAt)].filter(Boolean).join(" — ");
-    const r = spawnSync("notify-send", ["-a", "Agent Usage Tabs", "-u", "critical", "-i", "dialog-warning", "-h", "boolean:suppress-sound:true", `${a.name}: ${pct}% used`, body], { env: ENV, timeout: 5000 });
+    const r = spawnSync("notify-send", ["-a", "Cook Meter", "-u", "critical", "-i", "dialog-warning", "-h", "boolean:suppress-sound:true", `${a.name}: ${pct}% used`, body], { env: ENV, timeout: 5000 });
     if (r.status === 0) memory[key] = Date.now(); // a failed send is not remembered, so it retries
   }
   fs.writeFileSync(NOTIFIED, JSON.stringify(memory) + "\n", { mode: 0o600 });
@@ -328,13 +329,23 @@ function notifyHighUsage(list) {
 // Volume 0-100 comes from the panel (0 when the sound switch is off); run by
 // hand it defaults to 60. One cha-ching per run, however many agents reset.
 const SOUND_VOLUME = Number.isFinite(argAfter("--volume")) ? argAfter("--volume") : 60;
-let resetHappened = false;
-applyResets(agents, prev?.agents, (a, windows) => {
+const pendingResets = [];
+applyResets(agents, prev?.agents, (a, windows, info) => pendingResets.push({ a, windows, info }));
+let resetHappened = false, surpriseHappened = false, announcements = null;
+for (const { a, windows, info } of pendingResets) {
   resetHappened = true;
-  const n = resetNotice(a, windows);
-  spawnSync("notify-send", resetNotifyArgs(n, path.join(HERE, "..", "notify", "cash-burst.svg")), { env: ENV, timeout: 5000 });
-});
-if (resetHappened && SOUND_VOLUME > 0) playSound(SOUND_VOLUME);
+  if (info.kind === "surprise") {
+    surpriseHappened = true;
+    // Ask agyresets.com (once per run, only now) whether the Antigravity team announced it.
+    announcements ??= await fetchResets({ now: Date.now() });
+    info.confirmed = corroborate(announcements, info.details, Date.now(), a.plan);
+    a.resetConfirmed = !!info.confirmed;
+  }
+  const assets = resetAssets(info.kind);               // surprise resets get their own picture and sound
+  const n = resetNotice(a, windows, info);
+  spawnSync("notify-send", resetNotifyArgs(n, path.join(HERE, "..", "notify", assets.image)), { env: ENV, timeout: 5000 });
+}
+if (resetHappened && SOUND_VOLUME > 0) playSound(SOUND_VOLUME, path.join(HERE, "..", "sounds", resetAssets(surpriseHappened ? "surprise" : "scheduled").sound));
 
 notifyHighUsage(agents);
 
