@@ -1,0 +1,21 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import vm from "node:vm";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "chip-meters.js"), "utf8").replace(/^\.pragma library\s*$/m, "");
+const ctx = {}; vm.createContext(ctx); vm.runInContext(src, ctx);
+const cm = (limits) => JSON.parse(JSON.stringify(ctx.chipMeters({ limits })));
+const L = (title, percent) => ({ title, percent });
+
+assert.deepEqual(cm([L("Session", 0.92), L("Weekly", 0.38)]), { session: 0.92, weekly: 0.38 }, "Claude: both distinct");
+assert.deepEqual(cm([L("Claude/GPT Weekly", 0.99)]), { session: 0.99, weekly: 0.99 }, "one meter -> both");
+assert.deepEqual(cm([L("Session", 0.5)]), { session: 0.5, weekly: 0.5 }, "session only -> both");
+assert.deepEqual(cm([L("Monthly", 0.2)]), { session: 0.2, weekly: 0.2 }, "monthly only -> both");
+assert.deepEqual(cm([L("Daily", 0.1), L("Weekly", 0.3), L("Prompt credits", 0.9)]), { session: 0.3, weekly: 0.3 }, "weekly present, no session: weekly for both; credits ignored");
+assert.deepEqual(cm([L("Monthly", 0.1), L("Auto models Monthly", 0.6), L("Named models Monthly", 0.3)]), { session: 0.6, weekly: 0.6 }, "only other meters: fullest for both");
+assert.deepEqual(cm([L("Gemini Session", 0.2), L("Gemini Weekly", 0.7), L("Claude/GPT Session", 0.4), L("Claude/GPT Weekly", 0.1)]), { session: 0.4, weekly: 0.7 }, "fullest of each kind");
+assert.deepEqual(cm([]), { session: -1, weekly: -1 }, "no meters -> no data");
+assert.deepEqual(cm([L("Session", "x"), L("Weekly", null)]), { session: -1, weekly: -1 }, "non-numeric ignored");
+assert.deepEqual(JSON.parse(JSON.stringify(ctx.chipMeters(null))), { session: -1, weekly: -1 });
+console.log("chip-meters: all tests passed");

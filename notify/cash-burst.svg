@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Self-made cash-burst icon for Agent Usage Tabs reset notifications. CC0 / public domain. -->
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#FFF6B0"/><stop offset="0.55" stop-color="#FFC928"/><stop offset="1" stop-color="#FF8A00"/>
+    </radialGradient>
+    <linearGradient id="note" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#49C988"/><stop offset="1" stop-color="#1F8A52"/>
+    </linearGradient>
+  </defs>
+  <polygon points="64.0,1.0 70.3,28.5 85.5,4.8 82.0,32.8 104.5,15.7 91.6,40.9 118.6,32.5 97.8,51.7 126.0,53.1 100.0,64.0 126.0,74.9 97.8,76.3 118.6,95.5 91.6,87.1 104.5,112.3 82.0,95.2 85.5,123.2 70.3,99.5 64.0,127.0 57.7,99.5 42.5,123.2 46.0,95.2 23.5,112.3 36.4,87.1 9.4,95.5 30.2,76.3 2.0,74.9 28.0,64.0 2.0,53.1 30.2,51.7 9.4,32.5 36.4,40.9 23.5,15.7 46.0,32.8 42.5,4.8 57.7,28.5" fill="url(#glow)"/>
+  <polygon points="71.7,15.6 73.8,35.6 87.8,21.1 82.9,40.7 101.0,31.9 89.7,48.5 109.7,46.4 93.4,58.3 113.0,63.1 93.6,68.7 110.3,80.0 90.2,78.5 102.1,94.8 83.7,86.6 89.2,106.0 74.8,92.0 73.3,112.1 64.5,94.0 56.3,112.4 54.2,92.4 40.2,106.9 45.1,87.3 27.0,96.1 38.3,79.5 18.3,81.6 34.6,69.7 15.0,64.9 34.4,59.3 17.7,48.0 37.8,49.5 25.9,33.2 44.3,41.4 38.8,22.0 53.2,36.0 54.7,15.9 63.5,34.0" fill="#FFF2A8" opacity="0.55"/>
+  <g transform="rotate(-8 64 66)">
+    <rect x="21" y="42" width="86" height="48" rx="7" fill="url(#note)" stroke="#146B3C" stroke-width="3"/>
+    <rect x="27" y="48" width="74" height="36" rx="4" fill="none" stroke="#B6F2CE" stroke-width="1.6"/>
+    <circle cx="64" cy="66" r="15" fill="#146B3C"/>
+    <text x="64" y="75" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-weight="bold" font-size="24" fill="#E9FFF2">$</text>
+    <circle cx="34" cy="55" r="3" fill="#B6F2CE"/><circle cx="94" cy="77" r="3" fill="#B6F2CE"/>
+  </g>
+  <circle cx="15" cy="31" r="8" fill="#FFC928" stroke="#B87800" stroke-width="2"/><circle cx="15" cy="31" r="5.0" fill="none" stroke="#FFE680" stroke-width="1.4"/><circle cx="113" cy="26" r="7" fill="#FFC928" stroke="#B87800" stroke-width="2"/><circle cx="113" cy="26" r="4.3" fill="none" stroke="#FFE680" stroke-width="1.4"/><circle cx="111" cy="101" r="8" fill="#FFC928" stroke="#B87800" stroke-width="2"/><circle cx="111" cy="101" r="5.0" fill="none" stroke="#FFE680" stroke-width="1.4"/><circle cx="17" cy="99" r="7" fill="#FFC928" stroke="#B87800" stroke-width="2"/><circle cx="17" cy="99" r="4.3" fill="none" stroke="#FFE680" stroke-width="1.4"/>
+  <polygon points="34,6 36.24,11.76 42,14 36.24,16.240000000000002 34,22 31.759999999999998,16.240000000000002 26,14 31.759999999999998,11.76" fill="#FFFFFF"/><polygon points="101,6 102.68,10.32 107,12 102.68,13.68 101,18 99.32,13.68 95,12 99.32,10.32" fill="#FFFFFF"/><polygon points="120,59 121.96,64.04 127,66 121.96,67.96 120,73 118.04,67.96 113,66 118.04,64.04" fill="#FFFFFF"/><polygon points="7,60 8.68,64.32 13,66 8.68,67.68 7,72 5.32,67.68 1,66 5.32,64.32" fill="#FFFFFF"/><polygon points="64,113 65.68,117.32 70,119 65.68,120.68 64,125 62.32,120.68 58,119 62.32,117.32" fill="#FFFFFF"/>
+</svg>

@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "id": "spaceman.agent-usage-tabs",
+  "name": "Agent Usage Tabs",
+  "version": "1.0.0",
+  "author": "spaceman",
+  "license": "MIT",
+  "description": "Per-agent tabs with session and weekly limits, tokens by model, and a collapsible daily history.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Agent Usage Tabs",
+    "description": "One bar icon, one panel: a tab per installed AI coding agent.",
+    "category": "AI",
+    "aliases": [
+      "agent-usage-tabs"
+    ],
+    "allowMultiple": false,
+    "defaults": {
+      "refreshIntervalSec": 300,
+      "tabOrder": "claude,antigravity,grok,codex,copilot,cursor,opencode,kimi,kiro,devin,amp,hermes",
+      "notifyThreshold": 95,
+      "showUnusedModels": true,
+      "hideUninstalledAgents": true,
+      "resetAnimation": true,
+      "resetSound": true,
+      "resetVolume": 60,
+      "autoOpenOnReset": true
+    },
+    "schema": [
+      {
+        "key": "tabOrder",
+        "type": "string",
+        "label": "Tab order",
+        "defaultValue": "claude,antigravity,grok,codex,copilot,cursor,opencode,kimi,kiro,devin,amp,hermes",
+        "description": "Comma-separated agent ids, in the order you want the tabs. Ids you leave out are appended in default order; no tab is ever hidden. Ids: claude, antigravity, grok, codex, copilot, cursor, opencode, kimi, kiro, devin, amp, hermes."
+      },
+      {
+        "key": "notifyThreshold",
+        "type": "integer",
+        "label": "Notify above (%)",
+        "min": 50,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 95,
+        "description": "Send a desktop notification when any agent's session or weekly limit passes this percentage."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 60,
+        "defaultValue": 300
+      },
+      {
+        "key": "showUnusedModels",
+        "type": "boolean",
+        "label": "Show unused models",
+        "defaultValue": true,
+        "description": "List every model an agent can use, dimmed when unused or marked unavailable. Turn off to list only models with recent use. (Older key showAllClaudeModels still works.)"
+      },
+      {
+        "key": "hideUninstalledAgents",
+        "type": "boolean",
+        "label": "Hide agents that aren't installed",
+        "defaultValue": true,
+        "description": "Only show tabs for agent CLIs found on this machine. Also available behind the gear icon in the panel, where the choice is saved to the plugin's own settings.json."
+      },
+      {
+        "key": "resetAnimation",
+        "type": "boolean",
+        "label": "Reset animation",
+        "defaultValue": true,
+        "description": "A short confetti burst over an agent's tab chip when one of its session or weekly meters resets."
+      },
+      {
+        "key": "resetSound",
+        "type": "boolean",
+        "label": "Reset sound",
+        "defaultValue": true,
+        "description": "Play a short cha-ching when a session or weekly meter resets."
+      },
+      {
+        "key": "resetVolume",
+        "type": "integer",
+        "label": "Reset sound volume (%)",
+        "min": 0,
+        "max": 100,
+        "step": 10,
+        "defaultValue": 60
+      },
+      {
+        "key": "autoOpenOnReset",
+        "type": "boolean",
+        "label": "Open panel on reset",
+        "defaultValue": true,
+        "description": "When a session or weekly meter resets, briefly open the panel on that agent's tab (without taking keyboard focus) and close it after about 5 seconds."
+      }
+    ]
+  }
+}
