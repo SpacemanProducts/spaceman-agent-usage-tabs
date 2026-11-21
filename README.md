@@ -28,16 +28,59 @@ collapsible daily history.
   (`resets in 3d 2h · Tue Nov 24, 3:12 AM`) whenever the agent reports one.
 - **Resets line** (Claude and Codex): banked limit resets and when they
   expire, shown only when the account has them.
-- **Notifications** when any agent's session or weekly limit passes 95%
-  (once per window), and a **reset celebration**: when a session or weekly
-  meter drops by more than 50 points between refreshes, that agent's tab
-  chip flashes green for 10 seconds and a quiet notification names the agent.
-  Notifications are sent with sound suppressed.
+- **Notifications** when any agent's session or weekly limit passes 95% (once per
+  window).
+- **Reset celebration**: when a session or weekly meter drops by more than 50
+  points between refreshes, the panel opens on that agent's tab (without taking
+  keyboard focus), confetti bursts over its chip while the chip flashes green, a
+  short cha-ching plays, a desktop notification with a cash-burst picture says
+  "<Agent> reset. Go cook.", and the panel closes itself after about 5 seconds.
+  Each part has a switch in the gear settings, there is a volume control, and a
+  **Test celebration** button replays it any time.
 
 Supported agents: Claude Code, Antigravity, Grok, Codex, Copilot, Cursor Agent,
 OpenCode, Kimi, Kiro, Devin, Amp, Hermes. A tab appears only if the CLI is
 installed. Kiro and Amp have no usage source yet, so their tabs show a status
 line.
+
+## Quick start (new to Omarchy?)
+
+[Omarchy](https://omarchy.org) is a Linux desktop with a bar across the top of the
+screen. This plugin adds an icon to that bar; click it to see how much of each
+AI coding tool's usage limit you have used (see the screenshot above).
+
+**1. Install it - one command, in a terminal:**
+
+```
+omarchy plugin add https://github.com/SpacemanProducts/spaceman.agent-usage-tabs.git --enable
+```
+
+<!-- Update this URL once the repo is published. Until then, from a local copy of
+     the folder (it is a git repo): omarchy plugin add /path/to/spaceman.agent-usage-tabs --enable -->
+
+**2. Click the robot icon in the bar.** Each tool you have installed gets a tab.
+Tools you haven't installed are hidden, and a new one shows up on its own the next
+time the panel refreshes (every 5 minutes).
+
+**3. Sign in to the tools you want to see.** A tab for a tool you aren't signed in
+to says so in one line. These need a login first:
+
+| Tool | Sign in with |
+|---|---|
+| Claude Code | `claude` (then `/login`) |
+| Antigravity | `agy` |
+| Grok | `grok login` |
+| Codex | `codex login` |
+| Copilot | `copilot login`, and `gh auth login` for the usage numbers |
+| Cursor Agent | `agent login` |
+| Kimi | `kimi login` |
+| Kiro | `kiro-cli login` |
+| Devin | `devin auth login` |
+| Amp | `amp login` |
+| Hermes | optional: sign in to Nous Portal with `hermes model` |
+
+**No login needed:** OpenCode (its free models just work) and Hermes (it shows as
+free and local until you sign in).
 
 ## Requirements
 
@@ -51,7 +94,7 @@ line.
 
 ## Install
 
-This plugin is installed from a local folder. Nothing is published anywhere.
+The quick start above is the short way. To install by hand from a local folder instead (nothing here is published anywhere):
 
 1. Put the folder at `~/.config/omarchy/plugins/spaceman.agent-usage-tabs/`
    (it contains `manifest.json`, `Panel.qml`, `bin/`).
@@ -91,6 +134,19 @@ Set these in the plugin's entry in `~/.config/omarchy/shell.json`:
 | `refreshIntervalSec` | 300 | How often the collector runs. Minimum 60. |
 | `notifyThreshold` | 95 | Notify when a session or weekly limit passes this percent. |
 | `showUnusedModels` | true | Show every model an agent can use, dimmed when unused or marked unavailable. `false` lists only models with recent use. The older key `showAllClaudeModels` still works. |
+
+The gear icon in the panel also saves these, to the plugin's own `settings.json`
+(in `~/.local/state/omarchy/agent-usage-tabs/`), which takes priority over
+`shell.json`. All default to on:
+
+| Gear switch / key | Meaning |
+|---|---|
+| Hide agents that aren't installed (`hideUninstalledAgents`) | Only show tabs for tools found on this machine. |
+| Show unused models (`showUnusedModels`) | List unused models dimmed. |
+| Reset animation (`resetAnimation`) | The confetti burst on the chip. |
+| Reset sound (`resetSound`) and volume (`resetVolume`, 0-100, default 60) | The cha-ching. |
+| Open panel on reset (`autoOpenOnReset`) | Auto-open the panel for a reset, then close it. |
+| Tabs list (`hiddenAgents`) | Hide a tab on purpose; it stays hidden until you turn it back on. Only an installed agent can be hidden this way. |
 
 Agent ids: `claude`, `antigravity`, `grok`, `codex`, `copilot`, `cursor`,
 `opencode`, `kimi`, `kiro`, `devin`, `amp`, `hermes`.
@@ -164,6 +220,17 @@ says to run `agy` and sign in again. Grok works the same way with
 Any limit whose title contains "session" or "weekly", for every agent that
 reports one, fires a single critical notification when it passes the
 threshold. State is kept in `notified.json` beside `data.json`. A window alerts once. It is forgotten only when its meter is reported back at or below the threshold; a refresh where an agent errors or the meter is missing changes nothing, so an outage cannot cause a repeat alert.
+
+## Report a problem
+
+Something broken or looking wrong? Please open an issue:
+**https://github.com/SpacemanProducts/spaceman.agent-usage-tabs/issues**
+<!-- Update this link once the repo is published. -->
+
+A tab that couldn't read its data shows "Data looks wrong"; the details are in
+`~/.local/state/omarchy/agent-usage-tabs/collector.log`. Please include that and
+the version number (shown at the bottom of the gear settings). See
+[CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
 ## Tests
 

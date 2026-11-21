@@ -12,7 +12,8 @@ keeps the developer in flow:
   about to hit a wall, and where?" without opening anything. Green < 60%,
   amber 60–85%, red > 85%, gray = no data. Never change these thresholds
   casually; they appear in the bar, meters, and chips.
-- **Quiet by default.** No sound, ever. Alert once per window, never repeat on
+- **Quiet by default.** The only sound is the reset cha-ching the user asked for
+  (on by default, with a switch and a volume control); alerts are silent. Alert once per window, never repeat on
   a blip. No error cards: missing data is one calm line of status.
 - **Never make the user babysit it.** Fix things in the background (refresh
   tokens by letting the agent's own CLI do it, cache rate-limited endpoints)
@@ -68,6 +69,19 @@ keeps the developer in flow:
   2026-11-19, absent from agy's list); kept Claude Sonnet/Opus 4.6 and
   GPT-OSS-120b because agy still lists them despite the announced Nov 18
   removal.
+- **Plan limits, usage and resets only.** No purchasable credit balances, overage,
+  on-demand, top-up or auto-reload content anywhere (user rule, 2026-11-21);
+  `bin/plan-limits.mjs` filters such meters out.
+- **The panel celebration is final as of 2026-11-21.** An idle-aware held celebration
+  with a "Reset ready" badge was built, then reverted at the user's request (panel
+  restored byte-for-byte from a backup). Only the desktop notification got the
+  cash-burst picture. Don't re-add held celebrations or chip badges unasked.
+- **Versioning:** bump `manifest.json` (patch = fix, minor = feature), add a line to
+  `CHANGELOG.md`, and commit. The plugin folder is a local git repo with no remote.
+- **QML pitfalls that already broke the plugin:** never put non-Item children (e.g.
+  `HoverHandler`) directly inside `KeyboardPanel`; after every QML edit restart the
+  shell and check `qs log` for `agent-usage` errors. A refactor once deleted the
+  reset block; `bin/reset-celebration.test.mjs` guards the collector's wiring.
 - Don't publish anything to GitHub unless asked.
 
 ## Working rules
