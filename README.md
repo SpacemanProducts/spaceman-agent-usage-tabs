@@ -148,7 +148,7 @@ chip, the bar number and the alerts use the worst meter across the accounts, and
 names the account that reset. The plugin only reads Omarchy's usage records through
 `omarchy-agent-account-list`; it never reads or stores credentials, and email addresses are dropped.
 
-A small **App** button (bottom right, styled like the stock panel's App tile) starts the selected agent's own CLI
+Under a small **MAKE SOMETHING** label at the bottom, one **App** tile (an app-window icon and the word, the stock panel's tile style, a third of the width) starts the selected agent's own CLI
 on building a new Omarchy app, the same task the stock panel's App tile gives the default agent: Claude Code opens
 `claude`, Antigravity `agy`, Grok `grok`, and so on, in a terminal, started plainly (no permission-skipping flags)
 from `~/Work` when that folder exists. An agent with no CLI has no button; Kimi can't take a starting prompt, so it

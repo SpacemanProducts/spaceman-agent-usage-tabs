@@ -4,7 +4,8 @@ Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
 ## 1.6.2 - 2026-11-22
-- The App button reads "App" (no icon), is stock-tile styled at its natural size, bottom right, and starts the selected
+- A "MAKE SOMETHING" section at the bottom, built like the stock panel's (separator, small label, one stock-style tile
+  a third of the width, app-window icon plus "App"), with no Theme or Plugin. The App tile starts the selected
   agent's own CLI on building a new Omarchy app (the same task as the stock panel's App tile), started plainly with no
   permission-skipping flags. An agent with no way to take a starting prompt (Kimi) opens plain with the prompt copied
   to the clipboard. Hidden for an agent with no CLI; the tooltip names the agent. Claude, Codex and Grok follow the active account.

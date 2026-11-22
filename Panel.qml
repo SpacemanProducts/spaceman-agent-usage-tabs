@@ -571,7 +571,7 @@ Panel {
     WlrLayershell.keyboardFocus: root.autoOpened ? WlrKeyboardFocus.None
       : (panel.open ? (panel.focusPrimed ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive) : WlrKeyboardFocus.None)
     contentWidth: panel.fittedContentWidth(Style.space(520))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight + starterRow.height + (starterRow.visible ? Style.space(8) : 0), Style.space(660))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight + (starterRow.visible ? starterRow.height + Style.space(12) : 0), Style.space(660))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -596,7 +596,7 @@ Panel {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: starterRow.top
-        anchors.bottomMargin: starterRow.visible ? Style.space(8) : 0
+        anchors.bottomMargin: starterRow.visible ? Style.space(12) : 0
         contentWidth: width
         contentHeight: column.implicitHeight
         clip: true
@@ -1285,40 +1285,58 @@ Panel {
         }
       }
 
-      // ---------------- App: starts the selected agent on a new Omarchy app. Hidden for an
-      // agent with no CLI. Styled like the stock panel's App tile, at its natural size, on the right.
-      Rectangle {
+      // ---------------- Make something: mirrors the stock panel's bottom section (separator, small
+      // label, a StarterTile), with just App: one third of the width, like a stock tile. It starts the
+      // selected agent on a new Omarchy app. Hidden for an agent with no CLI.
+      Column {
         id: starterRow
         visible: root.appCli !== ""
+        anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        width: appRow.implicitWidth + Style.space(28)
-        height: visible ? appRow.implicitHeight + Style.space(20) : 0
-        radius: Style.cornerRadius
-        color: appArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14)
-                                     : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
-        Row {
-          id: appRow
-          anchors.centerIn: parent
-          spacing: Style.space(8)
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            textFormat: Text.PlainText
-            text: "App"
-            color: appArea.containsMouse ? Color.accent : root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            font.bold: true
+        spacing: Style.space(12)
+
+        PanelSeparator { foreground: root.foreground }
+        PanelSectionHeader { width: parent.width; text: "MAKE SOMETHING" }
+
+        Rectangle {
+          id: appTile
+          width: (parent.width - Style.space(10) * 2) / 3
+          height: appRow.implicitHeight + Style.space(20)
+          radius: Style.cornerRadius
+          color: appArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14)
+                                       : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+          Row {
+            id: appRow
+            anchors.centerIn: parent
+            spacing: Style.space(8)
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "\u{f08c6}"
+              color: Color.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.heading
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "App"
+              color: appArea.containsMouse ? Color.accent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+            }
           }
+          MouseArea {
+            id: appArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.launchApp()
+          }
+          PanelToolTip { visible: appArea.containsMouse; text: "Start " + (root.agent ? root.agent.name : "your agent") + " on building a new Omarchy app"; fontFamily: root.fontFamily }
         }
-        MouseArea {
-          id: appArea
-          anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.launchApp()
-        }
-        PanelToolTip { visible: appArea.containsMouse; text: "Start " + (root.agent ? root.agent.name : "your agent") + " on building a new Omarchy app"; fontFamily: root.fontFamily }
       }
     }
   }
