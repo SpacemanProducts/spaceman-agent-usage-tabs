@@ -91,7 +91,27 @@ Panel {
     var v = userSettings.resetVolume !== undefined ? Number(userSettings.resetVolume) : Number(root.setting("resetVolume", 60))
     return isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 60
   }
-  readonly property bool handoffNote: userSettings.handoffNote !== false
+  // Handoff notes: not decided yet (undefined) = ask the first time; true = write them; false = never.
+  readonly property bool handoffNote: userSettings.handoffNote === true
+  readonly property bool handoffUndecided: userSettings.handoffNote === undefined
+  property var handoffPending: null
+  FileView {
+    path: (Quickshell.env("XDG_STATE_HOME") || root.home + "/.local/state") + "/omarchy/agent-usage-tabs/handoff-pending.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: { try { root.handoffPending = JSON.parse(String(text() || "")) } catch (e) { root.handoffPending = null } }
+    onLoadFailed: root.handoffPending = null
+  }
+  Process { id: handoffAnswerer; running: false }
+  // Allow / Not now / Never: the collector wrote nothing; this answers its question.
+  function answerHandoff(action) {
+    if (action === "allow") writeSetting(["handoffNote", "true"])
+    if (action === "never") writeSetting(["handoffNote", "false"])
+    handoffAnswerer.command = ["node", pluginDir + "/bin/handoff-answer.mjs", action === "allow" ? "allow" : "dismiss"]
+    handoffAnswerer.running = true
+    handoffPending = null
+  }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
   readonly property bool showDetail: !!agent && !settingsOpen && !squadOpen
@@ -908,6 +928,73 @@ Panel {
             }
           }
 
+          // ---------------- Handoff note question: asked once, the first time a session nears its limit. Nothing has been written.
+          Rectangle {
+            id: handoffCard
+            visible: root.handoffUndecided && root.handoffPending !== null && !root.squadOpen
+            width: parent.width
+            height: visible ? handoffCol.implicitHeight + Style.space(24) : 0
+            radius: Style.cornerRadius
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+            border.width: 1
+            border.color: root.soft(Color.accent, 0.5)
+            Column {
+              id: handoffCol
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(12)
+              spacing: Style.space(8)
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "Write a handoff note?"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: (root.handoffPending ? root.handoffPending.trigger.agent : "An agent") + " is near its session limit. Cook Meter can write handoff/HANDOFF.md in "
+                  + (root.handoffPending ? root.shortPath(root.handoffPending.repo) : "your repo") + " (what you were working on, from git and CLAUDE.md) and add a line to AGENTS.md telling agents to read it. Nothing is written until you allow it."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Row {
+                spacing: Style.space(8)
+                Repeater {
+                  model: [{ t: "Allow", a: "allow", main: true }, { t: "Not now", a: "dismiss", main: false }, { t: "Never", a: "never", main: false }]
+                  Rectangle {
+                    id: hbtn
+                    required property var modelData
+                    width: hbtnLabel.implicitWidth + Style.space(24)
+                    height: hbtnLabel.implicitHeight + Style.space(12)
+                    radius: Style.cornerRadius
+                    color: modelData.main ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, hbtnArea.containsMouse ? 0.3 : 0.18)
+                                          : (hbtnArea.containsMouse ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.1) : "transparent")
+                    border.width: modelData.main ? 0 : 1
+                    border.color: root.soft(root.foreground, 0.3)
+                    Text {
+                      id: hbtnLabel
+                      anchors.centerIn: parent
+                      textFormat: Text.PlainText
+                      text: hbtn.modelData.t
+                      color: hbtn.modelData.main ? Color.accent : root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: hbtn.modelData.main
+                    }
+                    MouseArea { id: hbtnArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.answerHandoff(hbtn.modelData.a) }
+                  }
+                }
+              }
+            }
+          }
+
           // ---------------- Add-a-subscription picker (opened by the + button above): choose which agent to add an account for.
           Column {
             visible: root.addOpen
@@ -949,7 +1036,7 @@ Panel {
               width: parent.width
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: "Omarchy can add accounts for these three. It asks for a name if you already have one."
+              text: "Adds another login for one of these agents. You'll be asked to name it."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption

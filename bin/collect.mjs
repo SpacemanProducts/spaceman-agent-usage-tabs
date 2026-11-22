@@ -338,8 +338,12 @@ function untilReset(iso) {
 // it, rebuilt each time. One note per run, for the agent closest to its limit. Switch it off in the gear settings.
 function writeHandoffNote(sent) {
   try {
-    maybeWriteHandoff({ sent, settings: readJson(path.join(OUT_DIR, "settings.json")), untilReset,
-      projectsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), "projects"), squadDirFile: path.join(OUT_DIR, "squad-dir") });
+    const r = maybeWriteHandoff({ sent, settings: readJson(path.join(OUT_DIR, "settings.json")), untilReset,
+      projectsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), "projects"), squadDirFile: path.join(OUT_DIR, "squad-dir"),
+      pendingFile: path.join(OUT_DIR, "handoff-pending.json") });
+    if (r === "asked")   // the first time only: nothing was written; the panel asks
+      spawnSync("notify-send", ["-a", "Cook Meter", "-u", "normal", "-i", "dialog-question", "-h", "boolean:suppress-sound:true",
+        "Handoff note waiting for your OK", "A session is near its limit. Open Cook Meter to allow, skip or turn off handoff notes."], { env: ENV, timeout: 5000 });
   } catch (e) { diag.add("handoff", `couldn't write the handoff note: ${String(e.message || e)}`); }
 }
 function notifyHighUsage(list) {

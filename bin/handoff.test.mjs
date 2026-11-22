@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs"; import os from "node:os"; import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { maybeWriteHandoff, scrub, readClaudeMd, repoInfo, buildNote, writeHandoff, ensureAgentsLine, findActiveRepo, AGENTS_LINE, MARKER } from "./handoff.mjs";
+import { maybeWriteHandoff, answerPending, scrub, readClaudeMd, repoInfo, buildNote, writeHandoff, ensureAgentsLine, findActiveRepo, AGENTS_LINE, MARKER } from "./handoff.mjs";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-test-"));
 const env = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -81,22 +81,45 @@ assert.equal(fs.realpathSync(findActiveRepo({ projectsDir: projects, squadDirFil
 assert.equal(fs.realpathSync(findActiveRepo({ projectsDir: projects, squadDirFile: squadFile, now: Date.now() + 99 * 3600000 })), fs.realpathSync(other), "stale session: the Squad folder");
 assert.equal(findActiveRepo({ projectsDir: "/nonexistent", squadDirFile: "/nonexistent" }), "", "no repo: nothing written anywhere");
 
-// ---- what the collector calls: only session alerts, the agent closest to its limit, honouring the setting
+// ---- what the collector calls: only session alerts, the agent closest to its limit, and it ASKS before the first write
 {
   const item = (agent, title, percent, level = "warn") => ({ agent: { name: agent }, limit: { title, percent, resetsAt: "2026-11-22T12:00:00Z" }, level });
-  const base = { projectsDir: projects, squadDirFile: squadFile, untilReset: () => "resets in 1h" };
+  const pendingFile = path.join(tmp, "handoff-pending.json");
+  const base = { projectsDir: projects, squadDirFile: squadFile, untilReset: () => "resets in 1h", pendingFile };
+  const note = path.join(repo, "handoff", "HANDOFF.md");
   fs.rmSync(path.join(repo, "handoff"), { recursive: true, force: true });
-  assert.equal(maybeWriteHandoff({ ...base, sent: [item("Claude Code", "Weekly", 0.97)] }), "", "a weekly alert is not a session alert");
+  assert.equal(maybeWriteHandoff({ ...base, sent: [item("Claude Code", "Weekly", 0.97)], settings: { handoffNote: true } }), "", "a weekly alert is not a session alert");
   assert.ok(!fs.existsSync(path.join(repo, "handoff")), "nothing written");
-  assert.equal(maybeWriteHandoff({ ...base, sent: [item("Claude Code", "Session", 0.97)], settings: { handoffNote: false } }), "", "the switch turns it off");
-  assert.ok(!fs.existsSync(path.join(repo, "handoff")));
-  const file = maybeWriteHandoff({ ...base, sent: [item("Grok", "Session", 0.96), item("Claude Code", "Session", 1.0, "limit"), item("Codex", "Weekly", 1.0, "limit")] });
-  assert.equal(file, path.join(repo, "handoff", "HANDOFF.md"));
+  assert.equal(maybeWriteHandoff({ ...base, sent: [item("Claude Code", "Session", 0.97)], settings: { handoffNote: false } }), "", "never: the switch is off");
+  assert.ok(!fs.existsSync(path.join(repo, "handoff")) && !fs.existsSync(pendingFile), "off writes nothing and asks nothing");
+
+  // undecided (the first time): NOTHING is written; it remembers what would be, and says it asked
+  const agentsFile = path.join(repo, "AGENTS.md"), agentsBefore = fs.existsSync(agentsFile) ? fs.readFileSync(agentsFile, "utf8") : null;
+  assert.equal(maybeWriteHandoff({ ...base, sent: [item("Claude Code", "Session", 0.97)], settings: {} }), "asked");
+  assert.ok(!fs.existsSync(path.join(repo, "handoff")), "no handoff folder before you say yes");
+  assert.equal(fs.existsSync(agentsFile) ? fs.readFileSync(agentsFile, "utf8") : null, agentsBefore, "and AGENTS.md is untouched");
+  const pend = JSON.parse(fs.readFileSync(pendingFile, "utf8"));
+  assert.equal(pend.repo && fs.realpathSync(pend.repo), fs.realpathSync(repo)); assert.equal(pend.trigger.agent, "Claude Code");
+  // it only asks once: a second warning updates the waiting note silently
+  assert.equal(maybeWriteHandoff({ ...base, sent: [item("Grok", "Session", 0.99, "limit")], settings: {} }), "", "no second question");
+  assert.equal(JSON.parse(fs.readFileSync(pendingFile, "utf8")).trigger.agent, "Grok");
+  // Not now: forget it, write nothing (it will ask again)
+  assert.equal(answerPending(pendingFile, "dismiss"), ""); assert.ok(!fs.existsSync(pendingFile) && !fs.existsSync(path.join(repo, "handoff")));
+  assert.equal(maybeWriteHandoff({ ...base, sent: [item("Claude Code", "Session", 0.97)], settings: {} }), "asked", "asks again after Not now");
+  // Allow: the waiting note is written now, once, from what was waiting
+  const wrote = answerPending(pendingFile, "allow");
+  assert.equal(wrote, note); assert.ok(!fs.existsSync(pendingFile)); assert.match(fs.readFileSync(note, "utf8"), /Claude Code\*\* is at 97%/);
+  assert.equal(answerPending(pendingFile, "allow"), "", "nothing waiting: nothing happens");
+  fs.rmSync(path.join(repo, "handoff"), { recursive: true, force: true });
+
+  // allowed (handoffNote: true): writes straight away, the agent closest to its limit is named
+  const file = maybeWriteHandoff({ ...base, sent: [item("Grok", "Session", 0.96), item("Claude Code", "Session", 1.0, "limit"), item("Codex", "Weekly", 1.0, "limit")], settings: { handoffNote: true } });
+  assert.equal(file, note);
   const written = fs.readFileSync(file, "utf8");
   assert.match(written, /Claude Code\*\* hit its session limit/, "the agent closest to its limit is named");
   assert.ok(!/Grok\*\*/.test(written));
-  assert.equal(maybeWriteHandoff({ sent: [item("Claude Code", "Session", 0.97)], projectsDir: "/nonexistent", squadDirFile: "/nonexistent" }), "", "no active repo: nothing written");
-  assert.equal(maybeWriteHandoff({ ...base, sent: [] }), "");
+  assert.equal(maybeWriteHandoff({ sent: [item("Claude Code", "Session", 0.97)], projectsDir: "/nonexistent", squadDirFile: "/nonexistent", pendingFile, settings: { handoffNote: true } }), "", "no active repo: nothing written, nothing asked");
+  assert.equal(maybeWriteHandoff({ ...base, sent: [], settings: {} }), "");
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

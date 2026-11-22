@@ -146,12 +146,32 @@ export function findActiveRepo({ projectsDir, squadDirFile, now = Date.now(), ma
 
 // What the collector calls after it sent alerts. `sent` = alert items ({ agent, limit, level }) that really went out.
 // Only SESSION meters count (the request is about session usage nearing its limit), one note per run for the agent
-// closest to its limit, and nothing at all when the setting is off or no repo is active. Returns the written path or "".
-export function maybeWriteHandoff({ sent, settings, untilReset = () => "", projectsDir, squadDirFile, now = Date.now() }) {
+// closest to its limit.
+//   settings.handoffNote === true   -> write the note
+//   settings.handoffNote === false  -> never
+//   not decided yet                 -> write NOTHING: remember what would be written in `pendingFile` and return "asked"
+//                                      the first time, so the panel can ask. (Allow / Not now / Never are in the panel.)
+// Returns the written path, "asked", or "".
+export function maybeWriteHandoff({ sent, settings, untilReset = () => "", projectsDir, squadDirFile, pendingFile, now = Date.now() }) {
   const session = (sent || []).filter((i) => /session/i.test(String(i.limit?.title)));
-  if (!session.length || (settings || {}).handoffNote === false) return "";
+  const setting = (settings || {}).handoffNote;
+  if (!session.length || setting === false) return "";
   const top = session.reduce((a, b) => (b.limit.percent > a.limit.percent ? b : a));
   const repo = findActiveRepo({ projectsDir, squadDirFile, now });
   if (!repo) return "";
-  return writeHandoff(repo, { agent: top.agent.name, percent: top.limit.percent, title: top.limit.title, resetsIn: untilReset(top.limit.resetsAt), level: top.level }, now).file;
+  const trigger = { agent: top.agent.name, percent: top.limit.percent, title: top.limit.title, resetsIn: untilReset(top.limit.resetsAt), level: top.level };
+  if (setting === true) return writeHandoff(repo, trigger, now).file;
+  if (!pendingFile) return "";
+  const first = !fs.existsSync(pendingFile);
+  fs.mkdirSync(path.dirname(pendingFile), { recursive: true });
+  fs.writeFileSync(pendingFile, JSON.stringify({ repo, trigger, at: now }) + "\n", { mode: 0o600 });
+  return first ? "asked" : "";
+}
+
+// The panel's answer to the question. allow = write the waiting note now; dismiss = forget it (it asks again next time).
+export function answerPending(pendingFile, action) {
+  let p = null; try { p = JSON.parse(fs.readFileSync(pendingFile, "utf8")); } catch {}
+  try { fs.unlinkSync(pendingFile); } catch {}
+  if (action === "allow" && p?.repo && p?.trigger) return writeHandoff(p.repo, p.trigger).file;
+  return "";
 }
