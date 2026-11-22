@@ -230,6 +230,20 @@ Panel {
     appLauncher.command = ["node", pluginDir + "/bin/launch-agent.mjs", appCli]
     appLauncher.running = true
   }
+  // Header buttons, as in the stock panel's hero corner.
+  // +  Omarchy's add-subscription flow in a terminal (for the selected tab's provider when it has one).
+  // >_ the default agent, exactly as the stock button starts it (`omarchy-agent --pick`).
+  function addSubscription() {
+    if (!root.bar) return
+    var p = agent && ["claude", "codex", "grok"].indexOf(agent.id) >= 0 ? agent.id : ""
+    root.bar.run("omarchy-launch-floating-terminal-with-presentation bash " + pluginDir + "/bin/add-account.sh " + p)
+    close()
+  }
+  function launchDefaultAgent() {
+    if (root.bar) root.bar.run("omarchy-agent --pick")
+    close()
+  }
+
   function refreshNow() { if (!collector.running) collector.running = true }
 
   function fmtTokens(n) {
@@ -543,6 +557,36 @@ Panel {
     }
   }
 
+  // The small tinted square the stock panel uses for its hero-corner buttons (34 wide).
+  component HeaderButton: Rectangle {
+    id: hb
+    property string glyph: ""
+    property string tip: ""
+    signal clicked()
+    implicitWidth: Style.space(34)
+    implicitHeight: implicitWidth
+    radius: Style.cornerRadius
+    color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, hbArea.containsMouse ? 0.3 : 0.12)
+    border.width: hbArea.containsMouse ? Math.max(1, Style.hoverBorderWidth) : 0
+    border.color: Color.accent
+    Text {
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: hb.glyph
+      color: Color.accent
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.heading
+    }
+    MouseArea {
+      id: hbArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: hb.clicked()
+    }
+    PanelToolTip { visible: hbArea.containsMouse; text: hb.tip; fontFamily: root.fontFamily }
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -752,7 +796,7 @@ Panel {
           Item {
             id: headerRow
             width: parent.width
-            height: Math.max(headerName.implicitHeight, gearButton.height)
+            height: Math.max(headerName.implicitHeight, gearButton.height, Style.space(34))
 
             Row {
               visible: root.showDetail
@@ -785,6 +829,14 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
               font.bold: true
+            }
+            Row {
+              anchors.right: gearButton.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(6)
+              HeaderButton { glyph: "\u{f0415}"; tip: "Add a subscription"; onClicked: root.addSubscription() }
+              HeaderButton { glyph: "\u{f07b7}"; tip: "Start the default agent"; onClicked: root.launchDefaultAgent() }
             }
             Rectangle {
               id: gearButton
