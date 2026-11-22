@@ -3,6 +3,12 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.8.2 - 2026-11-22
+- Fix: a dragged tab chip now lands where you let go. The drop read the drag distance after Qt had already reset it to zero,
+  so the chip went nowhere. The last distance is now kept, a chip released between two chips lands on the nearest one, and the
+  new order shows immediately (it was only shown after the saved file was read back). The arrows in the gear menu remain
+  as a fallback.
+
 ## 1.8.1 - 2026-11-22
 - The App tile sits on the right of the MAKE SOMETHING row, with the label on the left (same size and style).
 

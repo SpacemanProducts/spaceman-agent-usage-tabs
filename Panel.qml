@@ -109,8 +109,10 @@ Panel {
   readonly property var defaultOrder: ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"]
   // The tab order: the one you saved (drag a chip, or the arrows in the gear menu), else `tabOrder` from
   // shell.json, else the default. Agents that are in none of those (new ones) go at the end.
+  // A reorder shows at once (pendingOrder) and is dropped when the saved settings.json is read back.
+  property var pendingOrder: null
   readonly property var wantedOrder: {
-    var v = userSettings.tabOrder !== undefined ? userSettings.tabOrder : root.setting("tabOrder", "")
+    var v = pendingOrder !== null ? pendingOrder : (userSettings.tabOrder !== undefined ? userSettings.tabOrder : root.setting("tabOrder", ""))
     var list = Array.isArray(v) ? v : String(v).toLowerCase().split(",")
     return list.map(function(x) { return String(x).trim() }).filter(function(x) { return x !== "" })
   }
@@ -122,10 +124,26 @@ Panel {
   }
   readonly property var agents: allOrdered.filter(function(a) { return isShownTab(a) })
   function allIds() { return allOrdered.map(function(a) { return a.id }) }
-  function saveOrder(ids) { writeSetting(["order", ids.join(",")]) }
+  function saveOrder(ids) { pendingOrder = ids; writeSetting(["order", ids.join(",")]) }
   // Gear menu arrows: move one agent a place left or right among ALL agents.
   function moveTab(id, delta) { saveOrder(TabOrder.moveBy(allIds(), id, delta)) }
-  function resetOrder() { writeSetting(["order", "reset"]) }
+  function resetOrder() { pendingOrder = defaultOrder.slice(); writeSetting(["order", "reset"]) }
+  // A chip was released after being dragged (dx, dy) from where it sat: it lands on the chip nearest
+  // to where it was let go (the gaps between chips count as the nearest one), and the order is saved.
+  function dropChip(fromIndex, dx, dy) {
+    var me = chipRepeater.itemAt(fromIndex)
+    if (!me) return -1
+    var cx = me.x + me.width / 2 + dx, cy = me.y + me.height / 2 + dy
+    var to = fromIndex, best = 1e12
+    for (var i = 0; i < chipRepeater.count; i++) {
+      var c = chipRepeater.itemAt(i)
+      if (!c) continue
+      var d = Math.pow(c.x + c.width / 2 - cx, 2) + Math.pow(c.y + c.height / 2 - cy, 2)
+      if (d < best) { best = d; to = i }
+    }
+    if (to !== fromIndex) dropTab(me.modelData.id, to)
+    return to
+  }
   // Dragging a chip onto another one's place: reorder the visible tabs, hidden ones keep their slots.
   function dropTab(id, toVisibleIndex) {
     var vis = agents.map(function(a) { return a.id })
@@ -389,7 +407,7 @@ Panel {
     printErrors: false
     onFileChanged: reload()
     onLoaded: {
-      try { var d = JSON.parse(String(text() || "")); root.userSettings = d && typeof d === "object" && !Array.isArray(d) ? d : ({}) }
+      try { var d = JSON.parse(String(text() || "")); root.userSettings = d && typeof d === "object" && !Array.isArray(d) ? d : ({}); root.pendingOrder = null }
       catch (e) { root.userSettings = ({}) }
     }
     onLoadFailed: root.userSettings = ({})
@@ -460,6 +478,12 @@ Panel {
     function settings(): string { root.settingsOpen = !root.settingsOpen; return root.settingsOpen ? "open" : "closed" }
     function moveTab(id: string, delta: string): string { root.moveTab(id, Number(delta)); return "ok" }
     function resetOrder(): string { root.resetOrder(); return "ok" }
+    // Test hook: drop chip `from` as if it were dragged onto chip `to` (same hit-testing as a real drag).
+    function dropOnto(from: string, to: string): string {
+      var a = chipRepeater.itemAt(Number(from)), b = chipRepeater.itemAt(Number(to))
+      if (!a || !b) return "no such chip"
+      return "dropped on " + root.dropChip(Number(from), b.x + b.width / 2 - a.x - a.width / 2, b.y + b.height / 2 - a.y - a.height / 2)
+    }
     function next(): string { root.selectIndex(root.selectedIndex + 1); return "ok" }
   }
 
@@ -844,16 +868,13 @@ Panel {
                   id: chipDrag
                   target: null
                   cursorShape: Qt.ClosedHandCursor
+                  // activeTranslation is already back at 0 when `active` turns false, so keep the last value.
+                  property real lastDx: 0
+                  property real lastDy: 0
+                  onActiveTranslationChanged: if (active) { lastDx = activeTranslation.x; lastDy = activeTranslation.y }
                   onActiveChanged: {
-                    if (active) return
-                    var cx = chip.x + chip.width / 2 + activeTranslation.x
-                    var cy = chip.y + chip.height / 2 + activeTranslation.y
-                    var to = -1
-                    for (var i = 0; i < chipRepeater.count; i++) {
-                      var c = chipRepeater.itemAt(i)
-                      if (c && cx >= c.x && cx <= c.x + c.width && cy >= c.y && cy <= c.y + c.height) { to = i; break }
-                    }
-                    if (to >= 0 && to !== chip.index) root.dropTab(chip.modelData.id, to)
+                    if (active) { lastDx = 0; lastDy = 0; return }
+                    root.dropChip(chip.index, lastDx, lastDy)
                   }
                 }
                 MouseArea {
