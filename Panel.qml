@@ -107,7 +107,7 @@ Panel {
     settingsWriter.running = true
   }
   readonly property var defaultOrder: ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"]
-  // The tab order: the one you saved (drag a chip, or the arrows in the gear menu), else `tabOrder` from
+  // The tab order: the one you saved (drag a chip), else `tabOrder` from
   // shell.json, else the default. Agents that are in none of those (new ones) go at the end.
   // A reorder shows at once (pendingOrder) and is dropped when the saved settings.json is read back.
   property var pendingOrder: null
@@ -125,8 +125,6 @@ Panel {
   readonly property var agents: allOrdered.filter(function(a) { return isShownTab(a) })
   function allIds() { return allOrdered.map(function(a) { return a.id }) }
   function saveOrder(ids) { pendingOrder = ids; writeSetting(["order", ids.join(",")]) }
-  // Gear menu arrows: move one agent a place left or right among ALL agents.
-  function moveTab(id, delta) { saveOrder(TabOrder.moveBy(allIds(), id, delta)) }
   function resetOrder() { pendingOrder = defaultOrder.slice(); writeSetting(["order", "reset"]) }
   // A chip was released after being dragged (dx, dy) from where it sat: it lands on the chip nearest
   // to where it was let go (the gaps between chips count as the nearest one), and the order is saved.
@@ -280,6 +278,16 @@ Panel {
     }
     if (month) return "removing " + months[Number(month[2]) - 1]
     return "removing"
+  }
+
+  // Why a tab is gray (it has no meter at all): not installed, not signed in, or no usage source.
+  // An agent's own status line, when it has one, already says more and wins.
+  function grayReason(a) {
+    if (!a || ChipMeters.chipMeters(a).session >= 0) return ""
+    if (String(a.status || "") !== "") return ""
+    if (a.installed === false) return "Not installed."
+    if (a.signedIn === false) return "Not signed in. Sign in with " + (a.cli || a.name) + " to see limits."
+    return "No usage source: " + a.name + " doesn't report limits here."
   }
 
   // Highest percent across all of an agent's limit meters; -1 when it has none.
@@ -476,7 +484,6 @@ Panel {
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
     function settings(): string { root.settingsOpen = !root.settingsOpen; return root.settingsOpen ? "open" : "closed" }
-    function moveTab(id: string, delta: string): string { root.moveTab(id, Number(delta)); return "ok" }
     function resetOrder(): string { root.resetOrder(); return "ok" }
     // Test hook: drop chip `from` as if it were dragged onto chip `to` (same hit-testing as a real drag).
     function dropOnto(from: string, to: string): string {
@@ -1015,7 +1022,7 @@ Panel {
             width: parent.width
             spacing: Style.space(8)
 
-            PanelSectionHeader { width: parent.width; text: "SETTINGS" }
+            PanelSectionHeader { width: parent.width; text: "DISPLAY" }
             SettingSwitch {
               width: parent.width
               label: "Hide agents that aren't installed"
@@ -1029,6 +1036,7 @@ Panel {
               onToggled: root.writeSetting(["showUnusedModels", String(!root.showUnusedModels)])
             }
 
+            PanelSectionHeader { width: parent.width; text: "RESET CELEBRATION" }
             SettingSwitch {
               width: parent.width
               label: "Reset animation"
@@ -1093,45 +1101,21 @@ Panel {
             }
 
             PanelSectionHeader { width: parent.width; text: "TABS" }
-            Repeater {
-              model: root.allOrdered
-              Item {
-                id: tabRow
-                required property var modelData
-                required property int index
-                width: settingsView.width
-                height: tabSwitch.height
-                // Left / right arrows: the fallback to dragging chips. They move the agent one place.
-                Row {
-                  id: tabArrows
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.space(4)
-                  Repeater {
-                    model: [{ glyph: "\u25c0", delta: -1, tip: "Move left" }, { glyph: "\u25b6", delta: 1, tip: "Move right" }]
-                    Rectangle {
-                      id: arrow
-                      required property var modelData
-                      readonly property bool possible: tabRow.index + modelData.delta >= 0 && tabRow.index + modelData.delta < root.allOrdered.length
-                      width: Style.space(26); height: Style.space(24); radius: Style.cornerRadius
-                      color: root.track
-                      opacity: possible ? 1 : 0.3
-                      Text { anchors.centerIn: parent; textFormat: Text.PlainText; text: arrow.modelData.glyph; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-                      MouseArea { id: arrowArea; anchors.fill: parent; hoverEnabled: true; enabled: arrow.possible; cursorShape: Qt.PointingHandCursor; onClicked: root.moveTab(tabRow.modelData.id, arrow.modelData.delta) }
-                      PanelToolTip { visible: arrowArea.containsMouse; text: arrow.modelData.tip; fontFamily: root.fontFamily }
-                    }
-                  }
-                }
+            // One switch per agent, two to a row to keep the menu short. Reorder by dragging the chips.
+            Flow {
+              width: parent.width
+              spacing: Style.space(16)
+              Repeater {
+                model: root.allOrdered
                 SettingSwitch {
-                  id: tabSwitch
-                  anchors.left: tabArrows.right
-                  anchors.leftMargin: Style.space(10)
-                  anchors.right: parent.right
-                  label: tabRow.modelData.name + (tabRow.modelData.installed === false ? " (not installed)" : "")
+                  required property var modelData
+                  width: (settingsView.width - Style.space(16)) / 2
+                  label: modelData.name + (modelData.installed === false ? " (not installed)" : "")
                   // Only an installed agent can be hidden by choice; an uninstalled
                   // one follows "Hide agents that aren't installed".
-                  enabled: tabRow.modelData.installed !== false
-                  checked: root.isShownTab(tabRow.modelData)
-                  onToggled: root.writeSetting(["hidden", tabRow.modelData.id, String(root.isShownTab(tabRow.modelData))])
+                  enabled: modelData.installed !== false
+                  checked: root.isShownTab(modelData)
+                  onToggled: root.writeSetting(["hidden", modelData.id, String(root.isShownTab(modelData))])
                 }
               }
             }
@@ -1158,7 +1142,7 @@ Panel {
             Text {
               width: parent.width
               textFormat: Text.PlainText
-              text: "Drag a chip, or use the arrows, to reorder; the first tab becomes Omarchy's default agent. A tab you hide stays hidden until you show it again. Agents you install later appear automatically, at the end."
+              text: "Drag a chip to reorder; the first tab becomes Omarchy's default agent. A tab you hide stays hidden until you show it again. Agents you install later appear automatically, at the end."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1210,6 +1194,18 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
+          }
+
+          // A gray tab says why it has no data.
+          Text {
+            visible: root.showDetail && root.grayReason(root.agent) !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.grayReason(root.agent)
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
 
           PanelSeparator { foreground: root.foreground; visible: root.showDetail }

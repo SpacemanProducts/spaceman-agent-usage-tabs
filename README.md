@@ -1,6 +1,6 @@
-# Agent Usage Tabs
+# Cook Meter
 
-**Cook Meter.** Know exactly when you can go cook.
+**Know exactly when you can go cook.** (Plugin id and repo: `spaceman.agent-usage-tabs`.)
 
 > **The idea:** a dashboard for developers in flow state. One glance at the bar shows every
 > agent's limits, and a celebration fires the moment a reset lands.
@@ -13,7 +13,7 @@
 
 ![A surprise Antigravity reset](docs/surprise-reset.gif)
 
-*A surprise reset: an Antigravity meter dropped before its reset time, so the chip flashes gold and the bar icon sits above a burst of rainbow confetti.*
+*A surprise reset: an Antigravity meter dropped before its reset time, so the chip flashes gold with two shockwave rings and a burst of rainbow confetti.*
 
 GIFs have no sound. The real thing plays a short cha-ching for a normal reset (and a jackpot for a surprise).
 
@@ -23,6 +23,9 @@ agents' usage limits you have used: one bar icon, one panel, and a tab for every
 you have installed.
 
 ![The panel on the Claude Code tab](docs/screenshot.png)
+
+The header has the **+** (Omarchy's add-subscription flow), **>_** (start your default agent) and gear buttons; the
+tabs sit below it, then the selected agent's limits and models, and an **App** button at the bottom.
 
 ## Quick start (new to Omarchy?)
 
@@ -76,6 +79,8 @@ local until you sign in).
 - Tabs for agents that aren't installed are hidden; they appear automatically once you
   install the tool, with a one-time notification. You can also hide any installed tab on
   purpose (in the gear settings), and it stays hidden until you turn it back on.
+- A **gray** tab has no meter at all, and says why: *Not installed*, *Not signed in*, or *No usage source* (the agent
+  doesn't report limits here). A monthly or credit-style meter still colors the chip.
 - When a hidden agent signs in for the first time, you get a one-time "now available" notice.
 
 **Inside a tab**
@@ -129,11 +134,10 @@ local until you sign in).
   previous reset time, and other agents never get one (an early drop on them is more likely
   you spending a banked reset yourself).
 
-**The gear icon** in the panel header opens a small settings view (shown below) with
-switches for hiding uninstalled agents, showing unused models, the reset animation, opening
-the panel on reset, the reset sound (with a volume control), **Test session reset**,
-**Test weekly reset** and **Test surprise reset** buttons that replay each celebration any time, and a switch for
-every tab.
+**The gear icon** in the panel header opens a short settings view (shown below), grouped under three headings:
+**Display** (hide uninstalled agents, show unused models), **Reset celebration** (the animation, opening the panel on
+reset, the sound and its volume, and **Test session reset**, **Test weekly reset** and **Test surprise reset** buttons
+that replay each celebration any time) and **Tabs** (a switch per agent, plus **Reset order**).
 
 ![The gear settings view](docs/settings.png)
 
@@ -154,11 +158,14 @@ on building a new Omarchy app, the same task the stock panel's App tile gives th
 from `~/Work` when that folder exists. An agent with no CLI has no button; Kimi can't take a starting prompt, so it
 opens with the prompt on the clipboard. The hover tooltip names the agent.
 
+![Two accounts on one agent (illustrative: staged data)](docs/accounts.png)
+
+*Two accounts on Claude Code, with made-up labels and numbers: this machine has one account per provider, so this view is staged.*
+
 ### Tab order and the default agent
 
-Drag a chip onto another to reorder the tabs; the order is saved and survives restarts. The gear menu has left and right
-arrows for each agent (if dragging misbehaves) and a **Reset order** button (Claude Code, Antigravity, Grok, Codex, then the
-rest). Agents new to the list go at the end. The **first tab is Omarchy's default agent**: when the first position changes the
+Drag a chip onto another to reorder the tabs; the order is saved and survives restarts. **Reset order** in the gear menu
+restores Claude Code, Antigravity, Grok, Codex, then the rest. Agents new to the list go at the end. The **first tab is Omarchy's default agent**: when the first position changes the
 plugin sets it, so the shortcut, the right-click on the robot and the header terminal button follow, and a small dot marks
 the first chip. Only agents Omarchy supports as a default are used; an unsupported or uninstalled first tab is skipped. It
 writes `~/.config/omarchy/defaults/agent` directly rather than running `omarchy default agent`, which would also launch
