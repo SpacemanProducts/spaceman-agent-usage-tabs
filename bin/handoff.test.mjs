@@ -101,7 +101,7 @@ assert.equal(findActiveRepo({ projectsDir: "/nonexistent", squadDirFile: "/nonex
   const pend = JSON.parse(fs.readFileSync(pendingFile, "utf8"));
   assert.equal(pend.repo && fs.realpathSync(pend.repo), fs.realpathSync(repo)); assert.equal(pend.trigger.agent, "Claude Code");
   // it only asks once: a second warning updates the waiting note silently
-  assert.equal(maybeWriteHandoff({ ...base, sent: [item("Grok", "Session", 0.99, "limit")], settings: {} }), "", "no second question");
+  assert.equal(maybeWriteHandoff({ ...base, sent: [item("Grok", "Session", 0.99, "limit")], settings: {} }), "pending", "no second question: it is already waiting for an answer");
   assert.equal(JSON.parse(fs.readFileSync(pendingFile, "utf8")).trigger.agent, "Grok");
   // Not now: forget it, write nothing (it will ask again)
   assert.equal(answerPending(pendingFile, "dismiss"), ""); assert.ok(!fs.existsSync(pendingFile) && !fs.existsSync(path.join(repo, "handoff")));

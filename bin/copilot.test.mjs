@@ -16,4 +16,21 @@ assert.deepEqual(parseCopilotQuota(q({ unlimited: true })).limits, []);
 assert.deepEqual(parseCopilotQuota({}).limits, []); assert.deepEqual(parseCopilotQuota(null).limits, []);
 assert.deepEqual(parseCopilotQuota(q({ entitlement: null })).limits, []);
 assert.deepEqual(parseCopilotQuota(q({ entitlement: 100 })).limits, [], "no usage figure -> no meter");
+
+// ---- A FREE account, as GitHub really reports it: plan "individual" but access_type_sku "free_limited_copilot", premium requests
+// 0, and monthly chat (200) and completions (2000) allowances. The plan is Free, and the two allowances are the meters.
+const freeReal = parseCopilotQuota({ copilot_plan: "individual", access_type_sku: "free_limited_copilot", quota_reset_date_utc: "2026-12-01T00:00:00.000Z", quota_snapshots: {
+  chat: { entitlement: 200, remaining: 199, quota_remaining: 199.8, percent_remaining: 99.9, unlimited: false, has_quota: true, credits_used: 0 },
+  completions: { entitlement: 2000, remaining: 2000, quota_remaining: 2000, percent_remaining: 100, unlimited: false, has_quota: true, credits_used: 0 },
+  premium_interactions: { entitlement: 0, remaining: 0, percent_remaining: 0, unlimited: false, has_quota: false, credits_used: 0 } } });
+assert.equal(freeReal.plan, "Free", "not Pro: access_type_sku says free");
+assert.equal(freeReal.free, true);
+assert.deepEqual(freeReal.limits.map((l) => [l.title, l.note, Math.round(l.percent * 1000) / 1000]), [["Chat and agent requests", "Shared plan quota", 0.001], ["Editor autocomplete", "Not used by the CLI", 0]], "plain-language labels, the same numbers");
+assert.ok(freeReal.limits.every((l) => l.window === "monthly"), "still monthly meters (the window is kept for reset detection)");
+assert.equal(freeReal.limits[0].resetsAt, "2026-12-01T00:00:00.000Z"); assert.equal(freeReal.status, "", "meters shown, so no 'no allowance' line");
+// used up: 150 of 200 chat left -> 25% used, from the most precise figure
+assert.equal(parseCopilotQuota({ copilot_plan: "free", quota_snapshots: { chat: { entitlement: 200, percent_remaining: 25, has_quota: true } } }).limits[0].percent, 0.75);
+// a paid plan whose chat and completions are unlimited gets no extra meters, only its premium meter
+const paid = parseCopilotQuota({ copilot_plan: "individual", quota_reset_date_utc: "2026-12-01T00:00:00.000Z", quota_snapshots: { chat: { unlimited: true, entitlement: -1 }, completions: { unlimited: true }, premium_interactions: { entitlement: 300, credits_used: 30, unlimited: false } } });
+assert.equal(paid.plan, "Pro"); assert.deepEqual(paid.limits.map((l) => l.title), ["Monthly"]);
 console.log("copilot: all tests passed");

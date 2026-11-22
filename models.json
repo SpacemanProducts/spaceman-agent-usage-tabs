@@ -1,394 +1,398 @@
 {
-  "_readme": [
-    "Known models per agent. Edit freely; the collector reads this file on every refresh.",
-    "Live data always comes first: models an agent reports using, and (where the CLI has a list command) models its own CLI lists, are added automatically.",
-    "Each entry: name (shown), match (optional extra id prefixes; dots and dashes are equivalent), unavailableOn (plan labels, e.g. Free), removing (YYYY-MM-DD or YYYY-MM when a removal is announced), note (free text, not shown).",
-    "State rules: used = recent tokens; zero = usable but unused (dimmed, 0); unavailable = the plan can't use it (dimmed, 'unavailable'). If an agent's CLI lists its models, any known model missing from that list is unavailable.",
-    "Updated 2026-11-21.",
-    "The 'plans' section holds plan and free-tier notes (changeable; edit freely). A note is shown only when the agent's own tool reports a source (a login, a usage command, a models list); notes never invent numbers. freeNote shows when the tool reports a free plan (or, for OpenCode, lists free models); localNote shows for Hermes when there is no Nous login."
-  ],
-  "agents": {
-    "claude": {
-      "models": [
-        {
-          "name": "Claude Fable 5.2",
-          "match": [
-            "claude-fable-5-2"
-          ]
-        },
-        {
-          "name": "Claude Opus 5.5",
-          "match": [
-            "claude-opus-5-5"
-          ]
-        },
-        {
-          "name": "Claude Sonnet 5.5",
-          "match": [
-            "claude-sonnet-5-5"
-          ]
-        },
-        {
-          "name": "Claude Haiku 5.5",
-          "match": [
-            "claude-haiku-5-5"
-          ]
-        }
-      ]
+ "_readme": [
+  "Known models per agent. Edit freely; the collector reads this file on every refresh.",
+  "Live data always comes first: models an agent reports using, and (where the CLI has a list command) models its own CLI lists, are added automatically.",
+  "Each entry: name (shown), match (optional extra id prefixes; dots and dashes are equivalent), unavailableOn (plan labels, e.g. Free), removing (YYYY-MM-DD or YYYY-MM when a removal is announced), note (free text, not shown).",
+  "State rules: used = recent tokens; zero = usable but unused (dimmed, 0); unavailable = the plan can't use it (dimmed, 'unavailable'). If an agent's CLI lists its models, any known model missing from that list is unavailable.",
+  "Updated 2026-11-21.",
+  "The 'plans' section holds plan and free-tier notes (changeable; edit freely). A note is shown only when the agent's own tool reports a source (a login, a usage command, a models list); notes never invent numbers. freeNote shows when the tool reports a free plan (or, for OpenCode, lists free models); localNote shows for Hermes when there is no Nous login."
+ ],
+ "agents": {
+  "claude": {
+   "models": [
+    {
+     "name": "Claude Fable 5.2",
+     "match": [
+      "claude-fable-5-2"
+     ]
     },
-    "antigravity": {
-      "models": [
-        {
-          "name": "Gemini 4 Carbon",
-          "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
-        },
-        {
-          "name": "Gemini 4 Argon",
-          "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
-        },
-        {
-          "name": "Gemini 4 Hydrogen",
-          "note": "Reported to stay on Free/AI Plus, but not in agy's live list for a Free account on Nov 21 2026, so it shows unavailable."
-        },
-        {
-          "name": "Orchestrator Carbon",
-          "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
-        },
-        {
-          "name": "Orchestrator Argon",
-          "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
-        },
-        {
-          "name": "Gemini 3.8 Flash"
-        },
-        {
-          "name": "Gemini 3.7 Flash",
-          "note": "Reported Gemini Enterprise only in Antigravity; Gemini API retirement is 2027-01-28."
-        },
-        {
-          "name": "Gemini 3.1 Pro",
-          "note": "Unverified: one user-forum post says it was removed from Antigravity's selector Oct 12 2026; another source says Enterprise-only. Not in agy's live list, so it shows unavailable."
-        },
-        {
-          "name": "Claude Sonnet 5.5",
-          "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
-        },
-        {
-          "name": "Claude Opus 5.5",
-          "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
-        },
-        {
-          "name": "Claude Sonnet 4.6",
-          "removing": "2026-11-18",
-          "note": "Google announced removal on Nov 18 2026 (moved from Nov 2). agy's live list still showed it on Nov 21 2026, so it is kept until the live list drops it."
-        },
-        {
-          "name": "Claude Opus 4.6",
-          "removing": "2026-11-18",
-          "note": "Same announced Nov 18 removal; still in agy's live list on Nov 21 2026."
-        },
-        {
-          "name": "GPT-OSS-120b",
-          "match": [
-            "gpt-oss-120b"
-          ],
-          "removing": "2026-11-18",
-          "note": "Same announced Nov 18 removal, for every plan; still in agy's live list on Nov 21 2026."
-        }
-      ],
-      "removed": [
-        "Gemini 3.6 Flash: Gemini API retirement 2026-11-19, replacement Gemini 3.8 Flash (third-party lifecycle calendar); absent from agy's live list. Dropped 2026-11-21."
-      ]
+    {
+     "name": "Claude Opus 5.5",
+     "match": [
+      "claude-opus-5-5"
+     ]
     },
-    "grok": {
-      "models": [
-        {
-          "name": "Grok 4.7"
-        },
-        {
-          "name": "Grok 4.6"
-        },
-        {
-          "name": "Grok 4.5"
-        },
-        {
-          "name": "Composer 2.5"
-        }
-      ]
+    {
+     "name": "Claude Sonnet 5.5",
+     "match": [
+      "claude-sonnet-5-5"
+     ]
     },
-    "codex": {
-      "models": [
-        {
-          "name": "GPT-6.2 Astra"
-        },
-        {
-          "name": "GPT-6.2 Sol"
-        },
-        {
-          "name": "GPT-6.1 Sol"
-        },
-        {
-          "name": "GPT-6.1 Terra"
-        },
-        {
-          "name": "GPT-6 Luna"
-        }
-      ]
-    },
-    "copilot": {
-      "models": [
-        {
-          "name": "Claude Opus 5.5"
-        },
-        {
-          "name": "GPT-6.1 Sol",
-          "note": "Named as the replacement in GitHub's Oct 19 2026 deprecation changelog."
-        },
-        {
-          "name": "Grok 4.7",
-          "note": "Named as a replacement for Grok 4.5 in one source; changelog sources disagree (4.6 vs 4.7)."
-        },
-        {
-          "name": "Claude Fable 5",
-          "removing": "2026-12-14",
-          "note": "Dec 14 batch: third-party reports citing a GitHub changelog dated Nov 13 2026; verify at github.blog/changelog."
-        },
-        {
-          "name": "Claude Haiku 4.5",
-          "removing": "2026-12-14",
-          "note": "Same Dec 14 batch; annual-plan individual subscribers reportedly exempt."
-        },
-        {
-          "name": "Gemini 3.8 Flash",
-          "removing": "2026-12-14",
-          "note": "Same Dec 14 batch (third-party report)."
-        },
-        {
-          "name": "Gemini 4 Argon",
-          "removing": "2026-12-14",
-          "note": "Same Dec 14 batch (third-party report)."
-        },
-        {
-          "name": "Grok 4.6",
-          "removing": "2026-12-14",
-          "note": "Same Dec 14 batch (third-party report)."
-        },
-        {
-          "name": "Kimi K3",
-          "removing": "2026-12-14",
-          "note": "Same Dec 14 batch (third-party report)."
-        }
-      ],
-      "removed": [
-        "Gemini 3.5 Flash, Gemini 3.6 Flash, Kimi K2.7 Code, Claude Opus 4.7 (Oct 2 2026)",
-        "GPT-5.5, GPT-5.4, GPT-5.4 mini, GPT-5 mini, Gemini 3.7 Flash, Grok 4.5 (Oct 19 2026)",
-        "Gemini 3.1 Pro, Claude Opus 4.5/4.6, Claude Sonnet 4.5/4.6, Raptor Mini (Sep 1 2026)",
-        "Claude Opus 4.8, Claude Opus 5, GPT-5.6 Terra (Nov 16 2026)"
-      ]
-    },
-    "cursor": {
-      "models": [
-        {
-          "name": "Grok 4.7",
-          "note": "First-party; official Cursor models page lists Grok 4.7/4.6/4.5 and Composer 2.5 as the Free and Plus models."
-        },
-        {
-          "name": "Grok 4.6"
-        },
-        {
-          "name": "Grok 4.5"
-        },
-        {
-          "name": "Composer 2.5"
-        },
-        {
-          "name": "Claude Opus 5.5",
-          "unavailableOn": [
-            "Free",
-            "Plus"
-          ],
-          "note": "Official page: third-party models need Premium or above. The model names come from third-party lists (checked ~Sep 26 2026); verify."
-        },
-        {
-          "name": "Claude Sonnet 5",
-          "unavailableOn": [
-            "Free",
-            "Plus"
-          ]
-        },
-        {
-          "name": "Claude Fable 5.1",
-          "unavailableOn": [
-            "Free",
-            "Plus"
-          ]
-        },
-        {
-          "name": "GPT-5.6 Sol",
-          "unavailableOn": [
-            "Free",
-            "Plus"
-          ]
-        },
-        {
-          "name": "GPT-5.6 Terra",
-          "unavailableOn": [
-            "Free",
-            "Plus"
-          ]
-        },
-        {
-          "name": "GPT-5.6 Luna",
-          "unavailableOn": [
-            "Free",
-            "Plus"
-          ]
-        },
-        {
-          "name": "Gemini 3.1 Pro",
-          "unavailableOn": [
-            "Free",
-            "Plus"
-          ]
-        },
-        {
-          "name": "Gemini 3.8 Flash",
-          "unavailableOn": [
-            "Free",
-            "Plus"
-          ]
-        }
-      ]
-    },
-    "opencode": {
-      "models": []
-    },
-    "kimi": {
-      "models": [
-        {
-          "name": "Kimi K3.1 Pro",
-          "match": [
-            "kimi-k3-1-pro",
-            "k3-1-pro"
-          ],
-          "note": "Docs name it as the K2 migration target (secondary sources)."
-        },
-        {
-          "name": "Kimi K3.1 Pro Highspeed",
-          "match": [
-            "kimi-k3-1-pro-highspeed"
-          ]
-        },
-        {
-          "name": "Kimi K3",
-          "match": [
-            "kimi-k3"
-          ],
-          "note": "Previous generation per secondary sources."
-        },
-        {
-          "name": "Kimi for Coding",
-          "match": [
-            "kimi-for-coding"
-          ],
-          "note": "Single unofficial source (kimi-code/ prefix); verify against Moonshot's Kimi Code docs."
-        },
-        {
-          "name": "Kimi K2.7 Code",
-          "match": [
-            "kimi-k2-7-code"
-          ],
-          "removing": "2026-12",
-          "note": "Closed to users registered after Nov 1; deprecation expected late Dec 2026 per Moonshot's model list."
-        },
-        {
-          "name": "Kimi K2.6",
-          "match": [
-            "kimi-k2-6"
-          ],
-          "removing": "2026-12",
-          "note": "Same late-December deprecation."
-        }
-      ],
-      "removed": [
-        "kimi-k2 series: K2, K2 Instruct, K2 Thinking, K2 Turbo (sources disagree on date: May 25 or end of 2026)"
-      ]
-    },
-    "kiro": {
-      "models": []
-    },
-    "devin": {
-      "models": []
-    },
-    "amp": {
-      "models": [
-        {
-          "name": "Low mode",
-          "match": [
-            "low"
-          ],
-          "note": "Amp chooses the model per mode; the July 8 2026 changelog introduced these four modes. No per-mode model mapping found."
-        },
-        {
-          "name": "Medium mode",
-          "match": [
-            "medium"
-          ]
-        },
-        {
-          "name": "High mode",
-          "match": [
-            "high"
-          ]
-        },
-        {
-          "name": "Ultra mode",
-          "match": [
-            "ultra"
-          ]
-        }
-      ],
-      "removed": [
-        "smart, deep, rush, large modes (deprecated Jul 8 2026)"
-      ]
-    },
-    "hermes": {
-      "models": [
-        {
-          "name": "Hermes 4 70B",
-          "note": "Single secondary source; Hermes Agent is model-agnostic, so this is the Nous model family, not an enforced list."
-        },
-        {
-          "name": "Hermes 4 405B",
-          "note": "Same single source."
-        },
-        {
-          "name": "Hermes 4.3 36B",
-          "note": "Same single source (long-context pick)."
-        }
-      ]
+    {
+     "name": "Claude Haiku 5.5",
+     "match": [
+      "claude-haiku-5-5"
+     ]
     }
+   ]
   },
-  "plans": {
-    "copilot": {
-      "freeNote": "Free plan: 2,000 completions a month and limited chat and agent credits."
+  "antigravity": {
+   "models": [
+    {
+     "name": "Gemini 4 Carbon",
+     "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
     },
-    "opencode": {
-      "freeNote": "Free models have a daily request limit that isn't published.",
-      "goNote": "Go ($10 a month): 20% per 5 hours, 50% per week, 100% per month. Shown as meters only if a Go key exists and OpenCode reports usage; no local source found yet. OpenCode's docs list these as $12 / $30 / $60 of usage, and the weekly cap is missing from some doc versions - verify."
+    {
+     "name": "Gemini 4 Argon",
+     "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
     },
-    "kimi": {
-      "note": "Kimi Code needs Plus or higher: a rolling 5-hour limit, and no weekly limit on new plans (legacy plans have both). Shown only as the windows the login reports; no login or usage command found on this machine."
+    {
+     "name": "Gemini 4 Hydrogen",
+     "note": "Reported to stay on Free/AI Plus, but not in agy's live list for a Free account on Nov 21 2026, so it shows unavailable."
     },
-    "kiro": {
-      "freeNote": "Free tier: 50 credits a month; paid tiers run from 1,000 to 10,000 credits."
+    {
+     "name": "Orchestrator Carbon",
+     "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
     },
-    "amp": {
-      "freeNote": "The free tier is in flux: the ad-supported tier was reported paused, and a $10 daily allowance remains for some users. A daily allowance is shown only if Amp reports one."
+    {
+     "name": "Orchestrator Argon",
+     "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
     },
-    "hermes": {
-      "freeNote": "Nous Portal free tier: free models only. Paid plans are $20, $100 and $200.",
-      "localNote": "Free and local: Hermes the software is free."
+    {
+     "name": "Gemini 3.8 Flash"
+    },
+    {
+     "name": "Gemini 3.7 Flash",
+     "note": "Reported Gemini Enterprise only in Antigravity; Gemini API retirement is 2027-01-28."
+    },
+    {
+     "name": "Gemini 3.1 Pro",
+     "note": "Unverified: one user-forum post says it was removed from Antigravity's selector Oct 12 2026; another source says Enterprise-only. Not in agy's live list, so it shows unavailable."
+    },
+    {
+     "name": "Claude Sonnet 5.5",
+     "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
+    },
+    {
+     "name": "Claude Opus 5.5",
+     "note": "Reported paid-tier (Pro/Ultra/Enterprise) only."
+    },
+    {
+     "name": "Claude Sonnet 4.6",
+     "removing": "2026-11-30",
+     "note": "Removal date announced as Nov 2, then Nov 18, now Nov 30 2026. The Nov 30 date comes from a community post on the Google AI Developers Forum, not an official Google page, so it may move again: agy's live list is the truth (still listed on Nov 22 2026). Claude Sonnet 4.6."
+    },
+    {
+     "name": "Claude Opus 4.6",
+     "removing": "2026-11-30",
+     "note": "Removal date announced as Nov 2, then Nov 18, now Nov 30 2026. The Nov 30 date comes from a community post on the Google AI Developers Forum, not an official Google page, so it may move again: agy's live list is the truth (still listed on Nov 22 2026). Claude Opus 4.6."
+    },
+    {
+     "name": "GPT-OSS-120b",
+     "match": [
+      "gpt-oss-120b"
+     ],
+     "removing": "2026-11-30",
+     "note": "Removal date announced as Nov 2, then Nov 18, now Nov 30 2026. The Nov 30 date comes from a community post on the Google AI Developers Forum, not an official Google page, so it may move again: agy's live list is the truth (still listed on Nov 22 2026). GPT-OSS-120b (every plan)."
     }
+   ],
+   "removed": [
+    "Gemini 3.6 Flash: Gemini API retirement 2026-11-19, replacement Gemini 3.8 Flash (third-party lifecycle calendar); absent from agy's live list. Dropped 2026-11-21."
+   ]
+  },
+  "grok": {
+   "models": [
+    {
+     "name": "Grok 4.7"
+    },
+    {
+     "name": "Grok 4.6"
+    },
+    {
+     "name": "Grok 4.5"
+    },
+    {
+     "name": "Composer 2.5"
+    }
+   ]
+  },
+  "codex": {
+   "models": [
+    {
+     "name": "GPT-6.2 Astra"
+    },
+    {
+     "name": "GPT-6.2 Sol"
+    },
+    {
+     "name": "GPT-6.1 Sol"
+    },
+    {
+     "name": "GPT-6.1 Terra"
+    },
+    {
+     "name": "GPT-6 Luna"
+    }
+   ]
+  },
+  "copilot": {
+   "models": [
+    {
+     "name": "Claude Opus 5.5"
+    },
+    {
+     "name": "GPT-6.1 Sol",
+     "note": "Named as the replacement in GitHub's Oct 19 2026 deprecation changelog."
+    },
+    {
+     "name": "Grok 4.7",
+     "note": "Named as a replacement for Grok 4.5 in one source; changelog sources disagree (4.6 vs 4.7)."
+    },
+    {
+     "name": "Claude Fable 5",
+     "removing": "2026-12-14",
+     "note": "Dec 14 batch: third-party reports citing a GitHub changelog dated Nov 13 2026; verify at github.blog/changelog."
+    },
+    {
+     "name": "Claude Haiku 4.5",
+     "removing": "2026-12-14",
+     "note": "Same Dec 14 batch; annual-plan individual subscribers reportedly exempt."
+    },
+    {
+     "name": "Gemini 3.8 Flash",
+     "removing": "2026-12-14",
+     "note": "Same Dec 14 batch (third-party report)."
+    },
+    {
+     "name": "Gemini 4 Argon",
+     "removing": "2026-12-14",
+     "note": "Same Dec 14 batch (third-party report)."
+    },
+    {
+     "name": "Grok 4.6",
+     "removing": "2026-12-14",
+     "note": "Same Dec 14 batch (third-party report)."
+    },
+    {
+     "name": "Kimi K3",
+     "removing": "2026-12-14",
+     "note": "Same Dec 14 batch (third-party report)."
+    }
+   ],
+   "removed": [
+    "Gemini 3.5 Flash, Gemini 3.6 Flash, Kimi K2.7 Code, Claude Opus 4.7 (Oct 2 2026)",
+    "GPT-5.5, GPT-5.4, GPT-5.4 mini, GPT-5 mini, Gemini 3.7 Flash, Grok 4.5 (Oct 19 2026)",
+    "Gemini 3.1 Pro, Claude Opus 4.5/4.6, Claude Sonnet 4.5/4.6, Raptor Mini (Sep 1 2026)",
+    "Claude Opus 4.8, Claude Opus 5, GPT-5.6 Terra (Nov 16 2026)"
+   ]
+  },
+  "cursor": {
+   "models": [
+    {
+     "name": "Grok 4.7",
+     "note": "First-party; official Cursor models page lists Grok 4.7/4.6/4.5 and Composer 2.5 as the Free and Plus models."
+    },
+    {
+     "name": "Grok 4.6"
+    },
+    {
+     "name": "Grok 4.5"
+    },
+    {
+     "name": "Composer 2.5"
+    },
+    {
+     "name": "Claude Opus 5.5",
+     "unavailableOn": [
+      "Free",
+      "Plus"
+     ],
+     "note": "Official page: third-party models need Premium or above. The model names come from third-party lists (checked ~Sep 26 2026); verify."
+    },
+    {
+     "name": "Claude Sonnet 5",
+     "unavailableOn": [
+      "Free",
+      "Plus"
+     ]
+    },
+    {
+     "name": "Claude Fable 5.1",
+     "unavailableOn": [
+      "Free",
+      "Plus"
+     ]
+    },
+    {
+     "name": "GPT-5.6 Sol",
+     "unavailableOn": [
+      "Free",
+      "Plus"
+     ]
+    },
+    {
+     "name": "GPT-5.6 Terra",
+     "unavailableOn": [
+      "Free",
+      "Plus"
+     ]
+    },
+    {
+     "name": "GPT-5.6 Luna",
+     "unavailableOn": [
+      "Free",
+      "Plus"
+     ]
+    },
+    {
+     "name": "Gemini 3.1 Pro",
+     "unavailableOn": [
+      "Free",
+      "Plus"
+     ]
+    },
+    {
+     "name": "Gemini 3.8 Flash",
+     "unavailableOn": [
+      "Free",
+      "Plus"
+     ]
+    }
+   ]
+  },
+  "opencode": {
+   "models": []
+  },
+  "kimi": {
+   "models": [
+    {
+     "name": "Kimi K3.1 Pro",
+     "match": [
+      "kimi-k3-1-pro",
+      "k3-1-pro"
+     ],
+     "note": "Docs name it as the K2 migration target (secondary sources)."
+    },
+    {
+     "name": "Kimi K3.1 Pro Highspeed",
+     "match": [
+      "kimi-k3-1-pro-highspeed"
+     ]
+    },
+    {
+     "name": "Kimi K3",
+     "match": [
+      "kimi-k3"
+     ],
+     "note": "Previous generation per secondary sources."
+    },
+    {
+     "name": "Kimi for Coding",
+     "match": [
+      "kimi-for-coding"
+     ],
+     "note": "Single unofficial source (kimi-code/ prefix); verify against Moonshot's Kimi Code docs."
+    },
+    {
+     "name": "Kimi K2.7 Code",
+     "match": [
+      "kimi-k2-7-code"
+     ],
+     "removing": "2026-12",
+     "note": "Closed to users registered after Nov 1; deprecation expected late Dec 2026 per Moonshot's model list."
+    },
+    {
+     "name": "Kimi K2.6",
+     "match": [
+      "kimi-k2-6"
+     ],
+     "removing": "2026-12",
+     "note": "Same late-December deprecation."
+    }
+   ],
+   "removed": [
+    "kimi-k2 series: K2, K2 Instruct, K2 Thinking, K2 Turbo (sources disagree on date: May 25 or end of 2026)"
+   ]
+  },
+  "kiro": {
+   "models": []
+  },
+  "devin": {
+   "models": []
+  },
+  "amp": {
+   "models": [
+    {
+     "name": "Low mode",
+     "match": [
+      "low"
+     ],
+     "note": "Amp chooses the model per mode; the July 8 2026 changelog introduced these four modes. No per-mode model mapping found."
+    },
+    {
+     "name": "Medium mode",
+     "match": [
+      "medium"
+     ]
+    },
+    {
+     "name": "High mode",
+     "match": [
+      "high"
+     ]
+    },
+    {
+     "name": "Ultra mode",
+     "match": [
+      "ultra"
+     ]
+    }
+   ],
+   "removed": [
+    "smart, deep, rush, large modes (deprecated Jul 8 2026)"
+   ]
+  },
+  "hermes": {
+   "models": [
+    {
+     "name": "Hermes 4 70B",
+     "note": "Single secondary source; Hermes Agent is model-agnostic, so this is the Nous model family, not an enforced list."
+    },
+    {
+     "name": "Hermes 4 405B",
+     "note": "Same single source."
+    },
+    {
+     "name": "Hermes 4.3 36B",
+     "note": "Same single source (long-context pick)."
+    }
+   ]
   }
+ },
+ "plans": {
+  "copilot": {
+   "freeNote": "Free plan: no premium requests; chat and completions each have a monthly limit (shown above)."
+  },
+  "opencode": {
+   "freeNote": "Free models have a daily request limit that isn't published.",
+   "goNote": "Go ($10 a month): 20% per 5 hours, 50% per week, 100% per month. Shown as meters only if a Go key exists and OpenCode reports usage; no local source found yet. OpenCode's docs list these as $12 / $30 / $60 of usage, and the weekly cap is missing from some doc versions - verify.",
+   "cantRead": "Can't read: a limit for the free models (none is published). Shown: tokens from your local sessions."
+  },
+  "kimi": {
+   "note": "Kimi Code needs Plus or higher: a rolling 5-hour limit, and no weekly limit on new plans (legacy plans have both). Shown only as the windows the login reports; no login or usage command found on this machine.",
+   "cantRead": "Can't read: Kimi's quotas, because Kimi isn't signed in. Run `kimi login` and they will show."
+  },
+  "kiro": {
+   "freeNote": "Free tier: 50 credits a month; paid tiers run from 1,000 to 10,000 credits."
+  },
+  "amp": {
+   "freeNote": "The free tier is in flux: the ad-supported tier was reported paused, and a $10 daily allowance remains for some users. A daily allowance is shown only if Amp reports one.",
+   "cantRead": "Can't read: a usage limit or remaining allowance. `amp usage` reports a credit balance and dollar costs, which this panel never shows; only its token total is used."
+  },
+  "hermes": {
+   "freeNote": "Nous Portal free tier: free models only. Paid plans are $20, $100 and $200.",
+   "localNote": "Free and local: Hermes the software is free.",
+   "cantRead": "Can't read: any limit. Hermes has none of its own and Nous Portal's free tier publishes none. Shown: tokens from your local sessions."
+  }
+ }
 }

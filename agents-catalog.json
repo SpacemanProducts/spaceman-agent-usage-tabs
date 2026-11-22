@@ -63,39 +63,6 @@
    "maintained": "Mistral announced Vibe 2.0 and sells it with Le Chat Pro and Team."
   },
   {
-   "id": "droid",
-   "name": "Factory Droid",
-   "bins": [
-    "droid"
-   ],
-   "usageType": "session_weekly",
-   "note": "Plans (Pro $20, Plus $100, Max $200) use independent rolling limits over 5-hour, 7-day and 30-day windows. Factory does not publish the limits in tokens or dollars; /limits in Droid shows your use.",
-   "sources": [
-    "https://docs.factory.ai/pricing",
-    "https://docs.factory.ai/pricing/individuals"
-   ],
-   "unsure": "The pricing page still shows an older Standard Tokens table that conflicts with the rolling-window description; the windows are from the newer text.",
-   "reads": "`/limits` inside Droid (a credit-usage breakdown by window) and Factory's analytics API (/cost/me/query, personal consumption).",
-   "maintained": "Factory's changelog has frequent releases (0.94.0 and later)."
-  },
-  {
-   "id": "auggie",
-   "name": "Augment (Auggie)",
-   "bins": [
-    "auggie"
-   ],
-   "usageType": "monthly_credits",
-   "note": "Standard ($20) and Business ($100) plans include a monthly usage allowance across the model, context engine and compute, which expires at month end. CLI use draws on it; budgets can pause access until next month.",
-   "sources": [
-    "https://docs.augmentcode.com/models/credit-based-pricing",
-    "https://docs.augmentcode.com/models/token-based-pricing",
-    "https://www.augmentcode.com/pricing"
-   ],
-   "unsure": "Augment's docs describe both credits and token-based billing and its plans changed more than once; the exact unit may be dollars of usage, not credits.",
-   "reads": "`auggie --print --show-credits` prints a credit usage summary for a run; the web credit dashboard shows monthly totals. No documented command returns the remaining allowance.",
-   "maintained": "Augment publishes Auggie CLI release notes (0.5.x and later) and a public repo."
-  },
-  {
    "id": "dsh",
    "name": "DeepSeek Harness",
    "bins": [
@@ -140,9 +107,10 @@
     "https://docs.openclaw.ai/reference/api-usage-costs",
     "https://docs.openclaw.ai/concepts/usage-tracking/index.html"
    ],
-   "unsure": "Whether reusing a Claude subscription is allowed is described as unsettled; check Anthropic's terms. Docs mirrors span several versions.",
-   "reads": "`openclaw status --usage` and `openclaw models status --json` read the quota windows of the providers it uses.",
-   "maintained": "OpenClaw's docs are versioned monthly (2026.7.1 seen)."
+   "unsure": "The field names inside a usage window are not documented and no populated sample was available (the provider here reported an error), so the reader accepts several spellings and shows a bar only when a percent is really present. Reusing a Claude subscription is described as unsettled; check Anthropic's terms.",
+   "reads": "`openclaw status --usage --json` (documented): usage.providers[].windows[] for the providers it is signed in to. Read by bin/openclaw-usage.mjs.",
+   "maintained": "OpenClaw's docs are versioned monthly (2026.7.1 seen).",
+   "tabText": "Bring your own key, no limits of its own.\nUsage depends on your model provider."
   }
  ],
  "dropped": {
@@ -158,6 +126,8 @@
   "reasonix": "no usage or limits documented",
   "pi": "bring your own key: nothing of its own to read",
   "omp": "bring your own key: nothing of its own to read",
-  "commandcode": "only a third-party tool reads its usage; no official command or API"
+  "commandcode": "only a third-party tool reads its usage; no official command or API",
+  "droid": "Factory's analytics endpoint (/cost/me/query) needs an Enterprise org (403 enterprise_required otherwise) and returns credits consumed only, never remaining allowance or window limits; /limits works only inside Droid.",
+  "auggie": "Augment documents no command or API that returns remaining credits (only per-run --show-cost and an Enterprise dashboard); auggie account status and its web endpoints are third-party, unverified."
  }
 }

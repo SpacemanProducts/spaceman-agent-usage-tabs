@@ -16,7 +16,7 @@ import { fetchResets, corroborate } from "./agy-resets.mjs";
 import { playSound } from "./play-sound.mjs";
 import { planLimitsOnly } from "./plan-limits.mjs";
 import { codexResets } from "./codex-resets.mjs";
-import { planAlerts, markFired, alertText } from "./alert-state.mjs";
+import { planAlerts, markFired, alertText, planHandoffTriggers, markHandoffFired } from "./alert-state.mjs";
 import { buildModels } from "./models.mjs";
 import { liveModels } from "./live-models.mjs";
 import { planInfo } from "./plan-info.mjs";
@@ -24,6 +24,8 @@ import { makeInstalledCheck, agentCli } from "./installed.mjs";
 import { planLoginNotices, planInstallNotices } from "./login-watch.mjs";
 import { buildAccounts } from "./accounts.mjs";
 import { loadCatalog, tabNote } from "./catalog.mjs";
+import { readOpenclawUsage } from "./openclaw-usage.mjs";
+import { readAmpUsage } from "./amp-usage.mjs";
 import { maybeWriteHandoff } from "./handoff.mjs";
 import { createDiagnostics, checkAgentData } from "./diagnostics.mjs";
 
@@ -219,6 +221,11 @@ for (const a of AGENTS) {
   } else if (a.catalog && !a.builtin) {
     // No Omarchy usage record: say how this agent reports usage (from the catalog) instead of showing meters.
     Object.assign(out, { usageType: a.catalog.usageType, planNote: tabNote(a.catalog, CATALOG.types), signedIn: null, catalog: true });
+    if (a.id === "openclaw") {
+      const u = readOpenclawUsage({ env: ENV }); out.limits = u.limits; out.status = u.status;
+      // Only a provider that really failed gets a can't-read line (named, no repair hints).
+      if (!u.limits.length && u.failed?.length) out.cantRead = `Can't read ${u.failed.join(", ")} usage: the provider reported an error.`;
+    }   // its own documented status command
   } else {
     const local = a.builtin ? fromBuiltin(a.builtin, a.id) : null;
     if (local) Object.assign(out, local, { status: "" });
@@ -254,7 +261,7 @@ for (const a of AGENTS) {
   if (a.id === "amp") {
     const m = planInfo("amp", { env: ENV, stateDir: OUT_DIR, onUnexpected });
     out.signedIn = !!m;
-    if (m) { if (m.note) out.planNote = m.note; out.status = ""; }
+    if (m) { if (m.note) out.planNote = m.note; out.status = ""; const u = readAmpUsage({ env: ENV }); if (u.status) out.status = u.status; }   // `amp usage --details`: the token total only
   }
   if (a.id === "hermes") {
     const h = planInfo("hermes", { env: ENV, stateDir: OUT_DIR, onUnexpected });
@@ -265,6 +272,9 @@ for (const a of AGENTS) {
   if (a.id === "opencode") out.signedIn = null; // free models need no login
   if (a.id === "opencode" && (live || []).some((m) => /free/i.test(m.id)) && plans.opencode?.freeNote) out.planNote = plans.opencode.freeNote;
   delete out.copilotFree;
+  // A plain line saying what this tab cannot read, shown only while it really has nothing to show (no meters).
+  const cant = plans[a.id]?.cantRead || a.catalog?.cantRead || "";
+  if (cant && !(out.limits || []).length && !(a.id === "kimi" && out.signedIn !== false)) out.cantRead = cant;
   if (a.catalog && a.builtin) Object.assign(out, { usageType: a.catalog.usageType, planNote: tabNote(a.catalog, CATALOG.types), catalog: true });
 
   // Plan limits, usage and resets only: never spend, overage or top-up meters.
@@ -336,29 +346,35 @@ function untilReset(iso) {
 }
 // When a SESSION meter's warning (or limit alert) fires, write handoff/HANDOFF.md in the active repo and point AGENTS.md at
 // it, rebuilt each time. One note per run, for the agent closest to its limit. Switch it off in the gear settings.
-function writeHandoffNote(sent) {
+// The handoff note has its own trigger, not the alert threshold: a SESSION meter at 90% or more, once per usage window
+// (remembered in handoff-fired.json). It asks the first time instead of writing; see maybeWriteHandoff.
+const HANDOFF_FIRED = path.join(OUT_DIR, "handoff-fired.json");
+function handoffCheck(list) {
   try {
-    const r = maybeWriteHandoff({ sent, settings: readJson(path.join(OUT_DIR, "settings.json")), untilReset,
-      projectsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), "projects"), squadDirFile: path.join(OUT_DIR, "squad-dir"),
-      pendingFile: path.join(OUT_DIR, "handoff-pending.json") });
-    if (r === "asked")   // the first time only: nothing was written; the panel asks
-      spawnSync("notify-send", ["-a", "Cook Meter", "-u", "normal", "-i", "dialog-question", "-h", "boolean:suppress-sound:true",
-        "Handoff note waiting for your OK", "A session is near its limit. Open Cook Meter to allow, skip or turn off handoff notes."], { env: ENV, timeout: 5000 });
+    const { toFire, memory } = planHandoffTriggers(list, readJson(HANDOFF_FIRED) || {});
+    if (toFire.length) {
+      const r = maybeWriteHandoff({ sent: toFire, settings: readJson(path.join(OUT_DIR, "settings.json")), untilReset,
+        projectsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), "projects"), squadDirFile: path.join(OUT_DIR, "squad-dir"),
+        pendingFile: path.join(OUT_DIR, "handoff-pending.json") });
+      if (r) for (const item of toFire) markHandoffFired(memory, item);   // asked, waiting or written: never again this window
+      if (r === "asked")   // the first time only: nothing was written; the panel asks
+        spawnSync("notify-send", ["-a", "Cook Meter", "-u", "normal", "-i", "dialog-question", "-h", "boolean:suppress-sound:true",
+          "Handoff note waiting for your OK", "A session is at 90% or more. Open Cook Meter to allow, skip or turn off handoff notes."], { env: ENV, timeout: 5000 });
+    }
+    fs.mkdirSync(OUT_DIR, { recursive: true });
+    fs.writeFileSync(HANDOFF_FIRED, JSON.stringify(memory) + "\n", { mode: 0o600 });
   } catch (e) { diag.add("handoff", `couldn't write the handoff note: ${String(e.message || e)}`); }
 }
 function notifyHighUsage(list) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const { toSend, memory } = planAlerts(list, readJson(NOTIFIED) || {}, THRESHOLD);
-  const sentSession = [];
   for (const item of toSend) {
     const { title, body } = alertText(item, untilReset(item.limit.resetsAt));
     const r = spawnSync("notify-send", ["-a", "Cook Meter", "-u", "critical", "-i", "dialog-warning", "-h", "boolean:suppress-sound:true", title, body], { env: ENV, timeout: 5000 });
     if (r.status === 0) {
       markFired(memory, item); // a failed send is not remembered, so it retries; a sent one never repeats this window
-      sentSession.push(item);
     }
   }
-  writeHandoffNote(sentSession);
   fs.writeFileSync(NOTIFIED, JSON.stringify(memory) + "\n", { mode: 0o600 });
 }
 // ------------------------------------------------------- reset celebration
@@ -390,6 +406,7 @@ for (const { a, windows, info } of pendingResets) {
 if (resetHappened && SOUND_VOLUME > 0) playSound(SOUND_VOLUME, path.join(HERE, "..", "sounds", resetAssets(surpriseHappened ? "surprise" : "scheduled").sound));
 
 notifyHighUsage(agents);
+handoffCheck(agents);
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const tmp = `${OUT}.${process.pid}.tmp`;

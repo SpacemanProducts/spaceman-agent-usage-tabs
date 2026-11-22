@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { resolveLogin } from "./agy-login.mjs";
+import { parseQuota, quotaGroups } from "./agy-quota.mjs";
 
 const URL_BASE = "https://daily-cloudcode-pa.googleapis.com";
 const root = process.env.AGY_DIR || path.join(os.homedir(), ".gemini", "antigravity-cli");
@@ -57,14 +58,6 @@ const post = async (endpoint, body) => {
   return res.json();
 };
 
-const used = (b) => {
-  if (!b || b.disabled === true) return null;
-  const r = b.remainingFraction ?? b.remaining_fraction;
-  if (r === undefined || r === null) return (b.resetTime || b.reset_time) ? 1 : null;
-  const n = Number(r);
-  return Number.isFinite(n) ? clamp01(1 - n) : null;
-};
-const resetOf = (b) => { const d = new Date(b.resetTime || b.reset_time || ""); return isNaN(d.getTime()) ? "" : d.toISOString(); };
 const tierOf = (a) => {
   for (const k of ["paidTier", "currentTier"]) {
     const x = a?.[k]; if (!x || typeof x !== "object") continue;
@@ -79,20 +72,10 @@ try {
   const assist = await post("loadCodeAssist");
   let project = assist?.cloudaicompanionProject; project = project && typeof project === "object" ? project.id : project;
   const q = await post("retrieveUserQuotaSummary", typeof project === "string" && project.trim() ? { project: project.trim() } : {});
-  let groups = Array.isArray(q.groups) ? q.groups.filter((g) => g && typeof g === "object") : [];
-  if (!groups.length && Array.isArray(q.buckets)) groups = [{ displayName: "Gemini", buckets: q.buckets }];
-  const limits = [];
-  const isWeekly = (b) => /week/i.test(`${b.window || ""} ${b.bucketId || ""} ${b.displayName || ""}`);
-  for (const g of groups) {
-    const gname = String(g.displayName || "").trim();
-    const label = /gemini/i.test(gname) ? "Gemini" : (/claude/i.test(gname) ? "Claude/GPT" : gname || "Other");
-    for (const b of Array.isArray(g.buckets) ? g.buckets : []) {
-      const u = used(b); if (u === null) continue;
-      // Non-Gemini groups are scoped allowances: show them once touched.
-      if (label !== "Gemini" && u === 0) continue;
-      limits.push({ title: `${label} ${isWeekly(b) ? "Weekly" : "Session"}`, percent: u, resetsAt: resetOf(b) });
-    }
-  }
+  const groups = quotaGroups(q);
+  // Diagnostics: AGY_DEBUG_RAW=1 prints what Google reported per pool (names and bucket windows only), to see which pools a plan has.
+  if (process.env.AGY_DEBUG_RAW) console.error(JSON.stringify(groups.map((g) => ({ pool: g.displayName, buckets: (g.buckets || []).map((b) => ({ id: b.bucketId, window: b.window, remaining: b.remainingFraction ?? b.remaining_fraction, disabled: b.disabled, reset: b.resetTime || b.reset_time })) })), null, 1));
+  const limits = parseQuota(q);
   const hasGemini = limits.some((l) => l.title.startsWith("Gemini"));
   out({ limits, plan: tierOf(assist), status: !limits.length ? "Antigravity reported no quota windows." : hasGemini ? "" : "Google reports no Gemini limit for this plan." });
 } catch (e) {

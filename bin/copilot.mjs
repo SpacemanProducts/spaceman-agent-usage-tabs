@@ -11,19 +11,39 @@ const num = (v) => { if (typeof v === "boolean" || v === null || v === undefined
 const PLANS = { individual: "Pro", individual_pro: "Pro+", business: "Business", enterprise: "Enterprise", free: "Free" };
 const fmtDate = (iso) => { const d = new Date(iso); return isNaN(d.getTime()) ? "" : d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }); };
 
+// The plan name. GitHub's `copilot_plan` says "individual" even for a FREE account; `access_type_sku` ("free_limited_copilot")
+// is what tells them apart, so it decides.
+const planOf = (payload) => {
+  if (/free/i.test(String(payload?.access_type_sku || "")) || /free/i.test(String(payload?.copilot_plan || ""))) return "Free";
+  return PLANS[String(payload?.copilot_plan || "").toLowerCase()] || "";
+};
+
+// A monthly meter for the chat or completions allowance (what the Free plan limits). Skipped when the plan has no limit on
+// it (unlimited, no quota, zero entitlement). Uses the most precise figure the snapshot has.
+function allowanceMeter(snap, title, note, resetsAt) {
+  if (!snap || typeof snap !== "object" || snap.unlimited === true || snap.has_quota === false) return null;
+  const ent = num(snap.entitlement);
+  if (ent === null || ent <= 0) return null;
+  const pctLeft = num(snap.percent_remaining), left = num(snap.quota_remaining) ?? num(snap.remaining), spent = num(snap.credits_used);
+  const used = pctLeft !== null ? 1 - pctLeft / 100 : left !== null ? (ent - left) / ent : spent !== null ? spent / ent : null;
+  return used === null ? null : { title, note, window: "monthly", percent: clamp01(used), resetsAt };
+}
+
 export function parseCopilotQuota(payload) {
-  const plan = PLANS[String(payload?.copilot_plan || "").toLowerCase()] || "";
-  const snap = payload?.quota_snapshots?.premium_interactions;
-  if (!snap || typeof snap !== "object") return { limits: [], plan, free: /free/i.test(String(payload?.copilot_plan || "")), status: "" };
-  const resetsAt = (() => { const d = new Date(payload.quota_reset_date_utc || ""); return isNaN(d.getTime()) ? "" : d.toISOString(); })();
-  if (snap.unlimited === true) return { limits: [], plan, status: "Unlimited premium requests on this plan." };
+  const plan = planOf(payload);
+  const free = plan === "Free";
+  const resetsAt = (() => { const d = new Date(payload?.quota_reset_date_utc || ""); return isNaN(d.getTime()) ? "" : d.toISOString(); })();
+  const snaps = payload?.quota_snapshots;
+  const allowances = [allowanceMeter(snaps?.chat, "Chat and agent requests", "Shared plan quota", resetsAt), allowanceMeter(snaps?.completions, "Editor autocomplete", "Not used by the CLI", resetsAt)].filter(Boolean);
+  const snap = snaps?.premium_interactions;
+  if (!snap || typeof snap !== "object") return { limits: allowances, plan, free, status: "" };
+  if (snap.unlimited === true) return { limits: allowances, plan, free, status: "Unlimited premium requests on this plan." };
   const entitlement = num(snap.entitlement);
-  if (entitlement === null) return { limits: [], plan, status: "" };
-  const free = /free/i.test(String(payload?.copilot_plan || ""));
-  const creditsUsed = num(snap.credits_used);
+  if (entitlement === null) return { limits: allowances, plan, free, status: "" };
   if (entitlement <= 0) {
-    // No included allowance means nothing to meter; usage past it would be paid,
-    // which this panel doesn't show. Only the plan's reset date is shown.
+    // No premium requests on this plan: nothing to meter there (anything past it would be paid, which this panel doesn't show).
+    // The chat and completions allowances, when the plan limits them, are the meters; otherwise just the reset date.
+    if (allowances.length) return { limits: allowances, plan, free, status: "" };
     const d = new Date(resetsAt);
     const when = isNaN(d.getTime()) ? "" : ` · resets ${fmtDate(resetsAt)}, 00:00 UTC`;
     return { limits: [], plan, free, status: `No included allowance on this plan${when}` };
@@ -34,8 +54,8 @@ export function parseCopilotQuota(payload) {
     const pctLeft = num(snap.percent_remaining);
     used = remaining !== null ? Math.max(0, entitlement - remaining) : pctLeft !== null ? entitlement * Math.max(0, 100 - pctLeft) / 100 : null;
   }
-  if (used === null) return { limits: [], plan, status: "" };
-  return { limits: [{ title: "Monthly", percent: clamp01(used / entitlement), resetsAt }], plan, free, status: "" };
+  if (used === null) return { limits: allowances, plan, free, status: "" };
+  return { limits: [{ title: "Monthly", percent: clamp01(used / entitlement), resetsAt }, ...allowances], plan, free, status: "" };
 }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {

@@ -8,8 +8,8 @@ const { types, agents, dropped } = loadCatalog();
 const ids = agents.map((a) => a.id);
 
 // ---- the rules for being in the catalog: still maintained AND a working way to read usage or plan limits
-assert.deepEqual(ids, ["qwen", "vibe", "droid", "auggie", "dsh", "mcode", "openclaw"]);
-for (const gone of ["gemini", "aider", "roo", "cline", "goose", "crush", "kilo", "openhands", "plandex", "codewhale", "reasonix", "pi", "omp", "commandcode"])
+assert.deepEqual(ids, ["qwen", "vibe", "dsh", "mcode", "openclaw"]);
+for (const gone of ["gemini", "aider", "roo", "cline", "goose", "crush", "kilo", "openhands", "plandex", "codewhale", "reasonix", "pi", "omp", "commandcode", "droid", "auggie"])
   assert.ok(!ids.includes(gone), `${gone} is not in the catalog`);
 assert.ok(dropped.gemini && dropped.aider, "removed agents are listed with their reason");
 for (const [id, why] of Object.entries(dropped)) assert.ok(String(why).length > 10, `${id}: dropped for a stated reason`);
@@ -31,13 +31,14 @@ for (const a of agents) {
   assert.ok(a.note && a.note.length > 30, `${a.id}: has a real note`);
   assert.ok(Array.isArray(a.sources) && a.sources.length > 0 && a.sources.every((s) => /^https:\/\//.test(s)), `${a.id}: cites https sources`);
   if ("unsure" in a) assert.ok(String(a.unsure).length > 20, `${a.id}: an unsure flag says why`);
-  if (a.builtin) assert.ok(fs.existsSync(`/usr/share/omarchy/bin/omarchy-agent-usage-${a.builtin}`) || true, "builtin names an Omarchy usage collector");
+  if (a.builtin && !process.env.SKIP_OMARCHY && fs.existsSync("/usr/share/omarchy/bin")) assert.ok(fs.existsSync(`/usr/share/omarchy/bin/omarchy-agent-usage-${a.builtin}`), `${a.id}: builtin names a real Omarchy usage collector`);
 }
 for (const t of ["session_weekly", "monthly_credits", "request_count", "byok_no_limits", "free_no_limits", "no_usage_data"]) assert.ok(types[t], `type ${t} defined`);
 // An unsure entry says so on its tab; a sure one doesn't.
-const droid = agents.find((a) => a.id === "droid"), mcode = agents.find((a) => a.id === "mcode");
-assert.match(tabNote(droid, types), /^Session and weekly limits\. Plans/);
-assert.match(tabNote(droid, types), /Not fully verified/);
+const openclaw = agents.find((a) => a.id === "openclaw"), mcode = agents.find((a) => a.id === "mcode");
+assert.equal(tabNote(openclaw, types), "Bring your own key, no limits of its own.\nUsage depends on your model provider.", "OpenClaw: two plain lines");
+assert.doesNotMatch(tabNote(openclaw, types), /verified|doctor/i, "no verification note or repair hint on its tab");
+assert.match(tabNote(agents.find((a) => a.id === "dsh"), types), /Not fully verified/, "other unsure entries still say so");
 assert.doesNotMatch(tabNote(mcode, types), /Not fully verified/);
 assert.deepEqual(catalogIds(), ids);
 assert.deepEqual(loadCatalog("/nonexistent.json"), { types: {}, agents: [], dropped: {} }, "a missing catalog is empty, not a crash");

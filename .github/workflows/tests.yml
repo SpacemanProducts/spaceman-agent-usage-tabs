@@ -1,0 +1,43 @@
+name: tests
+
+# Runs the whole test suite on every push and pull request. The tests need only node, git, bash, python3 and flock. One part
+# of one test compares our agent names with Omarchy's own `omarchy-default-agent`; that file does not exist on a CI machine, so
+# that check skips itself (SKIP_OMARCHY=1 says so explicitly). Everything else uses stand-ins for gum, cs and the terminal.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Git identity (the tests make throwaway repos)
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+
+      - name: Scripts parse
+        run: |
+          for f in bin/*.sh; do bash -n "$f"; done
+          python3 -m py_compile bin/squad-drive.py
+          for f in bin/*.mjs; do node --check "$f"; done
+          python3 -c "import json; json.load(open('agents-catalog.json')); json.load(open('models.json')); json.load(open('manifest.json'))"
+
+      - name: Tests
+        env:
+          SKIP_OMARCHY: "1"
+        run: |
+          status=0
+          for t in bin/*.test.mjs; do
+            echo "::group::$t"
+            node "$t" || { echo "::error file=$t::failed"; status=1; }
+            echo "::endgroup::"
+          done
+          exit $status

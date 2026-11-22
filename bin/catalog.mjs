@@ -17,6 +17,7 @@ export function loadCatalog(file = FILE) {
 
 // The note shown on an agent's tab: what kind of usage it has, then the specifics. An entry flagged `unsure` says so.
 export function tabNote(entry, types) {
+  if (entry.tabText) return entry.tabText;   // a fixed text for the tab (no type heading, no "not verified" suffix)
   const t = types[entry.usageType] || {};
   const head = t.label ? `${t.label}.` : "";
   const tail = entry.unsure ? " (Not fully verified: see agents-catalog.json.)" : "";

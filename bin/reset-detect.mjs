@@ -30,7 +30,7 @@ export function detectResets(prevLimits, nextLimits, minDrop = 0.5) {
   const prev = new Map((Array.isArray(prevLimits) ? prevLimits : []).map((l) => [l?.title, l?.percent]));
   const out = [];
   for (const l of Array.isArray(nextLimits) ? nextLimits : []) {
-    if (!WATCHED.test(String(l?.title))) continue;
+    if (!WATCHED.test(`${l?.title ?? ""} ${l?.window ?? ""}`)) continue;
     const before = prev.get(l.title);
     if (typeof before !== "number" || typeof l.percent !== "number") continue;
     if (before - l.percent > minDrop) out.push(l.title);
@@ -47,7 +47,7 @@ export function classifyResets(prevLimits, nextLimits, now = Date.now(), { minDr
   const prev = new Map((Array.isArray(prevLimits) ? prevLimits : []).map((l) => [l?.title, l]));
   const out = [];
   for (const l of Array.isArray(nextLimits) ? nextLimits : []) {
-    if (!WATCHED.test(String(l?.title))) continue;
+    if (!WATCHED.test(`${l?.title ?? ""} ${l?.window ?? ""}`)) continue;
     const before = prev.get(l.title);
     if (typeof before?.percent !== "number" || typeof l.percent !== "number") continue;
     if (before.percent - l.percent <= minDrop) continue;

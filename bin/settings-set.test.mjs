@@ -54,7 +54,7 @@ for (const bad of ["", "nope", "claude,claude", "claude,,"]) if (bad !== "claude
 console.log("settings-set: tab order tests passed");
 
 // Catalog agents are real tabs: they can be hidden and reordered
-assert.deepEqual(applyHidden({}, "droid", "true"), { hiddenAgents: ["droid"] });
+assert.deepEqual(applyHidden({}, "openclaw", "true"), { hiddenAgents: ["openclaw"] });
 assert.deepEqual(applyOrder({}, "qwen,claude").tabOrder, ["qwen", "claude"]);
-assert.equal(DEFAULT_ORDER.indexOf("claude"), 0); assert.ok(DEFAULT_ORDER.indexOf("droid") > DEFAULT_ORDER.indexOf("hermes"), "catalog agents come after the core twelve");
+assert.equal(DEFAULT_ORDER.indexOf("claude"), 0); assert.ok(DEFAULT_ORDER.indexOf("openclaw") > DEFAULT_ORDER.indexOf("hermes"), "catalog agents come after the core twelve");
 console.log("settings-set: catalog ids ok");

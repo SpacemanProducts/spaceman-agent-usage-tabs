@@ -6,6 +6,25 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.14.0 - 2026-11-22
+- The gear, **+** and **CS** each open as their own screen: the chips and usage meters are hidden, only that screen is shown, and a
+  Back button in the header returns. Claude Squad's screen has the agent picker and a folder step (recent repos, new project, browse).
+  The add-account screen's helper text is now "Adds another login for one of these agents. You'll be asked to name it."
+- The handoff note asks first (Allow / Not now / Never; nothing is written until you allow it), triggers only at 90% session usage or
+  more, and only once per usage window. It no longer follows the alert threshold.
+- Claude Squad shows "Starting agents" and ignores your keypresses until the sessions are started, then discards what you typed.
+- Copilot: a Free account is now labelled Free (it was "Pro"), and its real limits are shown: **Chat and agent requests** (shared plan
+  quota) and **Editor autocomplete** (not used by the CLI), with the numbers unchanged.
+- Antigravity's removal warning: Sonnet 4.6, Opus 4.6 and GPT-OSS-120b now say "removing Nov 30" (the latest date reported, from a
+  community forum post); once a removal date passes while the model is still listed, no warning is shown. One bar per Antigravity
+  pool is covered by tests (a Free plan only reports the Claude/GPT weekly bucket).
+- Readers and plain "Can't read" lines: OpenClaw (`openclaw status --usage --json`, two-line tab, can't-read only when a provider
+  failed), Amp (7-day token total from `amp usage --details`; its credit balance and dollar costs are never shown), and OpenCode, Kimi
+  and Hermes (through Omarchy's usage records) each say plainly what they can't read. The catalog is trimmed to five agents with a
+  working way to read usage (Qwen Code, Mistral Vibe, DeepSeek Harness, MiniMax Code, OpenClaw); Factory Droid and Augment are out.
+- A GitHub Action runs the tests on every push and pull request (one Omarchy-only check skips itself elsewhere).
+- Screenshots retaken.
+
 ## 1.13.1 - 2026-11-22
 - Claude Squad opens one window at a time: the window holds a lock while it is open, and a second launch says so instead of running a
   second `cs` that would overwrite the first one's saved sessions. A crashed window leaves no stale lock.

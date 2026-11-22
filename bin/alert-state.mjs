@@ -29,17 +29,22 @@ function migrate(before) {
   return out;
 }
 
-// -> { toSend: [{ agent, limit, key, level: "warn"|"limit", resetMs }], memory }
-export function planAlerts(agents, before, threshold, now = Date.now()) {
-  const memory = migrate(before);
-  const toSend = [];
-  // A multi-account agent also alerts per account, named by its label.
+// A multi-account agent is watched per account too, each named by its label.
+function watchedAgents(agents) {
   const watched = [];
   for (const a of agents || []) {
     watched.push(a);
     if ((a.accounts || []).length > 1)
       for (const acc of a.accounts) watched.push({ ...a, id: `${a.id}:${acc.id}`, name: `${a.name} (${acc.label})`, limits: acc.limits, accounts: undefined });
   }
+  return watched;
+}
+
+// -> { toSend: [{ agent, limit, key, level: "warn"|"limit", resetMs }], memory }
+export function planAlerts(agents, before, threshold, now = Date.now()) {
+  const memory = migrate(before);
+  const toSend = [];
+  const watched = watchedAgents(agents);
   for (const a of watched) {
     for (const l of a.limits || []) {
       if (!WATCHED.test(String(l.title)) || typeof l.percent !== "number") continue;
@@ -80,4 +85,30 @@ export function alertText(item, untilReset = "") {
   if (item.level === "limit")
     return { title: `${item.agent.name}: limit reached`, body: [`${item.limit.title} limit hit (${pct}%)`, untilReset].filter(Boolean).join(" — ") };
   return { title: `${item.agent.name}: ${pct}% used`, body: [`${item.limit.title} limit at ${pct}%`, untilReset].filter(Boolean).join(" — ") };
+}
+
+// ---- the handoff note's own trigger: SESSION usage at 90% or more, once per usage window ---------------------------
+// Separate from the alerts above (whose threshold is adjustable down to 50%): this one is fixed, so a note is never offered
+// at 60%. Held at 100% for a hundred checks it still fires once; it is rearmed only when that window resets (the reset time
+// moves on, or the meter falls far below 90%). A failed fetch or a blip changes nothing.
+export const HANDOFF_AT = 0.90;
+export function planHandoffTriggers(agents, before, now = Date.now()) {
+  const memory = { ...(before || {}) };
+  const toFire = [];
+  for (const a of watchedAgents(agents)) {
+    for (const l of a.limits || []) {
+      if (!/session/i.test(String(l.title)) || typeof l.percent !== "number") continue;
+      const key = `handoff|${a.id}|${l.title}`;
+      const resetMs = resetMsOf(l.resetsAt);
+      let rec = memory[key];
+      if (rec && ((resetMs && rec.resetMs && resetMs - rec.resetMs > TOLERANCE_MS) || l.percent <= HANDOFF_AT - REARM_DROP)) { delete memory[key]; rec = undefined; }
+      if (l.percent >= HANDOFF_AT && !rec) toFire.push({ agent: a, limit: l, key, level: l.percent >= LIMIT_AT ? "limit" : "warn", resetMs });
+    }
+  }
+  for (const k of Object.keys(memory)) if (memory[k]?.resetMs && now - memory[k].resetMs > STALE_AFTER_MS) delete memory[k];
+  return { toFire, memory };
+}
+export function markHandoffFired(memory, item, now = Date.now()) {
+  memory[item.key] = { resetMs: item.resetMs, at: now };
+  return memory;
 }

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "spaceman.agent-usage-tabs",
   "name": "Cook Meter",
-  "version": "1.13.1",
+  "version": "1.14.0",
   "author": "SpacemanProducts",
   "license": "MIT",
   "description": "Cook Meter: know exactly when you can go cook. A tab per AI coding agent with limits, resets and a celebration when a reset lands.",
@@ -38,7 +38,7 @@
         "type": "string",
         "label": "Tab order",
         "defaultValue": "claude,antigravity,grok,codex,copilot,cursor,opencode,kimi,kiro,devin,amp,hermes",
-        "description": "Comma-separated agent ids, in the order you want the tabs. Ids you leave out are appended in default order; no tab is ever hidden. Ids: claude, antigravity, grok, codex, copilot, cursor, opencode, kimi, kiro, devin, amp, hermes, plus the agents in agents-catalog.json (qwen, vibe, droid, auggie, dsh, mcode, openclaw)."
+        "description": "Comma-separated agent ids, in the order you want the tabs. Ids you leave out are appended in default order; no tab is ever hidden. Ids: claude, antigravity, grok, codex, copilot, cursor, opencode, kimi, kiro, devin, amp, hermes, plus the agents in agents-catalog.json (qwen, vibe, dsh, mcode, openclaw)."
       },
       {
         "key": "notifyThreshold",

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { planAlerts, markFired, alertText } from "./alert-state.mjs";
+import { planAlerts, markFired, alertText, planHandoffTriggers, markHandoffFired, HANDOFF_AT } from "./alert-state.mjs";
 
 const T = 0.95;
 const MIN = 60000, HOUR = 3600000;
@@ -125,4 +125,35 @@ assert.deepEqual(planAlerts([], { "claude|Session": { resetMs: T0 - 2 * HOUR, le
 // ---- the notification text
 assert.deepEqual(alertText({ level: "warn", agent: { name: "Claude Code" }, limit: { title: "Session", percent: 0.96 } }, "resets in 1h 20m"), { title: "Claude Code: 96% used", body: "Session limit at 96% — resets in 1h 20m" });
 assert.deepEqual(alertText({ level: "limit", agent: { name: "Claude Code" }, limit: { title: "Weekly", percent: 1 } }), { title: "Claude Code: limit reached", body: "Weekly limit hit (100%)" });
+
+// ---- the handoff note's own trigger: SESSION usage at 90% or more, once per window (not tied to the alert threshold)
+{
+  assert.equal(HANDOFF_AT, 0.9);
+  let saved = "{}";
+  const run = (agents, now) => { const { toFire, memory } = planHandoffTriggers(agents, JSON.parse(saved), now); for (const i of toFire) markHandoffFired(memory, i, now); saved = JSON.stringify(memory); return toFire.map((i) => `${i.agent.name}|${i.limit.title}`); };
+  // 60%, 75%, 89%: never. (The prompt used to be offered at 60%.)
+  for (const p of [0.6, 0.75, 0.89, 0.8999]) assert.deepEqual(run([A("claude", "Session", p, jitter(0))], T0), [], `${p} is below 90%`);
+  // a LOW alert threshold does not matter: the handoff rule is its own
+  assert.deepEqual(planAlerts([A("claude", "Session", 0.6, jitter(0))], {}, 0.5, T0).toSend.length, 1, "an alert at a 50% threshold can fire at 60%...");
+  assert.deepEqual(planHandoffTriggers([A("claude", "Session", 0.6, jitter(0))], {}, T0).toFire, [], "...but the handoff does not");
+  // 90% fires once; held at 90-100% for many checks (wobbling reset time, memory reloaded each time) it never repeats
+  const all = [];
+  for (let i = 0; i < 25; i++) all.push(...run([A("claude", "Session", i < 5 ? 0.9 : 1.0, jitter(i))], T0 + i * 5 * MIN));
+  assert.deepEqual(all, ["claude|Session"], "once per window");
+  // weekly meters never trigger it
+  assert.deepEqual(run([A("grok", "Weekly", 0.99, jitter(0))], T0), []);
+  // a dip and a failed fetch do not rearm it; the window resetting does
+  assert.deepEqual(run([A("claude", "Session", 0.8, jitter(30))], T0 + 3 * HOUR), [], "small dip");
+  assert.deepEqual(run([{ id: "claude", name: "claude", limits: [] }], T0 + 3 * HOUR), [], "failed fetch");
+  assert.deepEqual(run([A("claude", "Session", 0.95, jitter(31))], T0 + 3 * HOUR), [], "back up: still the same window");
+  const next = new Date(RESET + 5 * HOUR).toISOString();
+  assert.deepEqual(run([A("claude", "Session", 0.04, next)], RESET + 10 * MIN), [], "the window resets");
+  assert.deepEqual(run([A("claude", "Session", 0.5, next)], RESET + 2 * HOUR), [], "next window at 50%: nothing");
+  assert.deepEqual(run([A("claude", "Session", 0.91, next)], RESET + 4 * HOUR), ["claude|Session"], "the next window crosses 90%: once more");
+  assert.deepEqual(run([A("claude", "Session", 0.99, next)], RESET + 4 * HOUR + 5 * MIN), []);
+  // several agents have their own windows
+  const two = [];
+  for (let i = 0; i < 4; i++) two.push(...run([A("codex", "Session", 0.93, jitter(i)), A("grok", "Session", 0.97, jitter(i))], T0 + 4 * HOUR + i * 5 * MIN));
+  assert.deepEqual(two.sort(), ["codex|Session", "grok|Session"]);
+}
 console.log("alert-state: all tests passed");

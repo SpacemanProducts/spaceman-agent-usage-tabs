@@ -151,7 +151,7 @@ export function findActiveRepo({ projectsDir, squadDirFile, now = Date.now(), ma
 //   settings.handoffNote === false  -> never
 //   not decided yet                 -> write NOTHING: remember what would be written in `pendingFile` and return "asked"
 //                                      the first time, so the panel can ask. (Allow / Not now / Never are in the panel.)
-// Returns the written path, "asked", or "".
+// Returns the written path, "asked" (first question), "pending" (already waiting for an answer), or "".
 export function maybeWriteHandoff({ sent, settings, untilReset = () => "", projectsDir, squadDirFile, pendingFile, now = Date.now() }) {
   const session = (sent || []).filter((i) => /session/i.test(String(i.limit?.title)));
   const setting = (settings || {}).handoffNote;
@@ -165,7 +165,7 @@ export function maybeWriteHandoff({ sent, settings, untilReset = () => "", proje
   const first = !fs.existsSync(pendingFile);
   fs.mkdirSync(path.dirname(pendingFile), { recursive: true });
   fs.writeFileSync(pendingFile, JSON.stringify({ repo, trigger, at: now }) + "\n", { mode: 0o600 });
-  return first ? "asked" : "";
+  return first ? "asked" : "pending";
 }
 
 // The panel's answer to the question. allow = write the waiting note now; dismiss = forget it (it asks again next time).

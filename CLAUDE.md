@@ -67,6 +67,10 @@ keeps the developer in flow:
   2026-11-19, absent from agy's list); kept Claude Sonnet/Opus 4.6 and
   GPT-OSS-120b because agy still lists them despite the announced Nov 18
   removal.
+  2026-11-22: that removal moved again (Nov 2, Nov 18, now Nov 30 per a community
+  forum post, not an official page). Because dates keep moving, a removal date that
+  has PASSED while the model is still in the live list shows no warning at all
+  (the panel no longer says "past removal date"); the live list decides.
 - **Plan limits, usage and resets only.** No purchasable credit balances, overage,
   on-demand, top-up or auto-reload content anywhere (user rule, 2026-11-21);
   `bin/plan-limits.mjs` filters such meters out.

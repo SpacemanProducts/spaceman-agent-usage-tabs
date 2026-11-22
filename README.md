@@ -24,9 +24,9 @@ you have installed.
 
 ![The panel on the Claude Code tab](docs/screenshot.png)
 
-The header has four square buttons, all the same style: **+** (add a subscription: pick an agent, then Omarchy's own
-add-account flow runs), **>_** (start your default agent), **CS** (Claude Squad) and the gear. The tabs sit below it, then the
-selected agent's limits and models.
+The header has four square buttons, all the same style: **+** (add an account), **>_** (start your default agent), **CS** (Claude
+Squad) and the gear (settings). **+**, **CS** and the gear each open as **their own screen**: the agent chips and usage meters are
+hidden, only that screen's options are shown, and a **Back** button in the header returns to the normal view.
 
 ## Quick start (new to Omarchy?)
 
@@ -104,11 +104,12 @@ local until you sign in).
 
 | Agent | What it shows |
 |---|---|
-| Copilot | The plan's monthly reset date. A meter appears only for plans with an included allowance. |
+| Copilot | The plan name (a Free account is told apart by GitHub's `access_type_sku`, not `copilot_plan`, which says "individual" for it too). Meters for what the plan limits: **Chat and agent requests** (shared plan quota) and **Editor autocomplete** (not used by the CLI), plus premium requests when the plan includes them. A plan with nothing limited shows its reset date. |
+| Antigravity | One bar per pool and window that Google reports (Gemini and Claude/GPT, each with a session and a weekly bucket). A Free plan reports only the Claude/GPT weekly bucket, so that is the only bar. |
 | OpenCode | A note that free models have an unpublished daily limit. |
 | Kimi | Whichever windows your login reports; nothing without a login. |
 | Kiro | A credits meter (used of the monthly total) with its reset date. |
-| Amp | A daily allowance, only if Amp reports one. |
+| Amp | Its 7-day token total from `amp usage --details`. The credit balance and dollar costs it also prints are never shown. |
 | Hermes | "Free and local", or the Nous Portal free-tier note once you're signed in. |
 
 **Alerts and the reset celebration**
@@ -171,48 +172,58 @@ an account for that agent.
 
 ![Choosing agents for Claude Squad](docs/squad.png)
 
-The **CS** button in the header opens [Claude Squad](https://github.com/smtg-ai/claude-squad) (`cs`) with a
-session for each agent you choose, all in **one window**. It first checks that `cs` is installed and offers a one-click
-install (it runs the project's install script in a terminal, so you see it). The picker opens under the header: tick the agents and press **Run**.
+The **CS** button in the header opens [Claude Squad](https://github.com/smtg-ai/claude-squad) (`cs`) on its own screen, with a **Back**
+button. It first checks that `cs` is installed and offers a one-click install (it runs the project's install script in a terminal, so
+you see it). Then two steps and **Run**:
 
-A single terminal opens, always shows a folder picker first (the last repo you used is preselected, so Enter reuses
-it), shows which repo it is about to open, takes the repo's name as its title, and starts one `cs` session per ticked
-agent. Only this one window ever appears: no helper terminals are opened, and if an extra Squad window shows up it is
-closed once the sessions are started. `cs` has no command line for creating sessions, so the plugin types the keys for you
-(`n`, a name, Enter, then detach), running `cs -p <agent>` for each so every session keeps its own program, and leaves you
-in the session list. It needs `python3`, `tmux` and `git`; without Python it opens `cs` on the first agent only.
+- **Agents:** tick the agents to run (the selected tab's agent starts ticked).
+- **Folder:** your recent git repos (the last one used is preselected), **+ New project** (asks for a name in a small dialog; made in
+  `~/Projects` with git set up and a first commit) or **Browse...** (a normal folder chooser; a plain folder gets `git init` after you
+  confirm). Backups and desktop files are never listed.
 
-A session counts as **started** once the agent's program is running in its tmux session, so an agent waiting on a trust or
-login prompt (Codex asking whether to trust the folder, say) is a successful start. The window says `COULD NOT START` only if
-the session never came up or its program exited at once.
-The plugin never edits `cs`'s own config; it only types the keys `cs` already accepts. Only one Squad window can be open at a time: a second launch says so, because two `cs` processes
-overwrite each other's saved sessions.
+Run opens **one** terminal window, tiled like any terminal, titled with the repo's name. It shows **Starting agents** and ignores your
+keypresses until it is done (anything typed meanwhile is discarded, so none of it reaches `cs`), then leaves you in `cs`'s list with one
+session per ticked agent. `cs` has no command line for creating sessions, so the plugin types the keys for you (`n`, a name, Enter,
+then detach), running `cs -p <agent>` for each so every session keeps its own program. It needs `python3`, `tmux` and `git`; without
+Python it opens `cs` on the first agent only. The plugin never edits `cs`'s own config.
 
-The folder picker offers your recent git repos (the ones you picked before, plus the repos in `~/Projects`, with backups and
-desktop files hidden), then **Create a new project** (a folder in `~/Projects` with git set up and a first commit), then
-**Browse...** for anywhere else (a plain folder gets `git init` after you confirm). The window opens tiled, like a normal
-terminal.
+A session counts as **started** once the agent's program is running in its tmux session, so an agent waiting on a trust or login
+prompt (Codex asking whether to trust the folder, say) is a successful start. The window says `COULD NOT START` only if the session
+never came up or its program exited at once.
+
+**Only one Squad window can be open at a time:** a second launch says so, because two `cs` processes overwrite each other's saved
+sessions. The lock goes away when the window closes, even if it crashed.
 
 ### The agent catalog
 
 Beyond the twelve agents it reads directly, the plugin has a built-in catalog (`agents-catalog.json`) of CLI agents. An agent is
 listed only if it is still maintained **and** has a working way to read usage or plan limits (an Omarchy usage record, or a
-documented command or API); the catalog says which for each entry (`maintained` and `reads`). Today that is Qwen Code, Mistral
-Vibe, Factory Droid, Augment (Auggie), DeepSeek Harness, MiniMax Code and OpenClaw. Each records how it reports usage (session and
-weekly, monthly credits, request count, bring your own key, free, or no usage data), which sets the note on its tab, and its
-binaries, which is how an install is detected. Agents you don't have stay off the bar through **Hide agents that aren't
-installed**, like every other tab. Entries I couldn't fully verify are flagged `unsure` with the reason, and the tab says so.
-Agents that were researched and left out (Gemini CLI, Aider, Cline, Goose and others) are listed with the reason under `dropped`.
+documented command or API); each entry says which (`maintained` and `reads`). Today that is Qwen Code, Mistral Vibe, DeepSeek
+Harness and MiniMax Code (through Omarchy's usage records) and OpenClaw (through `openclaw status --usage --json`). Each records how
+it reports usage (session and weekly, monthly credits, request count, bring your own key, free, or no usage data), which sets the note
+on its tab, and its binaries, which is how an install is detected. Agents you don't have stay off the bar through **Hide agents that
+aren't installed**, like every other tab. Entries that could not be fully verified are flagged `unsure` with the reason. Agents that
+were researched and left out are listed with the reason under `dropped`: Gemini CLI (removed at your request), Aider (inactive),
+Factory Droid (its analytics endpoint is Enterprise-only and reports consumption, never limits), Augment (documents no command or API
+for remaining credits), and agents with nothing of their own to read (Goose, Crush, Pi, Oh My Pi, Plandex and others).
+
+**What each tab can't read is said plainly.** OpenCode (no published limit for its free models), Kimi (not signed in), Amp (its
+`amp usage` gives a credit balance and dollar costs, which this panel never shows; only its 7-day token total is used), Hermes (no
+limit of its own) and OpenClaw (only when a provider really failed) show a short "Can't read: ..." line while they have no meters.
+The OpenClaw tab itself is two lines: bring your own key, no limits of its own; usage depends on your model provider.
 
 ### The handoff note
 
-When a **session** meter's warning fires (usage first passes the threshold, or the limit is hit), the plugin writes
-`handoff/HANDOFF.md` in the active repo: what was being worked on, what's done, what's next and any open problems, built from
-recent git commits, the working tree and the repo's `CLAUDE.md` (nothing is invented: a part with no source says so, and emails
-and tokens are scrubbed). It also adds one line to `AGENTS.md` (creating the file if needed) telling any agent to read the
-`handoff/` folder first. The note is rebuilt each time the warning fires. The active repo is the one the most recent Claude Code
-session worked in, else the last folder used for Claude Squad. `handoff/` is added to the repo's local `.git/info/exclude`, so it
-stays on your machine unless you choose to commit it. Turn it off under **Alerts** in the gear settings.
+When a **session** meter reaches **90% or more**, the plugin offers to write `handoff/HANDOFF.md` in the active repo: what was being
+worked on, what's done, what's next and any open problems, built from recent git commits, the working tree and the repo's
+`CLAUDE.md` (nothing is invented: a part with no source says so, and emails and tokens are scrubbed). It also adds one line to
+`AGENTS.md` (creating the file if needed) telling any agent to read the `handoff/` folder first.
+
+**It asks first.** The first time, nothing is written: a card at the top of the panel (and a notification) asks **Allow**, **Not now**
+or **Never**. This has its own fixed 90% rule, separate from the alert threshold, and it fires **once per usage window**: held at 100%
+it still does not repeat, and it can only come back after that window resets. The active repo is the one the most recent Claude Code
+session worked in, else the last folder used for Claude Squad. `handoff/` is added to the repo's local `.git/info/exclude`, so it stays
+on your machine unless you choose to commit it. You can also switch it under **Alerts** in the settings.
 
 ### Tab order and the default agent
 
@@ -324,9 +335,9 @@ Each tab's Models list is built live-data-first:
 If a CLI lists its models, any `models.json` entry missing from that list shows as
 *unavailable*. Without a CLI list (Cursor, Copilot, Kimi, Amp, Hermes, Claude), an entry is
 unavailable only if you list the plan in its `unavailableOn`. Put `"removing": "2026-12-14"`
-(or `"2026-12"`) on a model with an announced removal; a past date shows *past removal date*,
-which is how a model looks when it's still listed after its announced removal. Delete a model
-that is truly gone. Edits apply on the next refresh, and a malformed file is ignored.
+(or `"2026-12"`) on a model with an announced removal; it shows *removing Dec 14* until that day. Once the date has passed
+while the model is still listed, no warning is shown: removal dates keep moving (Antigravity's went Nov 2, Nov 18, Nov 30), so the
+agent's live list decides. Delete a model that is truly gone. Edits apply on the next refresh, and a malformed file is ignored.
 
 ## Privacy and safety
 
@@ -365,6 +376,9 @@ changed in each version.
 ```
 for t in bin/*.test.mjs; do node "$t"; done
 ```
+
+A GitHub Action (`.github/workflows/tests.yml`) runs them on every push and pull request. One check compares agent names with Omarchy's own
+`omarchy-default-agent`, which only exists on an Omarchy machine, so it skips itself elsewhere (or with `SKIP_OMARCHY=1`).
 
 ## Uninstall
 

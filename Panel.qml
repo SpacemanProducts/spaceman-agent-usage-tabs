@@ -114,7 +114,12 @@ Panel {
   }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
-  readonly property bool showDetail: !!agent && !settingsOpen && !squadOpen
+  // Settings (the gear), + (add an account) and CS (Claude Squad) each open as their own screen: the chips and usage are
+  // hidden and the header has a Back button. Only one is open at a time.
+  readonly property bool subView: squadOpen || addOpen || settingsOpen
+  function leaveSubView() { squadOpen = false; addOpen = false; settingsOpen = false }
+  function openSettings() { settingsOpen = true; squadOpen = false; addOpen = false }
+  readonly property bool showDetail: !!agent && !settingsOpen && !subView
   // An agent with two or more accounts lists each one instead of a single set of limits.
   readonly property bool hasAccounts: !!agent && Array.isArray(agent.accounts) && agent.accounts.length > 1
   // A tab shows when its agent is installed and the user hasn't hidden it, or
@@ -288,16 +293,17 @@ Panel {
     var rows = allModelRows(a)
     return modelsExpanded ? rows : rows.slice(0, modelsCollapsedCount)
   }
-  // "removing Dec 14" for a dated notice; "past removal date" when that date has
-  // gone by but the model is still listed.
+  // "removing Dec 14" for a dated notice. Once that date has gone by while the model is still listed, nothing is shown.
   function removingText(r) {
     var v = String((r && r.removing) || "")
     if (v === "") return ""
     var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
     var full = v.match(/^(\d{4})-(\d{2})-(\d{2})$/), month = v.match(/^(\d{4})-(\d{2})$/)
     if (full) {
+      // A date that has passed while the model is still in the agent's live list means the date was wrong (removals keep being
+      // extended), so no warning is shown: the live list decides, not a date written down in advance.
       var d = new Date(Number(full[1]), Number(full[2]) - 1, Number(full[3]) + 1)
-      return d.getTime() < Date.now() ? "past removal date" : "removing " + months[Number(full[2]) - 1] + " " + Number(full[3])
+      return d.getTime() < Date.now() ? "" : "removing " + months[Number(full[2]) - 1] + " " + Number(full[3])
     }
     if (month) return "removing " + months[Number(month[2]) - 1]
     return "removing"
@@ -337,7 +343,7 @@ Panel {
   // add-account flow for it in a terminal. (It used to jump straight to the selected tab's provider.)
   property bool addOpen: false
   readonly property var addProviders: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "grok", name: "Grok" }]
-  function toggleAdd() { addOpen = !addOpen; if (addOpen) squadOpen = false }
+  function toggleAdd() { addOpen = !addOpen; if (addOpen) { squadOpen = false; settingsOpen = false } }
   function addSubscription(provider) {
     if (!root.bar || !provider) return
     root.bar.run("omarchy-launch-floating-terminal-with-presentation bash " + pluginDir + "/bin/add-account.sh " + provider)
@@ -586,7 +592,9 @@ Panel {
     function testCelebration(): string { root.fireTest("claude"); return "ok" }
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
-    function settings(): string { root.settingsOpen = !root.settingsOpen; return root.settingsOpen ? "open" : "closed" }
+    // Test hook: show exactly one screen: "main", "settings", "add" or "squad" (used to retake the README screenshots).
+    function view(name: string): string { root.leaveSubView(); if (name === "settings") root.openSettings(); else if (name === "add") root.toggleAdd(); else if (name === "squad") root.toggleSquad(); return name }
+    function settings(): string { if (root.settingsOpen) root.settingsOpen = false; else root.openSettings(); return root.settingsOpen ? "open" : "closed" }
     // Test hook: show the picker as if cs were missing (or present) without running the check.
     function squadPreview(state: string): string { root.squadOpen = true; root.squadHasCs = state; return state }
     // Test hook: select a tab by agent id (used to retake the README screenshots).
@@ -751,6 +759,14 @@ Panel {
       }
     }
     Text {
+      visible: !!limit.note
+      textFormat: Text.PlainText
+      text: limit.note || ""
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+    Text {
       textFormat: Text.PlainText
       text: {
         var c = root.countdown(limit.resetsAt)
@@ -866,16 +882,16 @@ Panel {
             id: topHeader
             width: parent.width
             height: Style.space(34)
-            // Claude Squad view: a back button and the title, instead of the usual title and buttons.
+            // A sub-view (Claude Squad, or add an account): a back button and the title, instead of the usual title and buttons.
             Row {
-              visible: root.squadOpen
+              visible: root.subView
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(10)
-              HeaderButton { glyph: "\u2190"; tip: "Back"; onClicked: root.toggleSquad() }
+              HeaderButton { glyph: "\u2190"; tip: "Back"; onClicked: root.leaveSubView() }
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
-                text: "Claude Squad"
+                text: root.addOpen ? "Add an account" : (root.settingsOpen ? "Settings" : "Claude Squad")
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -883,7 +899,7 @@ Panel {
               }
             }
             Text {
-              visible: !root.squadOpen
+              visible: !root.subView
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
               text: "Agents"
@@ -893,7 +909,7 @@ Panel {
               font.bold: true
             }
             Row {
-              visible: !root.squadOpen
+              visible: !root.subView
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(6)
@@ -921,7 +937,7 @@ Panel {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.settingsOpen = !root.settingsOpen
+                onClicked: root.openSettings()
               }
               PanelToolTip { visible: gearHover.containsMouse; text: "Settings"; fontFamily: root.fontFamily }
             }
@@ -931,7 +947,7 @@ Panel {
           // ---------------- Handoff note question: asked once, the first time a session nears its limit. Nothing has been written.
           Rectangle {
             id: handoffCard
-            visible: root.handoffUndecided && root.handoffPending !== null && !root.squadOpen
+            visible: root.handoffUndecided && root.handoffPending !== null && !root.subView
             width: parent.width
             height: visible ? handoffCol.implicitHeight + Style.space(24) : 0
             radius: Style.cornerRadius
@@ -1238,7 +1254,7 @@ Panel {
 
           // ---------------- Tabs: full names, wrap rather than truncate
           Flow {
-            visible: !root.squadOpen
+            visible: !root.subView
             width: parent.width
             spacing: Style.space(9)
 
@@ -1406,7 +1422,7 @@ Panel {
           }
 
           Text {
-            visible: root.agents.length === 0 && !root.settingsOpen && !root.squadOpen
+            visible: root.agents.length === 0 && !root.settingsOpen && !root.subView
             width: parent.width
             topPadding: Style.space(24)
             text: "No supported agent CLIs found."
@@ -1419,7 +1435,7 @@ Panel {
           // ---------------- Header: name + plan, with the settings gear at the right
           Item {
             id: headerRow
-            visible: !root.squadOpen
+            visible: !root.subView
             width: parent.width
             height: headerName.implicitHeight
 
@@ -1460,7 +1476,7 @@ Panel {
           // ---------------- Settings view: replaces the agent details while open
           Column {
             id: settingsView
-            visible: root.settingsOpen && !root.squadOpen
+            visible: root.settingsOpen
             width: parent.width
             spacing: Style.space(8)
 
@@ -1628,6 +1644,18 @@ Panel {
             width: parent.width
             textFormat: Text.PlainText
             text: root.agent ? String(root.agent.planNote || "") : ""
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          // What this tab cannot read, said plainly (only while it has no meters of its own to show).
+          Text {
+            visible: root.showDetail && String(root.agent.cantRead || "") !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.agent ? String(root.agent.cantRead || "") : ""
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

@@ -59,4 +59,7 @@ assert.equal(windowPhrase(["Weekly"]), "weekly"); assert.equal(windowPhrase(["Se
 // the bigger the window, the bigger the win; a session reset is the unchanged baseline
 assert.equal(magnitudeOf(["Session"]), 1); assert.equal(magnitudeOf(["Daily"]), 1); assert.equal(magnitudeOf(["Weekly"]), 1.25); assert.equal(magnitudeOf(["Session", "Weekly"]), 1.25); assert.equal(magnitudeOf(["Monthly"]), 1.5); assert.equal(magnitudeOf(["Weekly", "Monthly"]), 1.5); assert.equal(magnitudeOf([]), 1);
 assert.ok(magnitudeOf(["Weekly"]) > magnitudeOf(["Session"]));
+// A meter relabelled in plain language still counts as monthly through its `window` field (Copilot's chat allowance)
+assert.equal(classifyResets([{ title: "Chat and agent requests", window: "monthly", percent: 0.9, resetsAt: "2026-12-01T00:00:00Z" }], [{ title: "Chat and agent requests", window: "monthly", percent: 0.01 }], Date.parse("2026-12-01T00:05:00Z")).length, 1, "a monthly reset is still detected");
+assert.equal(classifyResets([{ title: "Chat and agent requests", percent: 0.9 }], [{ title: "Chat and agent requests", percent: 0.01 }]).length, 0, "no window and no period in the title: not watched");
 console.log("reset-detect: all tests passed");
