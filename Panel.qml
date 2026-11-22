@@ -1518,45 +1518,56 @@ Panel {
         spacing: Style.space(12)
 
         PanelSeparator { foreground: root.foreground }
-        PanelSectionHeader { width: parent.width; text: "MAKE SOMETHING" }
-
-        Rectangle {
-          id: appTile
-          width: (parent.width - Style.space(10) * 2) / 3
-          height: appRow.implicitHeight + Style.space(20)
-          radius: Style.cornerRadius
-          color: appArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14)
-                                       : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
-          Row {
-            id: appRow
-            anchors.centerIn: parent
-            spacing: Style.space(8)
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              textFormat: Text.PlainText
-              text: "\u{f08c6}"
-              color: Color.accent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.heading
-            }
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              textFormat: Text.PlainText
-              text: "App"
-              color: appArea.containsMouse ? Color.accent : root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: true
-            }
+        // The label on the left, the App tile on the right, on one row.
+        Item {
+          id: makeRow
+          width: parent.width
+          height: appTile.height
+          PanelSectionHeader {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width - appTile.width - Style.space(10)
+            text: "MAKE SOMETHING"
           }
-          MouseArea {
-            id: appArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.launchApp()
+          Rectangle {
+            id: appTile
+            anchors.right: parent.right
+            width: (makeRow.width - Style.space(10) * 2) / 3
+            height: appRow.implicitHeight + Style.space(20)
+            radius: Style.cornerRadius
+            color: appArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14)
+                                         : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+            Row {
+              id: appRow
+              anchors.centerIn: parent
+              spacing: Style.space(8)
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "\u{f08c6}"
+                color: Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.heading
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "App"
+                color: appArea.containsMouse ? Color.accent : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+            }
+            MouseArea {
+              id: appArea
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.launchApp()
+            }
+            PanelToolTip { visible: appArea.containsMouse; text: "Start " + (root.agent ? root.agent.name : "your agent") + " on building a new Omarchy app"; fontFamily: root.fontFamily }
           }
-          PanelToolTip { visible: appArea.containsMouse; text: "Start " + (root.agent ? root.agent.name : "your agent") + " on building a new Omarchy app"; fontFamily: root.fontFamily }
         }
       }
     }

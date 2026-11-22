@@ -3,6 +3,9 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.8.1 - 2026-11-22
+- The App tile sits on the right of the MAKE SOMETHING row, with the label on the left (same size and style).
+
 ## 1.8.0 - 2026-11-22
 - Reorder the tab chips by dragging one onto another; the order is saved in the plugin's own settings.json and survives
   restarts. The gear menu lists every agent with left/right arrows (the fallback if dragging misbehaves) and a **Reset order**
