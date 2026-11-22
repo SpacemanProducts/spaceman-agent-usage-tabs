@@ -3,6 +3,14 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.7.0 - 2026-11-22
+- Follows the active Omarchy theme live: panel text, background and borders use the theme's popup colors, icons its
+  accent, and secondary text is the text color pulled toward the background (it used to be `darker()`, which vanishes
+  on light themes). Header buttons: + (Omarchy's add-subscription flow) and >_ (the default agent) beside the gear.
+- Meter colors have a bright set for dark backgrounds and a deeper set for light ones (all at least 4.5:1); the bar number
+  picks its set from the bar's own background. Celebration confetti, sparkles, rings and the chip flash use light-theme
+  variants with no white. `bin/theme-colors.test.mjs` guards the contrast.
+
 ## 1.6.2 - 2026-11-22
 - A "MAKE SOMETHING" section at the bottom, built like the stock panel's (separator, small label, one stock-style tile
   a third of the width, app-window icon plus "App"), with no Theme or Plugin. The App tile starts the selected

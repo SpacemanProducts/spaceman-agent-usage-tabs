@@ -15,16 +15,40 @@ Panel {
   ipcTarget: "spaceman.agent-usage-tabs"
   manageIpc: false
 
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color dim: Qt.darker(foreground, 1.55)
+  // Everything follows the active Omarchy theme live: text, background and border come from the
+  // theme's popup colors, icons from its accent. Nothing here is a fixed color except the meter and
+  // celebration palettes below, which have a dark-background and a light-background variant.
+  readonly property color foreground: Color.popups.text
+  readonly property color panelBackground: Color.popups.background
+  // Secondary text: the text color pulled toward the background (works on dark and light themes).
+  readonly property color dim: Qt.tint(foreground, Qt.rgba(panelBackground.r, panelBackground.g, panelBackground.b, 0.4))
   readonly property color track: Style.selectedFillFor(foreground, Color.accent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   // Meter colors: green < 60%, amber 60-85%, red > 85%.
-  readonly property color green: "#4caf50"
-  readonly property color amber: "#f2a900"
-  readonly property color red: "#e5484d"
-  function meterColor(p) { return p > 0.85 ? red : (p >= 0.6 ? amber : green) }
+  // Each has a bright set for dark backgrounds and a deeper set for light ones (all >= 4.8:1
+  // against #fff, #eff1f5 and #fffcf0, and >= 4.8:1 for the bright set against #101315).
+  function isLightColor(c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b > 0.55 }
+  readonly property bool lightPanel: isLightColor(panelBackground)
+  readonly property bool lightBar: isLightColor(Color.bar.background)
+  function greenFor(light) { return light ? "#1b7a31" : "#4caf50" }
+  function amberFor(light) { return light ? "#9a5b00" : "#f2a900" }
+  function redFor(light) { return light ? "#c0262d" : "#e5484d" }
+  readonly property color green: greenFor(lightPanel)
+  readonly property color amber: amberFor(lightPanel)
+  readonly property color red: redFor(lightPanel)
+  function meterColorFor(p, light) { return p > 0.85 ? redFor(light) : (p >= 0.6 ? amberFor(light) : greenFor(light)) }
+  function meterColor(p) { return meterColorFor(p, lightPanel) }
+  // Celebration colors: bright and white-heavy on dark themes, deeper (no white) on light ones.
+  readonly property color gold: lightPanel ? "#b8860b" : "#ffd700"
+  readonly property var surpriseConfetti: lightPanel
+    ? ["#b8860b", "#d70015", "#c25400", "#b8860b", "#1f8a3b", "#008a82", "#0062cc", "#8e3bbf", foreground, "#b8860b"]
+    : ["#ffd700", "#ff3b30", "#ff9500", "#ffd700", "#34c759", "#00c7be", "#0a84ff", "#bf5af2", "#ffffff", "#ffd700"]
+  readonly property var scheduledConfetti: lightPanel
+    ? ["#1b7a31", "#9a5b00", foreground, "#2f9a47", "#b8860b", "#c0262d"]
+    : ["#4caf50", "#f2a900", "#ffffff", "#7fdc8a", "#ffd54f", "#e5484d"]
+  readonly property var surpriseSparkles: lightPanel ? [foreground, "#b8860b", "#8a6a00"] : ["#ffffff", "#ffd700", "#fff0a0"]
+  readonly property var scheduledSparkles: lightPanel ? [foreground, "#9a5b00", "#1b7a31"] : ["#ffffff", "#ffd54f", "#7fdc8a"]
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string dataPath: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agent-usage-tabs/data.json"
@@ -596,7 +620,7 @@ Panel {
     labelText: root.topSession >= 0 ? Math.round(root.topSession * 100) + "%" : ""
     slotSize: Style.bar.iconSlot * (root.topSession >= 0 ? 2 : 1)
     active: root.topSession >= 0.6
-    activeColor: root.meterColor(root.topSession)
+    activeColor: root.meterColorFor(root.topSession, root.lightBar)
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) root.selectIndex(root.selectedIndex + 1)
       else root.toggle()
@@ -670,7 +694,7 @@ Panel {
                 readonly property bool flashing: root.isFlashing(modelData)
                 readonly property bool surprise: root.resetKindOf(modelData) === "surprise"
                 readonly property real magnitude: root.magnitudeOf(modelData)
-                readonly property color flashColor: surprise ? "#fbbc05" : root.green
+                readonly property color flashColor: surprise ? (root.lightPanel ? "#b8860b" : "#fbbc05") : root.green
                 // True for the first 3 s after the collector flags a reset.
                 readonly property bool celebrating: root.resetTimeOf(modelData) > 0 && root.flashNow - root.resetTimeOf(modelData) < (surprise ? 4800 : 3000)
                 // Outer border = session meter, inner fill = weekly meter
@@ -741,7 +765,7 @@ Panel {
                       radius: width / 2
                       color: "transparent"
                       border.width: Math.max(1, Style.space(4) * (1 - tt))
-                      border.color: "#ffd700"
+                      border.color: root.gold
                       opacity: tt > 0 && tt < 1 ? (1 - tt) * 0.9 : 0
                     }
                   }
@@ -764,14 +788,14 @@ Panel {
                         width: Style.space(5 + index % 3)
                         height: Style.space(8 + index % 4)
                         radius: 1
-                        color: (chip.surprise ? ["#ffd700", "#ff3b30", "#ff9500", "#ffd700", "#34c759", "#00c7be", "#0a84ff", "#bf5af2", "#ffffff", "#ffd700"] : ["#4caf50", "#f2a900", "#ffffff", "#7fdc8a", "#ffd54f", "#e5484d"])[index % (chip.surprise ? 10 : 6)]
+                        color: (chip.surprise ? root.surpriseConfetti : root.scheduledConfetti)[index % (chip.surprise ? 10 : 6)]
                       }
                       Text {
                         visible: parent.sparkle
                         anchors.centerIn: parent
                         textFormat: Text.PlainText
                         text: "\u2726"
-                        color: (chip.surprise ? ["#ffffff", "#ffd700", "#fff0a0"] : ["#ffffff", "#ffd54f", "#7fdc8a"])[index % 3]
+                        color: (chip.surprise ? root.surpriseSparkles : root.scheduledSparkles)[index % 3]
                         font.pixelSize: Style.font.title
                       }
                     }

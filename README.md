@@ -154,6 +154,12 @@ on building a new Omarchy app, the same task the stock panel's App tile gives th
 from `~/Work` when that folder exists. An agent with no CLI has no button; Kimi can't take a starting prompt, so it
 opens with the prompt on the clipboard. The hover tooltip names the agent.
 
+### Themes
+
+The panel follows the active Omarchy theme live (switch themes and it changes with no restart): text, background and
+borders come from the theme's popup colors and icons from its accent. The green, amber and red meter colors, and the
+celebration colors, switch to deeper variants on a light theme so they stay readable.
+
 ## Known gap: banked limit resets can't be read
 
 Some accounts hold banked "limit resets". The usage endpoint the Claude Code login can reach
