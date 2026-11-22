@@ -6,6 +6,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "chip-meters.js" as ChipMeters
+import "tab-order.js" as TabOrder
 
 // Cook Meter (plugin id spaceman.agent-usage-tabs). Display only: bin/collect.mjs writes data.json, this file
 // watches it. Written from scratch; shares no code or state with other plugins.
@@ -106,19 +107,54 @@ Panel {
     settingsWriter.running = true
   }
   readonly property var defaultOrder: ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"]
-  // `tabOrder` is a comma-separated list of agent ids. Ids it omits keep their
-  // default position after the listed ones, so no tab can be hidden by it.
-  readonly property var agents: {
-    var wanted = String(root.setting("tabOrder", "")).toLowerCase().split(",")
-      .map(function(x) { return x.trim() }).filter(function(x) { return x !== "" })
-    var order = []
-    wanted.concat(defaultOrder).forEach(function(id) { if (order.indexOf(id) < 0) order.push(id) })
-    var known = {}
-    rawAgents.forEach(function(a) { if (isShownTab(a)) known[a.id] = a })
-    var out = []
-    order.forEach(function(id) { if (known[id]) { out.push(known[id]); delete known[id] } })
-    rawAgents.forEach(function(a) { if (known[a.id]) out.push(a) })
-    return out
+  // The tab order: the one you saved (drag a chip, or the arrows in the gear menu), else `tabOrder` from
+  // shell.json, else the default. Agents that are in none of those (new ones) go at the end.
+  readonly property var wantedOrder: {
+    var v = userSettings.tabOrder !== undefined ? userSettings.tabOrder : root.setting("tabOrder", "")
+    var list = Array.isArray(v) ? v : String(v).toLowerCase().split(",")
+    return list.map(function(x) { return String(x).trim() }).filter(function(x) { return x !== "" })
+  }
+  // Every agent in order, shown or not (the gear menu lists these); `agents` is the visible subset.
+  readonly property var allOrdered: {
+    var byId = {}, ids = []
+    rawAgents.forEach(function(a) { byId[a.id] = a; ids.push(a.id) })
+    return TabOrder.ordered(ids, wantedOrder, defaultOrder).map(function(id) { return byId[id] })
+  }
+  readonly property var agents: allOrdered.filter(function(a) { return isShownTab(a) })
+  function allIds() { return allOrdered.map(function(a) { return a.id }) }
+  function saveOrder(ids) { writeSetting(["order", ids.join(",")]) }
+  // Gear menu arrows: move one agent a place left or right among ALL agents.
+  function moveTab(id, delta) { saveOrder(TabOrder.moveBy(allIds(), id, delta)) }
+  function resetOrder() { writeSetting(["order", "reset"]) }
+  // Dragging a chip onto another one's place: reorder the visible tabs, hidden ones keep their slots.
+  function dropTab(id, toVisibleIndex) {
+    var vis = agents.map(function(a) { return a.id })
+    saveOrder(TabOrder.mergeVisible(allIds(), TabOrder.moveTo(vis, id, toVisibleIndex)))
+  }
+
+  // ---- The first tab is Omarchy's default agent (so the shortcut and right-click start it).
+  // bin/default-agent.mjs sets it when the first position changes; unsupported or uninstalled agents are skipped.
+  readonly property string firstId: agents.length > 0 ? agents[0].id : ""
+  readonly property bool firstInstalled: agents.length > 0 && !!agents[0].cli
+  readonly property var defaultNames: ({ claude: "claude", antigravity: "agy", grok: "grok", codex: "codex", copilot: "copilot", cursor: "cursor-agent",
+    opencode: "opencode", kimi: "kimi", kiro: "kiro-cli", devin: "devin", amp: "amp", hermes: "hermes" })
+  property string currentDefault: ""
+  function isDefaultAgent(a) { return !!a && currentDefault !== "" && defaultNames[a.id] === currentDefault }
+  onFirstIdChanged: applyDefault()
+  onFirstInstalledChanged: applyDefault()
+  function applyDefault() {
+    if (firstId === "" || defaultNames[firstId] === undefined) return
+    defaultSetter.command = ["node", pluginDir + "/bin/default-agent.mjs", firstId].concat(firstInstalled ? ["installed"] : [])
+    defaultSetter.running = true
+  }
+  Process { id: defaultSetter; running: false }
+  FileView {
+    path: root.home + "/.config/omarchy/defaults/agent"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.currentDefault = String(text() || "").trim()
+    onLoadFailed: root.currentDefault = ""
   }
   property string selectedId: ""
   property bool daysOpen: false
@@ -422,6 +458,8 @@ Panel {
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
     function settings(): string { root.settingsOpen = !root.settingsOpen; return root.settingsOpen ? "open" : "closed" }
+    function moveTab(id: string, delta: string): string { root.moveTab(id, Number(delta)); return "ok" }
+    function resetOrder(): string { root.resetOrder(); return "ok" }
     function next(): string { root.selectIndex(root.selectedIndex + 1); return "ok" }
   }
 
@@ -733,6 +771,7 @@ Panel {
             spacing: Style.space(6)
 
             Repeater {
+              id: chipRepeater
               model: root.agents
 
               Rectangle {
@@ -781,10 +820,53 @@ Panel {
                   font.pixelSize: Style.font.bodySmall
                   font.bold: parent.selected
                 }
+                // Default-agent marker: a small accent dot on the first chip when it is Omarchy's default.
+                Rectangle {
+                  visible: chip.index === 0 && root.isDefaultAgent(chip.modelData)
+                  anchors.top: parent.top
+                  anchors.right: parent.right
+                  anchors.topMargin: -Style.space(3)
+                  anchors.rightMargin: -Style.space(3)
+                  width: Style.space(10)
+                  height: width
+                  radius: width / 2
+                  color: Color.accent
+                  border.width: 2
+                  border.color: root.panelBackground
+                  z: 4
+                }
+                // Drag a chip onto another to reorder; the order is saved. The chip follows the pointer
+                // (a transform, so the Flow keeps its layout) and settles where it is dropped.
+                transform: Translate { x: chipDrag.active ? chipDrag.activeTranslation.x : 0; y: chipDrag.active ? chipDrag.activeTranslation.y : 0 }
+                z: chipDrag.active ? 10 : 0
+                opacity: chipDrag.active ? 0.85 : 1
+                DragHandler {
+                  id: chipDrag
+                  target: null
+                  cursorShape: Qt.ClosedHandCursor
+                  onActiveChanged: {
+                    if (active) return
+                    var cx = chip.x + chip.width / 2 + activeTranslation.x
+                    var cy = chip.y + chip.height / 2 + activeTranslation.y
+                    var to = -1
+                    for (var i = 0; i < chipRepeater.count; i++) {
+                      var c = chipRepeater.itemAt(i)
+                      if (c && cx >= c.x && cx <= c.x + c.width && cy >= c.y && cy <= c.y + c.height) { to = i; break }
+                    }
+                    if (to >= 0 && to !== chip.index) root.dropTab(chip.modelData.id, to)
+                  }
+                }
                 MouseArea {
+                  id: chipArea
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: root.selectIndex(index)
+                }
+                PanelToolTip {
+                  visible: chipArea.containsMouse && chip.index === 0 && root.isDefaultAgent(chip.modelData)
+                  text: "Default agent: the shortcut and right-click start " + chip.modelData.name
+                  fontFamily: root.fontFamily
                 }
 
                 // Reset celebration: a ~3 s burst of confetti and sparkles that
@@ -991,22 +1073,71 @@ Panel {
 
             PanelSectionHeader { width: parent.width; text: "TABS" }
             Repeater {
-              model: root.rawAgents
-              SettingSwitch {
+              model: root.allOrdered
+              Item {
+                id: tabRow
                 required property var modelData
+                required property int index
                 width: settingsView.width
-                label: modelData.name + (modelData.installed === false ? " (not installed)" : "")
-                // Only an installed agent can be hidden by choice; an uninstalled
-                // one follows "Hide agents that aren't installed".
-                enabled: modelData.installed !== false
-                checked: root.isShownTab(modelData)
-                onToggled: root.writeSetting(["hidden", modelData.id, String(root.isShownTab(modelData))])
+                height: tabSwitch.height
+                // Left / right arrows: the fallback to dragging chips. They move the agent one place.
+                Row {
+                  id: tabArrows
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(4)
+                  Repeater {
+                    model: [{ glyph: "\u25c0", delta: -1, tip: "Move left" }, { glyph: "\u25b6", delta: 1, tip: "Move right" }]
+                    Rectangle {
+                      id: arrow
+                      required property var modelData
+                      readonly property bool possible: tabRow.index + modelData.delta >= 0 && tabRow.index + modelData.delta < root.allOrdered.length
+                      width: Style.space(26); height: Style.space(24); radius: Style.cornerRadius
+                      color: root.track
+                      opacity: possible ? 1 : 0.3
+                      Text { anchors.centerIn: parent; textFormat: Text.PlainText; text: arrow.modelData.glyph; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                      MouseArea { id: arrowArea; anchors.fill: parent; hoverEnabled: true; enabled: arrow.possible; cursorShape: Qt.PointingHandCursor; onClicked: root.moveTab(tabRow.modelData.id, arrow.modelData.delta) }
+                      PanelToolTip { visible: arrowArea.containsMouse; text: arrow.modelData.tip; fontFamily: root.fontFamily }
+                    }
+                  }
+                }
+                SettingSwitch {
+                  id: tabSwitch
+                  anchors.left: tabArrows.right
+                  anchors.leftMargin: Style.space(10)
+                  anchors.right: parent.right
+                  label: tabRow.modelData.name + (tabRow.modelData.installed === false ? " (not installed)" : "")
+                  // Only an installed agent can be hidden by choice; an uninstalled
+                  // one follows "Hide agents that aren't installed".
+                  enabled: tabRow.modelData.installed !== false
+                  checked: root.isShownTab(tabRow.modelData)
+                  onToggled: root.writeSetting(["hidden", tabRow.modelData.id, String(root.isShownTab(tabRow.modelData))])
+                }
               }
+            }
+            // Restores the default order: Claude Code, Antigravity, Grok, Codex, and the rest.
+            Rectangle {
+              width: resetOrderLabel.implicitWidth + Style.space(24)
+              height: resetOrderLabel.implicitHeight + Style.space(14)
+              radius: Style.cornerRadius
+              color: resetOrderArea.containsMouse ? root.track : "transparent"
+              border.width: 1
+              border.color: root.foreground
+              Text {
+                id: resetOrderLabel
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Reset order"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              MouseArea { id: resetOrderArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.resetOrder() }
+              PanelToolTip { visible: resetOrderArea.containsMouse; text: "Back to Claude Code, Antigravity, Grok, Codex, and the rest"; fontFamily: root.fontFamily }
             }
             Text {
               width: parent.width
               textFormat: Text.PlainText
-              text: "A tab you hide stays hidden until you show it again. Agents you install later appear automatically."
+              text: "Drag a chip, or use the arrows, to reorder; the first tab becomes Omarchy's default agent. A tab you hide stays hidden until you show it again. Agents you install later appear automatically, at the end."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption

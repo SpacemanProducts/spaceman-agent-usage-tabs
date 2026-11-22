@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs"; import os from "node:os"; import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { applySetting, applyHidden, applyVolume } from "./settings-set.mjs";
+import { applySetting, applyHidden, applyVolume, applyOrder, DEFAULT_ORDER } from "./settings-set.mjs";
 
 assert.deepEqual(applySetting({}, "hideUninstalledAgents", "false"), { hideUninstalledAgents: false });
 assert.deepEqual(applySetting({ showUnusedModels: true }, "hideUninstalledAgents", "true"), { showUnusedModels: true, hideUninstalledAgents: true }, "other keys kept");
@@ -45,3 +45,10 @@ assert.notEqual(run("bogus", "true").status, 0);
 assert.notEqual(run("hidden", "ghost", "true").status, 0);
 fs.rmSync(dir, { recursive: true });
 console.log("settings-set: all tests passed");
+
+// Tab order
+assert.deepEqual(applyOrder({ resetSound: true }, "grok,claude"), { resetSound: true, tabOrder: ["grok", "claude"] }, "other keys kept");
+assert.deepEqual(applyOrder({ tabOrder: ["grok"] }, "reset").tabOrder, DEFAULT_ORDER, "reset restores the default order");
+assert.deepEqual(DEFAULT_ORDER.slice(0, 4), ["claude", "antigravity", "grok", "codex"]);
+for (const bad of ["", "nope", "claude,claude", "claude,,"]) if (bad !== "claude,,") assert.throws(() => applyOrder({}, bad), /distinct known agent ids/, `rejects ${JSON.stringify(bad)}`);
+console.log("settings-set: tab order tests passed");

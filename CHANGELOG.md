@@ -3,6 +3,16 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.8.0 - 2026-11-22
+- Reorder the tab chips by dragging one onto another; the order is saved in the plugin's own settings.json and survives
+  restarts. The gear menu lists every agent with left/right arrows (the fallback if dragging misbehaves) and a **Reset order**
+  button that restores Claude Code, Antigravity, Grok, Codex and the rest. An agent that is new to the list goes at the end.
+- The first tab is Omarchy's default agent: when the first position changes, the default is set (so the keyboard shortcut,
+  the right-click on the robot and the header terminal button follow), with a small dot on the first chip. Only agents
+  `omarchy default agent` supports are used; an unsupported or uninstalled first tab leaves the default alone. The plugin
+  writes `~/.config/omarchy/defaults/agent` (what that command stores) instead of running it, because the command also launches
+  the agent in a terminal and installs a missing one.
+
 ## 1.7.1 - 2026-11-22
 - A panel header at the very top, above the tab chips, like the stock panel's: "Agents" on the left, and the + (add
   subscription), >_ (default agent) and gear buttons on the right, all the same 34-unit size. The selected agent's name

@@ -2,7 +2,7 @@
 // Writes one panel setting to the plugin's own settings.json (in its state
 // folder), never to shell.json.
 // Usage: settings-set.mjs <key> <true|false>   |   settings-set.mjs hidden <agentId> <true|false>
-//        |   settings-set.mjs volume <0-100>
+//        |   settings-set.mjs volume <0-100>   |   settings-set.mjs order <id,id,...|reset>
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -30,6 +30,17 @@ export function applyHidden(current, id, hidden) {
   return { ...base, hiddenAgents: next };
 }
 
+// The tab order: a comma-separated list of known agent ids, saved so it survives restarts.
+// "reset" restores the default order (explicitly, so it also overrides a tabOrder set in shell.json).
+export const DEFAULT_ORDER = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"];
+export function applyOrder(current, csv) {
+  const ids = csv === "reset" ? DEFAULT_ORDER : String(csv || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const bad = ids.find((x) => !AGENT_IDS.includes(x));
+  if (bad || ids.length === 0 || new Set(ids).size !== ids.length) throw new Error(`order must be distinct known agent ids: ${csv}`);
+  const base = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+  return { ...base, tabOrder: ids };
+}
+
 export function applySetting(current, key, value) {
   if (!ALLOWED.includes(key)) throw new Error(`unknown setting: ${key}`);
   if (value !== "true" && value !== "false") throw new Error(`value must be true or false: ${value}`);
@@ -43,6 +54,7 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   let current = {}; try { current = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
   try {
     const next = process.argv[2] === "hidden" ? applyHidden(current, process.argv[3], process.argv[4])
+      : process.argv[2] === "order" ? applyOrder(current, process.argv[3])
       : process.argv[2] === "volume" ? applyVolume(current, process.argv[3])
       : applySetting(current, process.argv[2], process.argv[3]);
     fs.mkdirSync(dir, { recursive: true });

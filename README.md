@@ -154,6 +154,16 @@ on building a new Omarchy app, the same task the stock panel's App tile gives th
 from `~/Work` when that folder exists. An agent with no CLI has no button; Kimi can't take a starting prompt, so it
 opens with the prompt on the clipboard. The hover tooltip names the agent.
 
+### Tab order and the default agent
+
+Drag a chip onto another to reorder the tabs; the order is saved and survives restarts. The gear menu has left and right
+arrows for each agent (if dragging misbehaves) and a **Reset order** button (Claude Code, Antigravity, Grok, Codex, then the
+rest). Agents new to the list go at the end. The **first tab is Omarchy's default agent**: when the first position changes the
+plugin sets it, so the shortcut, the right-click on the robot and the header terminal button follow, and a small dot marks
+the first chip. Only agents Omarchy supports as a default are used; an unsupported or uninstalled first tab is skipped. It
+writes `~/.config/omarchy/defaults/agent` directly rather than running `omarchy default agent`, which would also launch
+the agent in a terminal.
+
 ### Themes
 
 The panel follows the active Omarchy theme live (switch themes and it changes with no restart): text, background and
