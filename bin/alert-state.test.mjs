@@ -37,3 +37,9 @@ assert.equal(planAlerts([A("claude", "Session", 0.95)], {}, T, NOW).toSend.lengt
 // Old windows are pruned.
 r = planAlerts([], { "claude|Session|2026-11-01T00:00:00Z": 1 }, T, NOW); assert.deepEqual(r.memory, {});
 console.log("alert-state: all tests passed");
+
+{
+  const a = { id: "claude", name: "Claude Code", limits: [], accounts: [{ id: "w", label: "Work", limits: [{ title: "Session", percent: 0.99, resetsAt: "x" }] }, { id: "m", label: "Main", limits: [{ title: "Session", percent: 0.1 }] }] };
+  const r = planAlerts([a], {}, 0.95);
+  assert.equal(r.toSend.length, 1); assert.equal(r.toSend[0].agent.name, "Claude Code (Work)");
+}

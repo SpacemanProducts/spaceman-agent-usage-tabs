@@ -18,4 +18,5 @@ assert.deepEqual(cm([L("Gemini Session", 0.2), L("Gemini Weekly", 0.7), L("Claud
 assert.deepEqual(cm([]), { session: -1, weekly: -1 }, "no meters -> no data");
 assert.deepEqual(cm([L("Session", "x"), L("Weekly", null)]), { session: -1, weekly: -1 }, "non-numeric ignored");
 assert.deepEqual(JSON.parse(JSON.stringify(ctx.chipMeters(null))), { session: -1, weekly: -1 });
+assert.deepEqual(JSON.parse(JSON.stringify(ctx.chipMeters({ limits: [L("Session", 0.2), L("Weekly", 0.2)], accounts: [{ limits: [L("Session", 0.9), L("Weekly", 0.1)] }, { limits: [L("Session", 0.3), L("Weekly", 0.7)] }] }))), { session: 0.9, weekly: 0.7 }, "worst meter across accounts");
 console.log("chip-meters: all tests passed");

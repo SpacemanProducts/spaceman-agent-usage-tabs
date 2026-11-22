@@ -32,8 +32,10 @@ export function resetNotice(agent, windows, info) {
     }
     return { title: copy.honest(windowPhrase(early.map((d) => d.title))), body: `\u26A1 ${titles} reset early${due ? ` - it wasn't due until ${clock(new Date(due).toISOString())}` : ""}. No announcement found.` };
   }
+  // With several accounts the notice names the ones that reset.
+  const who = (info?.accounts || []).length ? ` (${info.accounts.join(", ")})` : "";
   return {
-    title: `${agent.name} ${windowPhrase(windows)} reset, go cook.`,
+    title: `${agent.name}${who} ${windowPhrase(windows)} reset, go cook.`,
     body: `\u{1F4B8} ${windows.join(" and ")} limit${windows.length > 1 ? "s" : ""} reset`,
   };
 }
@@ -63,7 +65,16 @@ export function applyResets(agents, prevAgents, notify, now = Date.now()) {
   const prev = new Map((Array.isArray(prevAgents) ? prevAgents : []).filter((a) => a && a.id).map((a) => [a.id, a]));
   for (const a of agents || []) {
     const before = prev.get(a.id);
-    const details = classifyResets(before?.limits, a.limits, now);
+    let details, accounts = [];
+    if ((a.accounts || []).length > 1) {
+      // Several accounts: each is compared with its own previous meters.
+      details = [];
+      const prevAcc = new Map((before?.accounts || []).map((x) => [x.id, x]));
+      for (const acc of a.accounts) {
+        const d = classifyResets(prevAcc.get(acc.id)?.limits, acc.limits, now);
+        if (d.length) { accounts.push(acc.label); details.push(...d); }
+      }
+    } else details = classifyResets(before?.limits, a.limits, now);
     if (details.length) {
       const windows = details.map((d) => d.title);
       const kind = SURPRISE_AGENTS[a.id] && details.some((d) => d.surprise) ? "surprise" : "scheduled";
@@ -73,7 +84,8 @@ export function applyResets(agents, prevAgents, notify, now = Date.now()) {
       a.resetMagnitude = magnitudeOf(windows);
       a.resetPhrase = windowPhrase(windows);
       a.resetDetails = details;
-      notify(a, windows, { kind, details });
+      a.resetAccounts = accounts;
+      notify(a, windows, { kind, details, accounts });
     } else if (before?.resetAt && now - before.resetAt < FLASH_MS + 5000) {
       // A refresh that lands inside an in-progress flash keeps it alive.
       a.resetAt = before.resetAt;
@@ -82,6 +94,7 @@ export function applyResets(agents, prevAgents, notify, now = Date.now()) {
       a.resetMagnitude = before.resetMagnitude || 1;
       a.resetPhrase = before.resetPhrase || "";
       a.resetDetails = before.resetDetails || [];
+      a.resetAccounts = before.resetAccounts || [];
     }
   }
 }

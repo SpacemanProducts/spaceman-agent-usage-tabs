@@ -22,6 +22,7 @@ import { liveModels } from "./live-models.mjs";
 import { planInfo } from "./plan-info.mjs";
 import { makeInstalledCheck } from "./installed.mjs";
 import { planLoginNotices, planInstallNotices } from "./login-watch.mjs";
+import { buildAccounts } from "./accounts.mjs";
 import { createDiagnostics, checkAgentData } from "./diagnostics.mjs";
 
 const HOME = os.homedir();
@@ -270,6 +271,17 @@ for (const a of AGENTS) {
   out.today = out.days.length ? out.days[out.days.length - 1].tokens : 0;
   delete out.note;
   agents.push(out);
+}
+
+// ------------------------------------------------------- multiple accounts
+// From Omarchy's own account list (no credentials, no emails). Only agents with
+// two or more signed-in accounts get an `accounts` array; chips, the bar number,
+// alerts and celebrations then use every account's meters.
+{
+  const r = spawnSync("omarchy-agent-account-list", ["--json"], { encoding: "utf8", env: ENV, timeout: 20000 });
+  let list = null; try { list = JSON.parse(r.stdout || "null"); } catch {}
+  const byProvider = buildAccounts(list);
+  for (const a of agents) if (byProvider[a.id]) a.accounts = byProvider[a.id].map((x) => ({ ...x, limits: planLimitsOnly(x.limits) }));
 }
 
 // ------------------------------------------------- "now available" login notice

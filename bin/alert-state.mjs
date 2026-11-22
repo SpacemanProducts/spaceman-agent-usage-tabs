@@ -9,7 +9,14 @@ const PRUNE_AFTER_MS = 24 * 3600 * 1000;
 export function planAlerts(agents, before, threshold, now = Date.now()) {
   const memory = { ...(before || {}) };
   const toSend = [];
+  // A multi-account agent also alerts per account, named by its label.
+  const watched = [];
   for (const a of agents || []) {
+    watched.push(a);
+    if ((a.accounts || []).length > 1)
+      for (const acc of a.accounts) watched.push({ ...a, id: `${a.id}:${acc.id}`, name: `${a.name} (${acc.label})`, limits: acc.limits, accounts: undefined });
+  }
+  for (const a of watched) {
     for (const l of a.limits || []) {
       if (!WATCHED.test(String(l.title)) || typeof l.percent !== "number") continue;
       const prefix = `${a.id}|${l.title}|`;

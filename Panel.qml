@@ -68,6 +68,8 @@ Panel {
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
   readonly property bool showDetail: !!agent && !settingsOpen
+  // An agent with two or more accounts lists each one instead of a single set of limits.
+  readonly property bool hasAccounts: !!agent && Array.isArray(agent.accounts) && agent.accounts.length > 1
   // A tab shows when its agent is installed and the user hasn't hidden it, or
   // when it isn't installed and "hide uninstalled" is off. A manual hide only
   // counts while the agent is installed, so a newly installed agent appears on
@@ -161,7 +163,9 @@ Panel {
   readonly property real topSession: {
     var top = -1
     for (var i = 0; i < agents.length; i++) {
-      var ls = agents[i].limits || []
+      var ls = (agents[i].limits || []).slice()
+      var accts = agents[i].accounts || []
+      for (var k = 0; k < accts.length; k++) ls = ls.concat(accts[k].limits || [])
       for (var j = 0; j < ls.length; j++)
         if (/session/i.test(String(ls[j].title)) && ls[j].percent > top) top = ls[j].percent
     }
@@ -214,6 +218,18 @@ Panel {
     daysOpen = false
     modelsExpanded = false
     settingsOpen = false
+  }
+
+  // A way into making Omarchy your own: start the default agent on a new app or theme.
+  readonly property var starters: [
+    { glyph: "\u{f08c6}", label: "App", tip: "Start your default agent on a new app for this desktop", prompt: "Build me a new desktop app for my Omarchy setup. Ask what it should do first, then make it following the omarchy-app skill and install it so it appears in the app launcher." },
+    { glyph: "\u{f03d8}", label: "Theme", tip: "Start your default agent on a new Omarchy theme", prompt: "Design me a new Omarchy theme. Ask what look or inspiration I want first, then build it following the Omarchy skill's theming guide and switch to it." }
+  ]
+  Process { id: starterLauncher; running: false }
+  function startPrompt(prompt) {
+    close()
+    starterLauncher.command = ["omarchy-agent-prompt", prompt]
+    starterLauncher.running = true
   }
   function refreshNow() { if (!collector.running) collector.running = true }
 
@@ -475,6 +491,59 @@ Panel {
     }
   }
 
+  // One meter row: title and % used, the bar, and the reset countdown.
+  component LimitRow: Column {
+    id: lr
+    property var limit: ({})
+    spacing: Style.space(4)
+
+    Item {
+      width: parent.width
+      height: pctText.implicitHeight
+      Text {
+        textFormat: Text.PlainText
+        text: limit.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+      Text {
+        id: pctText
+        anchors.right: parent.right
+        textFormat: Text.PlainText
+        text: Math.round(limit.percent * 100) + "% used"
+        color: root.meterColor(limit.percent)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        font.bold: true
+      }
+    }
+    Rectangle {
+      width: parent.width
+      height: Style.space(8)
+      radius: height / 2
+      color: root.track
+      Rectangle {
+        width: Math.max(limit.percent > 0 ? height : 0, parent.width * root.clamp(limit.percent, 0, 1))
+        height: parent.height
+        radius: height / 2
+        color: root.meterColor(limit.percent)
+      }
+    }
+    Text {
+      textFormat: Text.PlainText
+      text: {
+        var c = root.countdown(limit.resetsAt)
+        var a = root.resetClock(limit.resetsAt)
+        return c !== "" && a !== "" ? c + " · " + a : c
+      }
+      visible: text !== ""
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -503,7 +572,7 @@ Panel {
     WlrLayershell.keyboardFocus: root.autoOpened ? WlrKeyboardFocus.None
       : (panel.open ? (panel.focusPrimed ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive) : WlrKeyboardFocus.None)
     contentWidth: panel.fittedContentWidth(Style.space(520))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(660))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight + starterRow.height + Style.space(8), Style.space(660))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -524,7 +593,11 @@ Panel {
 
       Flickable {
         id: flick
-        anchors.fill: parent
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: starterRow.top
+        anchors.bottomMargin: Style.space(8)
         contentWidth: width
         contentHeight: column.implicitHeight
         clip: true
@@ -795,7 +868,7 @@ Panel {
               spacing: Style.space(8)
               Repeater {
                 model: [
-                  { text: "\u25b6  Test celebration", id: "claude", kind: "scheduled", win: "session" },
+                  { text: "\u25b6  Test session reset", id: "claude", kind: "scheduled", win: "session" },
                   { text: "\u25b6  Test weekly reset", id: "claude", kind: "scheduled", win: "weekly" },
                   { text: "\u26a1  Test surprise reset", id: "antigravity", kind: "surprise", win: "weekly" }
                 ]
@@ -902,7 +975,7 @@ Panel {
 
           // ---------------- Limits
           Column {
-            visible: root.showDetail && (root.agent.limits || []).length > 0
+            visible: root.showDetail && !root.hasAccounts && (root.agent.limits || []).length > 0
             width: parent.width
             spacing: Style.space(10)
 
@@ -911,52 +984,83 @@ Panel {
             Repeater {
               model: root.agent ? (root.agent.limits || []) : []
 
-              Column {
+              LimitRow {
                 required property var modelData
+                limit: modelData
                 width: column.width
-                spacing: Style.space(4)
+              }            }
+          }
+
+          // ---------------- Accounts: one block per account, active one marked
+          Column {
+            visible: root.showDetail && root.hasAccounts
+            width: parent.width
+            spacing: Style.space(12)
+
+            PanelSectionHeader { width: parent.width; text: "ACCOUNTS" }
+
+            Repeater {
+              model: root.hasAccounts ? root.agent.accounts : []
+
+              Column {
+                id: acct
+                required property var modelData
+                required property int index
+                width: column.width
+                spacing: Style.space(8)
+
+                PanelSeparator { foreground: root.foreground; visible: acct.index > 0 }
 
                 Item {
                   width: parent.width
-                  height: pctText.implicitHeight
-                  Text {
-                    textFormat: Text.PlainText
-                    text: modelData.title
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
+                  height: Math.max(acctName.implicitHeight, activeTag.implicitHeight)
+                  Row {
+                    spacing: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    Text {
+                      id: acctName
+                      textFormat: Text.PlainText
+                      text: acct.modelData.label
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                    }
+                    Text {
+                      anchors.baseline: acctName.baseline
+                      textFormat: Text.PlainText
+                      text: acct.modelData.plan
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
                   }
                   Text {
-                    id: pctText
+                    id: activeTag
+                    visible: !!acct.modelData.active
                     anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
                     textFormat: Text.PlainText
-                    text: Math.round(modelData.percent * 100) + "% used"
-                    color: root.meterColor(modelData.percent)
+                    text: "ACTIVE"
+                    color: root.green
                     font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
+                    font.pixelSize: Style.font.caption
                     font.bold: true
                   }
                 }
-                Rectangle {
-                  width: parent.width
-                  height: Style.space(8)
-                  radius: height / 2
-                  color: root.track
-                  Rectangle {
-                    width: Math.max(modelData.percent > 0 ? height : 0, parent.width * root.clamp(modelData.percent, 0, 1))
-                    height: parent.height
-                    radius: height / 2
-                    color: root.meterColor(modelData.percent)
+
+                Repeater {
+                  model: acct.modelData.limits || []
+                  LimitRow {
+                    required property var modelData
+                    limit: modelData
+                    width: column.width
                   }
                 }
                 Text {
+                  visible: (acct.modelData.limits || []).length === 0
                   textFormat: Text.PlainText
-                  text: {
-                    var c = root.countdown(modelData.resetsAt)
-                    var a = root.resetClock(modelData.resetsAt)
-                    return c !== "" && a !== "" ? c + " · " + a : c
-                  }
-                  visible: text !== ""
+                  text: "No limits reported for this account."
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -1178,6 +1282,59 @@ Panel {
                 }
               }
             }
+          }
+        }
+      }
+
+      // ---------------- Make something: App and Theme, always shown. Each starts the
+      // default agent on a new app or theme through `omarchy-agent-prompt`, the same
+      // way Omarchy's own agents panel does. (No Plugin button: this is the plugin.)
+      Row {
+        id: starterRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: Style.space(36)
+        spacing: Style.space(8)
+
+        Repeater {
+          model: root.starters
+          Rectangle {
+            id: starter
+            required property var modelData
+            width: (starterRow.width - starterRow.spacing) / 2
+            height: starterRow.height
+            radius: Style.cornerRadius
+            color: starterArea.containsMouse ? root.track : "transparent"
+            border.width: 1
+            border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
+            Row {
+              anchors.centerIn: parent
+              spacing: Style.space(8)
+              Text {
+                textFormat: Text.PlainText
+                text: starter.modelData.glyph
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: starter.modelData.label
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+            }
+            MouseArea {
+              id: starterArea
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.startPrompt(starter.modelData.prompt)
+            }
+            PanelToolTip { visible: starterArea.containsMouse; text: starter.modelData.tip; fontFamily: root.fontFamily }
           }
         }
       }

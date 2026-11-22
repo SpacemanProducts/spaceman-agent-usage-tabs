@@ -131,14 +131,25 @@ local until you sign in).
 
 **The gear icon** in the panel header opens a small settings view (shown below) with
 switches for hiding uninstalled agents, showing unused models, the reset animation, opening
-the panel on reset, the reset sound (with a volume control), a **Test celebration** button and
-a **Test surprise reset** button that replay each celebration any time, and a switch for
+the panel on reset, the reset sound (with a volume control), **Test session reset**,
+**Test weekly reset** and **Test surprise reset** buttons that replay each celebration any time, and a switch for
 every tab.
 
 ![The gear settings view](docs/settings.png)
 
 **Only plan limits, usage and resets are shown.** Purchasable credit balances, overage,
 on-demand spend and top-ups are deliberately never displayed.
+
+### Multiple accounts and the App / Theme buttons
+
+If an agent has more than one signed-in account in Omarchy's own account list (`omarchy agent account`),
+its tab lists each account: label, plan, an ACTIVE mark, and its own session and weekly meters. The tab
+chip, the bar number and the alerts use the worst meter across the accounts, and a reset celebration
+names the account that reset. The plugin only reads Omarchy's usage records through
+`omarchy-agent-account-list`; it never reads or stores credentials, and email addresses are dropped.
+
+A bottom row with **App** and **Theme** buttons is always shown. Each has a hover tooltip and starts
+your default agent on a new app or theme (`omarchy-agent-prompt`), the way Omarchy's agents panel does.
 
 ## Known gap: banked limit resets can't be read
 

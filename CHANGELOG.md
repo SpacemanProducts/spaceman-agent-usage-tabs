@@ -3,6 +3,16 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.6.0 - 2026-11-22
+- Multiple accounts: an agent with two or more signed-in accounts (Claude, Codex, Grok, from Omarchy's
+  own `omarchy agent account` list and usage records) lists each in its tab with label, plan, an ACTIVE
+  mark and its own session and weekly meters. Credentials are never read and emails are never stored.
+- Tab chips, the bar number and the 95% alerts use the worst meter across all accounts; alerts and reset
+  celebrations name the account ("Claude Code (Work) session reset, go cook."). One-account agents are unchanged.
+- An App and a Theme button, always shown at the bottom of the panel with hover tooltips. They start your default
+  agent on a new app or theme through `omarchy-agent-prompt`, like Omarchy's own agents panel (no Plugin button).
+- The Test celebration button is now Test session reset, matching Test weekly reset and Test surprise reset.
+
 ## 1.5.0 - 2026-11-21
 - Every celebration names the window that reset: "Claude Code weekly reset, go cook.", and monthly or
   daily for agents with those meters (which now celebrate too). A weekly reset gets a bit bigger burst

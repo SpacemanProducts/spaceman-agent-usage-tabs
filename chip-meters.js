@@ -6,7 +6,10 @@
 // With neither, the fullest "other" meter stands in for both.
 function chipMeters(agent) {
   var session = -1, weekly = -1, other = -1
-  var limits = (agent && agent.limits) || []
+  var limits = ((agent && agent.limits) || []).slice()
+  // With several accounts the worst meter across all of them colors the chip.
+  var accts = (agent && agent.accounts) || []
+  for (var a = 0; a < accts.length; a++) limits = limits.concat((accts[a] && accts[a].limits) || [])
   for (var i = 0; i < limits.length; i++) {
     var p = limits[i] ? limits[i].percent : NaN
     if (typeof p !== "number" || !isFinite(p) || p < 0) continue

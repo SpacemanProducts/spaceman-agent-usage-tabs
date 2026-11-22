@@ -91,3 +91,15 @@ const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url
 for (const needle of ["applyResets(agents, prev?.agents", "resetNotifyArgs(", "resetAssets(", "corroborate(", "resetNotice(", "playSound(SOUND_VOLUME, ", "planLoginNotices(agents", "planInstallNotices(prev?.agents", "notifyHighUsage(agents)", "diag.flush()", "planLimitsOnly(out.limits)", "buildModels({"])
   assert.ok(src.includes(needle), `collect.mjs no longer calls: ${needle}`);
 console.log("reset-celebration: all tests passed");
+
+// ---- multiple accounts: celebrations name the account that reset
+{
+  const mk = (s) => ({ id: "claude", name: "Claude Code", limits: [], accounts: [
+    { id: "main", label: "Main", limits: [{ title: "Session", percent: 0.1, resetsAt: "" }] },
+    { id: "work", label: "Work", limits: [{ title: "Session", percent: s, resetsAt: "" }] }] });
+  const before = mk(0.9); before.accounts[0].limits[0].percent = 0.1;
+  const now = mk(0.05); let got;
+  applyResets([now], [before], (a, w, info) => { got = info; });
+  assert.deepEqual(got.accounts, ["Work"], "only the account that dropped is named");
+  assert.equal(resetNotice(now, ["Session"], got).title, "Claude Code (Work) session reset, go cook.");
+}
