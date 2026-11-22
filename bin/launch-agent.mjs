@@ -46,5 +46,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   const work = path.join(os.homedir(), "Work");
   const cwd = fs.existsSync(work) ? work : os.homedir();
-  spawn("omarchy-launch-tui", argv, { cwd, env, detached: true, stdio: "ignore" }).unref();
+  spawn("omarchy-launch-tui", [`--app-id=org.omarchy.${cli}`, ...argv], { cwd, env, detached: true, stdio: "ignore" }).unref();
 }

@@ -349,7 +349,7 @@ Panel {
     }
   }
   function installSquad() {
-    if (root.bar) root.bar.run("omarchy-launch-tui bash " + pluginDir + "/bin/squad.sh --install")
+    if (root.bar) root.bar.run("omarchy-launch-tui --app-id=org.omarchy.squad bash " + pluginDir + "/bin/squad.sh --install")
     close()
   }
   // The agents ticked in the picker (agent id -> true). Opening the picker ticks the selected tab's agent.
@@ -367,7 +367,7 @@ Panel {
   // if there is none), runs the first agent in that terminal and opens a terminal for each of the others.
   function launchSquad() {
     if (squadClis.length === 0) return
-    if (root.bar) root.bar.run("omarchy-launch-tui bash " + pluginDir + "/bin/squad.sh " + squadClis.join(" "))
+    if (root.bar) root.bar.run("omarchy-launch-tui --app-id=org.omarchy.squad bash " + pluginDir + "/bin/squad.sh " + squadClis.join(" "))
     close()
   }
 

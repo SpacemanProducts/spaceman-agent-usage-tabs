@@ -1,7 +1,8 @@
 #!/bin/bash
 # The Squad button: run Claude Squad (`cs`) with one agent, in a git repo folder.
 # Usage: squad.sh <agent-cli>...    squad.sh --install   (install Claude Squad)
-# With several agents, the first runs in this terminal and each other gets a terminal of its own.
+# With several agents, the first runs in this terminal and each other gets a terminal of its own. Its app-id is
+# org.omarchy.squad (not org.omarchy.bash, which Omarchy's window rules float), so it opens as a normal tiled window.
 # The folder: $SQUAD_DIR, else the last one used. Otherwise a picker offers recent git repos, "Create a new project"
 # (in ~/Projects, git-initialized with a first commit) and "Browse..." for anywhere else.
 arg=${1:?usage: squad.sh <agent-cli>... | --install}
@@ -76,6 +77,6 @@ mkdir -p "$(dirname "$state")" && printf '%s\n' "$dir" >"$state"
 
 # Every other agent: its own terminal in the same folder (the folder is settled now, so nothing asks again).
 for extra in "${clis[@]:1}"; do
-  SQUAD_DIR="$dir" omarchy-launch-tui bash "$0" "$extra"
+  SQUAD_DIR="$dir" omarchy-launch-tui --app-id=org.omarchy.squad bash "$0" "$extra"
 done
 cd "$dir" && exec cs -p "${clis[0]}"

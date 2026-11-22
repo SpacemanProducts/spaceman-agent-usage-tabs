@@ -11,6 +11,8 @@ Bump the version in `manifest.json` and add a line here with every change
   agents to run, then opens a terminal and runs `cs -p <agent>` for each. The git repo folder is the last one used, else a picker with
   three things: recent git repos (backups and desktop files hidden), Create a new project (in ~/Projects, git-initialized
   with a first commit) and Browse... for anywhere else. Screenshots retaken with the button.
+  The terminal opens as a normal tiled window (its own app-id, `org.omarchy.squad`; `org.omarchy.bash` is floated by
+  Omarchy's window rules), and so do the App button's terminals.
 
 ## 1.9.0 - 2026-11-22
 - A gray tab (no meter at all) now says why: not installed, not signed in, or no usage source.

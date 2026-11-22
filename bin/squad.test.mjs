@@ -82,8 +82,8 @@ assert.notEqual(r.status, 0); assert.ok(!fs.existsSync(path.join(home, "escape")
 fs.writeFileSync(path.join(bin, "omarchy-launch-tui"), '#!/bin/bash\necho "terminal: $* (SQUAD_DIR=$SQUAD_DIR)"\n', { mode: 0o755 });
 fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
 r = run(["codex", "grok", "amp"], { SQUAD_DIR: repo });
-assert.match(r.stdout, /terminal: bash .*squad\.sh grok \(SQUAD_DIR=.*repo\)/);
-assert.match(r.stdout, /terminal: bash .*squad\.sh amp /);
+assert.match(r.stdout, /terminal: --app-id=org\.omarchy\.squad bash .*squad\.sh grok \(SQUAD_DIR=.*repo\)/);
+assert.match(r.stdout, /terminal: --app-id=org\.omarchy\.squad bash .*squad\.sh amp /);
 assert.match(r.stdout, /cs -p codex in /, "the first agent runs in this terminal");
 fs.rmSync(tmp, { recursive: true });
 console.log("squad: all tests passed");
