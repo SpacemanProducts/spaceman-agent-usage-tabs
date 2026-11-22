@@ -330,6 +330,47 @@ Panel {
     close()
   }
 
+  // Squad: pick an installed agent, then Claude Squad (`cs -p <agent>`) opens in a terminal in a git repo
+  // folder (bin/squad.sh finds it). If cs isn't installed the picker says how to get it instead.
+  property bool squadOpen: false
+  property string squadHasCs: "unknown"
+  Process {
+    id: squadCheck
+    command: ["bash", "-c", "PATH=$HOME/.local/bin:$PATH command -v cs >/dev/null"]
+    onExited: function(code) { root.squadHasCs = code === 0 ? "yes" : "no" }
+  }
+  function toggleSquad() {
+    squadOpen = !squadOpen
+    if (squadOpen) {
+      var first = {}
+      if (agent && agent.cli) first[agent.id] = true
+      squadPicked = first
+      if (!squadCheck.running) squadCheck.running = true
+    }
+  }
+  function installSquad() {
+    if (root.bar) root.bar.run("omarchy-launch-tui bash " + pluginDir + "/bin/squad.sh --install")
+    close()
+  }
+  // The agents ticked in the picker (agent id -> true). Opening the picker ticks the selected tab's agent.
+  property var squadPicked: ({})
+  readonly property var squadClis: {
+    var out = []
+    allOrdered.forEach(function(a) { if (squadPicked[a.id] && a.cli) out.push(a.cli) })
+    return out
+  }
+  function toggleSquadAgent(id) {
+    var next = Object.assign({}, squadPicked); next[id] = !next[id]
+    squadPicked = next
+  }
+  // Runs `cs -p <agent>` for each ticked agent. squad.sh settles the git repo folder once (pick or create one
+  // if there is none), runs the first agent in that terminal and opens a terminal for each of the others.
+  function launchSquad() {
+    if (squadClis.length === 0) return
+    if (root.bar) root.bar.run("omarchy-launch-tui bash " + pluginDir + "/bin/squad.sh " + squadClis.join(" "))
+    close()
+  }
+
   function refreshNow() { if (!collector.running) collector.running = true }
 
   function fmtTokens(n) {
@@ -373,7 +414,7 @@ Panel {
     onTriggered: if (root.autoOpened && root.opened) root.close()
   }
 
-  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop() } else {
+  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false } else {
     daysOpen = false
     modelsExpanded = false
     settingsOpen = false
@@ -484,6 +525,9 @@ Panel {
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
     function settings(): string { root.settingsOpen = !root.settingsOpen; return root.settingsOpen ? "open" : "closed" }
+    // Test hook: show the picker as if cs were missing (or present) without running the check.
+    function squadPreview(state: string): string { root.squadOpen = true; root.squadHasCs = state; return state }
+    function squad(): string { root.toggleSquad(); return root.squadOpen ? "open" : "closed" }
     function resetOrder(): string { root.resetOrder(); return "ok" }
     // Test hook: drop chip `from` as if it were dragged onto chip `to` (same hit-testing as a real drag).
     function dropOnto(from: string, to: string): string {
@@ -1543,8 +1587,42 @@ Panel {
           PanelSectionHeader {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            width: parent.width - appTile.width - Style.space(10)
+            width: parent.width - appTile.width * 2 - Style.space(20)
             text: "MAKE SOMETHING"
+          }
+          // Squad: opens the agent picker just below. Same tile as App, to its left.
+          Rectangle {
+            id: squadTile
+            anchors.right: appTile.left
+            anchors.rightMargin: Style.space(10)
+            width: appTile.width
+            height: appTile.height
+            radius: Style.cornerRadius
+            color: squadArea.containsMouse || root.squadOpen ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14)
+                                                              : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+            Row {
+              anchors.centerIn: parent
+              spacing: Style.space(8)
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "\u{f0849}"
+                color: Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.heading
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "Claude Squad"
+                color: squadArea.containsMouse || root.squadOpen ? Color.accent : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+            }
+            MouseArea { id: squadArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleSquad() }
+            PanelToolTip { visible: squadArea.containsMouse; text: "Run Claude Squad (cs) with the agents you pick"; fontFamily: root.fontFamily }
           }
           Rectangle {
             id: appTile
@@ -1584,6 +1662,111 @@ Panel {
               onClicked: root.launchApp()
             }
             PanelToolTip { visible: appArea.containsMouse; text: "Start " + (root.agent ? root.agent.name : "your agent") + " on building a new Omarchy app"; fontFamily: root.fontFamily }
+          }
+        }
+
+        // Squad picker: installed agents to choose from, or a short note if cs isn't installed.
+        Column {
+          visible: root.squadOpen
+          width: parent.width
+          spacing: Style.space(8)
+          // cs isn't installed: say so, with a one-click install (it runs in a terminal so you see it).
+          Row {
+            visible: root.squadHasCs === "no"
+            width: parent.width
+            spacing: Style.space(10)
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - installTile.width - Style.space(10)
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: "Squad needs Claude Squad (cs), plus tmux and git."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            Rectangle {
+              id: installTile
+              width: installLabel.implicitWidth + Style.space(22)
+              height: installLabel.implicitHeight + Style.space(14)
+              radius: Style.cornerRadius
+              color: installArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+              Text {
+                id: installLabel
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Install Claude Squad"
+                color: installArea.containsMouse ? Color.accent : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
+              MouseArea { id: installArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.installSquad() }
+              PanelToolTip { visible: installArea.containsMouse; text: "Opens a terminal and runs the Claude Squad install script"; fontFamily: root.fontFamily }
+            }
+          }
+          Column {
+            visible: root.squadHasCs === "yes"
+            width: parent.width
+            spacing: Style.space(8)
+            Text {
+              textFormat: Text.PlainText
+              text: "Pick the agents to run with Claude Squad:"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            Flow {
+              width: parent.width
+              spacing: Style.space(6)
+              Repeater {
+                model: root.allOrdered.filter(function(a) { return a.installed !== false && !!a.cli })
+                Rectangle {
+                  id: pick
+                  required property var modelData
+                  readonly property bool on: !!root.squadPicked[modelData.id]
+                  width: pickLabel.implicitWidth + Style.space(22)
+                  height: pickLabel.implicitHeight + Style.space(14)
+                  radius: Style.cornerRadius
+                  color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
+                            : (pickArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05))
+                  border.width: on ? 1 : 0
+                  border.color: Color.accent
+                  Text {
+                    id: pickLabel
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: (pick.on ? "\u2713 " : "") + pick.modelData.name
+                    color: pick.on ? Color.accent : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: pick.on
+                  }
+                  MouseArea { id: pickArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleSquadAgent(pick.modelData.id) }
+                }
+              }
+            }
+            Rectangle {
+              id: runTile
+              readonly property bool ready: root.squadClis.length > 0
+              width: runLabel.implicitWidth + Style.space(28)
+              height: runLabel.implicitHeight + Style.space(14)
+              radius: Style.cornerRadius
+              opacity: ready ? 1 : 0.4
+              color: runArea.containsMouse && ready ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
+              Text {
+                id: runLabel
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Run" + (root.squadClis.length > 0 ? " " + root.squadClis.length + (root.squadClis.length === 1 ? " agent" : " agents") : "")
+                color: Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
+              MouseArea { id: runArea; anchors.fill: parent; enabled: runTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.launchSquad() }
+              PanelToolTip { visible: runArea.containsMouse; text: "Opens a terminal in a git repo folder and runs cs -p for each agent"; fontFamily: root.fontFamily }
+            }
           }
         }
       }

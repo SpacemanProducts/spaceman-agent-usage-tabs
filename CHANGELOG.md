@@ -6,6 +6,11 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.10.0 - 2026-11-22
+- A **Claude Squad** button next to App. It checks that `cs` is installed (one-click install if not), lets you tick which
+  agents to run, then opens a terminal and runs `cs -p <agent>` for each. The git repo folder is the last one used, else the
+  newest repo under ~/Work; with none you pick a folder or create a new project (git-initialized with a first commit).
+
 ## 1.9.0 - 2026-11-22
 - A gray tab (no meter at all) now says why: not installed, not signed in, or no usage source.
 - The gear menu is shorter: Display, Reset celebration and Tabs headings, tab switches two to a row. The left/right reorder

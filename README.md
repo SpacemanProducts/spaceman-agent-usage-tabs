@@ -162,6 +162,15 @@ opens with the prompt on the clipboard. The hover tooltip names the agent.
 
 *Two accounts on Claude Code, with made-up labels and numbers: this machine has one account per provider, so this view is staged.*
 
+### Claude Squad
+
+The **Claude Squad** button (next to App) runs [Claude Squad](https://github.com/smtg-ai/claude-squad) (`cs`) with the agents
+you choose. It first checks that `cs` is installed and offers a one-click install (it runs the project's install script in
+a terminal, so you see it). Then tick the agents to run and press **Run**: a terminal opens in a git repo folder and runs
+`cs -p <agent>`, with one terminal per extra agent. The folder is the last one used, else the newest git repo under
+`~/Work`; if there is none you pick a folder or create a new project, and it is made a git repo with a first commit.
+It needs `tmux` and `git`.
+
 ### Tab order and the default agent
 
 Drag a chip onto another to reorder the tabs; the order is saved and survives restarts. **Reset order** in the gear menu
