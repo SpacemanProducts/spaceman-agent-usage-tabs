@@ -3,6 +3,11 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.7.1 - 2026-11-22
+- A panel header at the very top, above the tab chips, like the stock panel's: "Agents" on the left, and the + (add
+  subscription), >_ (default agent) and gear buttons on the right, all the same 34-unit size. The selected agent's name
+  and plan stay below the chips (or "Settings" while the gear is open).
+
 ## 1.7.0 - 2026-11-22
 - Follows the active Omarchy theme live: panel text, background and borders use the theme's popup colors, icons its
   accent, and secondary text is the text color pulled toward the background (it used to be `darker()`, which vanishes

@@ -678,6 +678,55 @@ Panel {
           width: flick.width
           spacing: Style.space(12)
 
+          // ---------------- Panel header, above the tabs: the title on the left and the
+          // add-subscription, default-agent and settings buttons on the right (like the stock hero corner).
+          Item {
+            id: topHeader
+            width: parent.width
+            height: Style.space(34)
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "Agents"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            Row {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(6)
+              HeaderButton { glyph: "\u{f0415}"; tip: "Add a subscription"; onClicked: root.addSubscription() }
+              HeaderButton { glyph: "\u{f07b7}"; tip: "Start the default agent"; onClicked: root.launchDefaultAgent() }
+              Rectangle {
+              id: gearButton
+              width: Style.space(34)
+              height: Style.space(34)
+              radius: Style.cornerRadius
+              color: root.settingsOpen ? root.track : "transparent"
+              border.width: root.settingsOpen ? 1 : 0
+              border.color: root.foreground
+              Text {
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "\uf013"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+              }
+              MouseArea {
+                id: gearHover
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.settingsOpen = !root.settingsOpen
+              }
+              PanelToolTip { visible: gearHover.containsMouse; text: "Settings"; fontFamily: root.fontFamily }
+            }
+            }
+          }
+
           // ---------------- Tabs: full names, wrap rather than truncate
           Flow {
             width: parent.width
@@ -820,7 +869,7 @@ Panel {
           Item {
             id: headerRow
             width: parent.width
-            height: Math.max(headerName.implicitHeight, gearButton.height, Style.space(34))
+            height: headerName.implicitHeight
 
             Row {
               visible: root.showDetail
@@ -853,41 +902,6 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
               font.bold: true
-            }
-            Row {
-              anchors.right: gearButton.left
-              anchors.rightMargin: Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(6)
-              HeaderButton { glyph: "\u{f0415}"; tip: "Add a subscription"; onClicked: root.addSubscription() }
-              HeaderButton { glyph: "\u{f07b7}"; tip: "Start the default agent"; onClicked: root.launchDefaultAgent() }
-            }
-            Rectangle {
-              id: gearButton
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(28)
-              height: Style.space(28)
-              radius: Style.cornerRadius
-              color: root.settingsOpen ? root.track : "transparent"
-              border.width: root.settingsOpen ? 1 : 0
-              border.color: root.foreground
-              Text {
-                anchors.centerIn: parent
-                textFormat: Text.PlainText
-                text: "\uf013"
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.title
-              }
-              MouseArea {
-                id: gearHover
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.settingsOpen = !root.settingsOpen
-              }
-              PanelToolTip { visible: gearHover.containsMouse; text: "Settings"; fontFamily: root.fontFamily }
             }
           }
 
