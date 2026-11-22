@@ -2,8 +2,8 @@
 # The Squad button: run Claude Squad (`cs`) with one agent, in a git repo folder.
 # Usage: squad.sh <agent-cli>...    squad.sh --install   (install Claude Squad)
 # With several agents, the first runs in this terminal and each other gets a terminal of its own.
-# The folder: $SQUAD_DIR, else the last one used, else the newest git repo under ~/Work. With none, you pick
-# a folder or create a new project here; either way it is made a git repo (with a first commit) if it isn't one.
+# The folder: $SQUAD_DIR, else the last one used. Otherwise a picker starts in ~/Projects and lists only git repos
+# there (no backups or desktop files), plus "Create a new project", which is git-initialized with a first commit.
 arg=${1:?usage: squad.sh <agent-cli>... | --install}
 export PATH="$HOME/.local/bin:$PATH"
 INSTALL='curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.sh | bash'
@@ -32,25 +32,33 @@ is_repo() { [[ -n $1 ]] && git -C "$1" rev-parse --is-inside-work-tree >/dev/nul
 # Squad branches from HEAD, so a fresh repo needs a first commit.
 init_repo() { git -C "$1" init -q && git -C "$1" commit -q --allow-empty -m "Initial commit"; }
 
+# Projects live here; the folder picker starts here and lists only git repos in it.
+PROJECTS="${SQUAD_PROJECTS:-$HOME/Projects}"
+# Backups and desktop files are hidden: hidden folders, *backup*/*.bak*, date-stamped or before-/pre- copies, *.desktop, Desktop.
+repo_list() {
+  find "$PROJECTS" -maxdepth 3 -name .git -prune -printf '%T@ %h\n' 2>/dev/null | sort -nr | cut -d' ' -f2- |
+    while IFS= read -r d; do
+      rel=${d#"$PROJECTS"/}
+      [[ $rel == "$PROJECTS" ]] && rel=$(basename "$d")
+      case "/$rel/" in */.*|*backup*|*Backup*|*.bak*|*-before-*|*-pre[a-z]*/|*-20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]*|*.desktop/|*/Desktop/*) continue ;; esac
+      printf '%s\n' "$rel"
+    done
+}
+
 dir=${SQUAD_DIR:-}
 [[ -z $dir && -f $state ]] && dir=$(<"$state")
 if ! is_repo "$dir"; then
-  dir=$(find "$HOME/Work" -maxdepth 3 -name .git -printf '%T@ %h\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
-fi
-if ! is_repo "$dir"; then
-  choice=$(gum choose --header "Squad needs a git repo folder" "Pick a folder" "Create a new project") || exit 130
-  if [[ $choice == "Pick a folder" ]]; then
-    dir=$(gum file --directory --header "Choose a folder" "$HOME") || exit 130
-    [[ -n $dir ]] || exit 130
-    if ! is_repo "$dir"; then
-      gum confirm "That folder isn't a git repo. Run git init there?" || exit 130
-      init_repo "$dir" || { echo "git init failed in $dir"; pause; exit 1; }
-    fi
-  else
+  mapfile -t repos < <(repo_list)
+  new="+ Create a new project"
+  choice=$(printf '%s\n' "${repos[@]}" "$new" | sed '/^$/d' | gum choose --header "Squad: pick a git repo in ${PROJECTS/#$HOME/~}") || exit 130
+  if [[ $choice == "$new" ]]; then
     name=$(gum input --header "New project name" --placeholder "my-project") || exit 130
     [[ -n $name && $name != */* && $name != .* ]] || { echo "Use a plain folder name."; pause; exit 1; }
-    dir="$HOME/Work/$name"
+    dir="$PROJECTS/$name"
     mkdir -p "$dir" && init_repo "$dir" || { echo "Couldn't create $dir"; pause; exit 1; }
+  else
+    dir="$PROJECTS/$choice"
+    is_repo "$dir" || { echo "$dir isn't a git repo."; pause; exit 1; }
   fi
 fi
 mkdir -p "$(dirname "$state")" && printf '%s\n' "$dir" >"$state"

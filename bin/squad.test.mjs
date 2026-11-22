@@ -38,22 +38,35 @@ r = run();
 assert.match(r.stdout, new RegExp(`in ${real(repo)}\\n$`), "remembers the last repo");
 fs.rmSync(path.join(home, ".local/state"), { recursive: true });
 
-// no repo anywhere: create a new project, git-initialized with a first commit
-r = run(["claude"], { GUM_CHOOSE: "Create a new project", GUM_INPUT: "squad-demo" });
-const made = path.join(home, "Work/squad-demo");
+// no remembered repo: a picker starts in Projects and lists only git repos, hiding backups and desktop files
+const proj = path.join(home, "Projects");
+const mk = (name, git = true) => { const d = path.join(proj, name); fs.mkdirSync(d, { recursive: true }); if (git) spawnSync("git", ["init", "-q", d]); };
+mk("my-app"); mk("nested/tool"); mk("plain-folder", false);
+for (const hidden of ["my-app-backup", "old.bak-20261121", "thing-2026-11-21", "app-before-merge", "app-prepublish", ".hidden", "Liftoff.desktop"]) mk(hidden);
+fs.writeFileSync(path.join(bin, "gum"), `#!/bin/bash
+case "$1" in
+  choose) cat > "$GUM_LOG"; echo "$GUM_CHOOSE" ;;
+  input) echo "$GUM_INPUT" ;;
+  confirm) [[ \${GUM_CONFIRM:-yes} == yes ]] ;;
+esac
+`, { mode: 0o755 });
+const log = path.join(tmp, "gum.log");
+fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
+r = run(["claude"], { GUM_CHOOSE: "my-app", GUM_LOG: log });
+const offered = fs.readFileSync(log, "utf8").trim().split("\n").sort();
+assert.deepEqual(offered, ["+ Create a new project", "my-app", "nested/tool"], "only real repos, no backups or desktop files");
+assert.equal(r.stdout.trim(), `cs -p claude in ${real(path.join(proj, "my-app"))}`);
+// create a new project: lands in Projects, git-initialized with a first commit
+fs.rmSync(path.join(home, ".local/state"), { recursive: true });
+r = run(["claude"], { GUM_CHOOSE: "+ Create a new project", GUM_INPUT: "squad-demo", GUM_LOG: log });
+const made = path.join(proj, "squad-demo");
 assert.equal(r.stdout.trim(), `cs -p claude in ${real(made)}`);
 assert.ok(spawnSync("git", ["-C", made, "log", "--oneline"], { encoding: "utf8" }).stdout.includes("Initial commit"), "has a first commit");
-fs.rmSync(path.join(home, ".local/state"), { recursive: true }); fs.rmSync(made, { recursive: true });
-
-// no repo: pick a plain folder -> git init it
-const plain = path.join(tmp, "plain"); fs.mkdirSync(plain);
-r = run(["claude"], { GUM_CHOOSE: "Pick a folder", GUM_FILE: plain });
-assert.equal(r.stdout.trim(), `cs -p claude in ${real(plain)}`);
-assert.ok(fs.existsSync(path.join(plain, ".git")), "folder was git-initialized");
-// ...and a name that isn't a plain folder name is refused
+// a name that isn't a plain folder name is refused
 fs.rmSync(path.join(home, ".local/state"), { recursive: true });
-r = run(["claude"], { GUM_CHOOSE: "Create a new project", GUM_INPUT: "../escape" });
+r = run(["claude"], { GUM_CHOOSE: "+ Create a new project", GUM_INPUT: "../escape", GUM_LOG: log });
 assert.notEqual(r.status, 0); assert.ok(!fs.existsSync(path.join(home, "escape")));
+
 // several agents: the first runs here, each other gets its own terminal in the same folder
 fs.writeFileSync(path.join(bin, "omarchy-launch-tui"), '#!/bin/bash\necho "terminal: $* (SQUAD_DIR=$SQUAD_DIR)"\n', { mode: 0o755 });
 fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
