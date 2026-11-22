@@ -30,9 +30,11 @@ def spawn(cmd):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize())
     return pid, fd
 
+MODE = re.compile(rb"\x1b\[\?([0-9;]+)([hl])")
+
 class Cs:
     def __init__(self, program, show):
-        self.show, self.buf = show, b""
+        self.show, self.buf, self.modes = show, b"", {}
         self.pid, self.fd = spawn(["cs", "-p", program])
     def pump(self, timeout=0.2):
         r, _, _ = select.select([self.fd], [], [], timeout)
@@ -40,6 +42,8 @@ class Cs:
         try: data = os.read(self.fd, 65536)
         except OSError: return False
         if not data: return False
+        for m in MODE.finditer(data):          # remember alt-screen / mouse / cursor modes (last one wins)
+            for n in m.group(1).split(b";"): self.modes.pop(n, None); self.modes[n] = m.group(2)
         self.buf = (self.buf + data)[-20000:]
         if self.show: os.write(1, data)
         return True
@@ -143,8 +147,26 @@ def start_session(cs, title):
         cs.buf = b""
         if attempt % 2 == 0: cs.send("\x11")
         else: subprocess.run(["tmux", "detach-client", "-s", name], capture_output=True)
-        if cs.wait_for("n new", 4): return True, wait_saved(title, 10)
+        if cs.wait_for("n new", 4):
+            # Listed = cs saved it, or (for the cs window that stays open, which saves later) its list on screen shows it.
+            return True, wait_saved(title, 6) or title in cs.text()
     return alive(name), False
+
+class QuietInput:
+    """While sessions are being started, keys must not echo and must never reach cs or this script: echo is turned off,
+    and when setup is done everything typed meanwhile is discarded (tcflush) before the terminal is handed over."""
+    def __init__(self): self.old = None
+    def start(self):
+        if os.isatty(0):
+            self.old = termios.tcgetattr(0)
+            new = termios.tcgetattr(0)
+            new[3] &= ~(termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ECHONL)
+            termios.tcsetattr(0, termios.TCSADRAIN, new)
+    def finish(self):
+        if self.old is not None:
+            termios.tcflush(0, termios.TCIFLUSH)
+            termios.tcsetattr(0, termios.TCSADRAIN, self.old)
+            self.old = None
 
 def main():
     repo, agents = sys.argv[1], sys.argv[2:]
@@ -154,10 +176,14 @@ def main():
         sys.exit(3)
     os.chdir(repo)
     stamp = time.strftime("%H%M")
+    quiet = QuietInput()
+    quiet.start()
+    say(f"Starting agents: {', '.join(agents)}")
+    say("Please wait: your keys are ignored until this is done (Ctrl-C cancels).")
     for i, agent in enumerate(agents):
         last = i == len(agents) - 1
         say(f"Starting {agent} ({i + 1}/{len(agents)})...")
-        cs = Cs(agent, show=last)
+        cs = Cs(agent, show=False)             # nothing of cs is shown while sessions are being started
         title = f"{agent}-{stamp}"
         started, listed = start_session(cs, title)
         if not last:
@@ -176,12 +202,23 @@ def main():
             say(f"  started: {agent} (running, but cs didn't list it; it may need a restart of cs)")
         if last:
             close_extra_windows()
+            say("All set. Opening Claude Squad...")
+            quiet.finish()                  # throw away anything typed during setup, so none of it reaches cs
             return interactive(cs)
         time.sleep(0.3)
 
 def interactive(cs):
-    old = termios.tcgetattr(0)
-    tty.setraw(0)
+    old = termios.tcgetattr(0) if os.isatty(0) else None
+    # cs drew nothing on this terminal so far: put the terminal in the modes it set (alt screen, mouse, cursor), then make
+    # it redraw by nudging the window size.
+    for n, state in cs.modes.items(): os.write(1, b"\x1b[?" + n + state)
+    try:
+        rows, cols = struct.unpack("HHHH", winsize())[:2]
+        fcntl.ioctl(cs.fd, termios.TIOCSWINSZ, struct.pack("HHHH", max(rows - 1, 1), cols, 0, 0)); time.sleep(0.1)
+        fcntl.ioctl(cs.fd, termios.TIOCSWINSZ, winsize())
+    except OSError:
+        pass
+    if old is not None: tty.setraw(0)
     signal.signal(signal.SIGWINCH, lambda *_: fcntl.ioctl(cs.fd, termios.TIOCSWINSZ, winsize()))
     try:
         while True:
@@ -197,7 +234,7 @@ def interactive(cs):
                 os.write(1, data)
             if not cs.alive(): break
     finally:
-        termios.tcsetattr(0, termios.TCSADRAIN, old)
+        if old is not None: termios.tcsetattr(0, termios.TCSADRAIN, old)
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--hold"]:         # test helper: hold the lock for N seconds

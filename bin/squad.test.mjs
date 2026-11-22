@@ -96,6 +96,36 @@ assert.match(r.stdout, /Claude Squad: codex,grok,amp in repo/);
 assert.ok(!fs.existsSync(path.join(home, ".claude-squad")), "cs's own config is never touched");
 await new Promise((res) => setTimeout(res, 800));
 assert.ok(!fs.existsSync(launchLog), "no extra terminal windows were opened: " + (fs.existsSync(launchLog) ? fs.readFileSync(launchLog, "utf8") : ""));
+// ---- what the panel's Claude Squad view uses: --repos lists recent repos (last used first, no backups), SQUAD_NEW makes a project
+{
+  const projR = path.join(tmp, "proj-panel");            // its own Projects folder, so earlier test repos do not show up
+  fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
+  const P = { SQUAD_PROJECTS: projR };
+  for (const n of ["alpha", "beta", "alpha-backup", "gamma-2026-11-21"]) { fs.mkdirSync(path.join(projR, n), { recursive: true }); spawnSync("git", ["init", "-q", path.join(projR, n)]); }
+  fs.mkdirSync(path.join(home, ".local/state/omarchy/agent-usage-tabs"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".local/state/omarchy/agent-usage-tabs/squad-dir"), path.join(projR, "beta") + "\n");
+  const listed = run(["--repos"], P).stdout.trim().split("\n");
+  assert.equal(listed[0], path.join(projR, "beta"), "the last repo used comes first");
+  assert.deepEqual(listed.slice().sort(), [path.join(projR, "alpha"), path.join(projR, "beta")], "recent repos only: no backups or date-stamped copies");
+  const made2 = run(["codex"], { ...P, SQUAD_NEW: "panel-made", GUM_CHOOSE: "x" });
+  assert.ok(made2.stdout.trim().endsWith(`cs -p codex in ${real(path.join(projR, "panel-made"))}`), made2.stdout);
+  assert.ok(spawnSync("git", ["-C", path.join(projR, "panel-made"), "log", "--oneline"], { encoding: "utf8" }).stdout.includes("Initial commit"), "a first commit, so Squad can branch");
+  const bad = run(["codex"], { ...P, SQUAD_NEW: "../escape" });
+  assert.notEqual(bad.status, 0); assert.ok(!fs.existsSync(path.join(home, "escape")));
+  fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
+}
+
+// a plain folder chosen in the panel (SQUAD_DIR, not a repo yet): asks, then git-inits it with a first commit
+{
+  const plain2 = path.join(tmp, "plain-from-panel"); fs.mkdirSync(plain2);
+  const declined = run(["codex"], { SQUAD_DIR: plain2, GUM_CONFIRM: "no" });
+  assert.equal(declined.status, 130); assert.ok(!fs.existsSync(path.join(plain2, ".git")), "declined: left alone");
+  const okd = run(["codex"], { SQUAD_DIR: plain2, GUM_CONFIRM: "yes" });
+  assert.ok(okd.stdout.trim().endsWith(`cs -p codex in ${real(plain2)}`), okd.stdout);
+  assert.ok(spawnSync("git", ["-C", plain2, "log", "--oneline"], { encoding: "utf8" }).stdout.includes("Initial commit"));
+  fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
+}
+
 // ---- one Claude Squad window at a time: while another window holds the lock, a launch refuses and says so
 {
   const driver = path.join(path.dirname(script), "squad-drive.py");

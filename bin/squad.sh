@@ -1,6 +1,7 @@
 #!/bin/bash
 # The Squad button: run Claude Squad (`cs`) with one agent, in a git repo folder.
-# Usage: squad.sh <agent-cli>...    squad.sh --install   (install Claude Squad)
+# Usage: squad.sh <agent-cli>...    squad.sh --install   (install Claude Squad)    squad.sh --repos   (list recent git repos)
+# Environment: SQUAD_DIR = use this repo (the panel's Claude Squad view sets it); SQUAD_NEW = create this project in ~/Projects first.
 # ONE window, however many agents: it starts a Claude Squad session per agent inside cs (bin/squad-drive.py). Its app-id
 # is org.omarchy.squad (not org.omarchy.bash, which Omarchy's window rules float), so it opens as a normal tiled window.
 # The folder: $SQUAD_DIR, else the last one used. Otherwise a picker offers recent git repos, "Create a new project"
@@ -8,7 +9,7 @@
 HERE=$(dirname "$(readlink -f "$0")")
 # Squad windows already open when this one started (the driver closes any others that show up later).
 SQUAD_WINDOWS_BEFORE=$(hyprctl clients -j 2>/dev/null | jq -r '[.[]|select(.class=="org.omarchy.squad")|.pid]|join(",")' 2>/dev/null)
-arg=${1:?usage: squad.sh <agent-cli>... | --install}
+arg=${1:?usage: squad.sh <agent-cli>... | --install | --repos}
 export PATH="$HOME/.local/bin:$PATH"
 INSTALL='curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.sh | bash'
 
@@ -20,26 +21,6 @@ install_cs() {
   hash -r
 }
 pause() { read -rn1 -p "Press any key to close "; }
-
-if [[ $arg == --install ]]; then install_cs; command -v cs >/dev/null && echo "Done: cs is installed." || echo "cs still not found."; pause; exit; fi
-clis=("$@")
-
-# One Squad window at a time (the driver holds this lock while its window is open): two cs processes would overwrite each
-# other's saved sessions. Checked first, so a second launch says so before asking for a folder.
-LOCK="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agent-usage-tabs/squad.lock"
-mkdir -p "$(dirname "$LOCK")"
-if ! flock -n "$LOCK" true; then
-  echo "Claude Squad is already open in another window."
-  echo "Use that one, or close it and launch again."
-  pause; exit 1
-fi
-
-if ! command -v cs >/dev/null; then
-  echo "Squad needs Claude Squad (cs)."
-  gum confirm "Install it now?" || exit 130
-  install_cs
-  command -v cs >/dev/null || { echo "cs still not found; see github.com/smtg-ai/claude-squad"; pause; exit 1; }
-fi
 
 state="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agent-usage-tabs/squad-dir"
 is_repo() { [[ -n $1 ]] && git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
@@ -62,9 +43,45 @@ recent_repos() {
 }
 remember() { mkdir -p "$(dirname "$recent")"; { echo "$1"; grep -vxF "$1" "$recent" 2>/dev/null; } | head -8 >"$recent.new" && mv "$recent.new" "$recent"; }
 
+if [[ $arg == --install ]]; then install_cs; command -v cs >/dev/null && echo "Done: cs is installed." || echo "cs still not found."; pause; exit; fi
+# The panel's Claude Squad view lists the recent repos through this: last used first, one path per line.
+if [[ $arg == --repos ]]; then
+  last=""; [[ -f $state ]] && last=$(<"$state")
+  { is_repo "$last" && echo "$last"; recent_repos; } | awk 'NF && !seen[$0]++'
+  exit
+fi
+clis=("$@")
+
+# One Squad window at a time (the driver holds this lock while its window is open): two cs processes would overwrite each
+# other's saved sessions. Checked first, so a second launch says so before asking for a folder.
+LOCK="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agent-usage-tabs/squad.lock"
+mkdir -p "$(dirname "$LOCK")"
+if ! flock -n "$LOCK" true; then
+  echo "Claude Squad is already open in another window."
+  echo "Use that one, or close it and launch again."
+  pause; exit 1
+fi
+
+if ! command -v cs >/dev/null; then
+  echo "Squad needs Claude Squad (cs)."
+  gum confirm "Install it now?" || exit 130
+  install_cs
+  command -v cs >/dev/null || { echo "cs still not found; see github.com/smtg-ai/claude-squad"; pause; exit 1; }
+fi
+
+
 # The picker always shows (SQUAD_DIR is only an override for scripts), with the last repo preselected: Enter reuses it.
 last=""; [[ -f $state ]] && last=$(<"$state")
 dir=${SQUAD_DIR:-}
+if [[ -n $dir && -d $dir ]] && ! is_repo "$dir"; then     # a plain folder chosen in the panel: offer git init, as Browse does
+  gum confirm "That folder isn't a git repo. Run git init there?" || exit 130
+  init_repo "$dir" || { echo "git init failed in $dir"; pause; exit 1; }
+fi
+if [[ -n ${SQUAD_NEW:-} ]]; then      # a new project named in the panel: a plain folder name, made in ~/Projects with git set up
+  [[ $SQUAD_NEW != */* && $SQUAD_NEW != .* ]] || { echo "Use a plain folder name."; pause; exit 1; }
+  dir="$PROJECTS/$SQUAD_NEW"
+  if ! is_repo "$dir"; then mkdir -p "$dir" && init_repo "$dir" || { echo "Couldn't create $dir"; pause; exit 1; }; fi
+fi
 if ! is_repo "$dir"; then
   declare -A path_of=(); labels=()
   while IFS= read -r d; do l=$(nice "$d"); path_of[$l]=$d; labels+=("$l"); done < <(recent_repos)
