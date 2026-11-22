@@ -6,6 +6,20 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.13.0 - 2026-11-22
+- A **CS** header button (same style as + and >_) opens Claude Squad; the bottom Launch row and the App button are gone. The Claude
+  Squad picker now opens under the header.
+- The **+** button opens a picker of agents (Claude Code, Codex, Grok) first, then runs Omarchy's add-account flow for your choice,
+  instead of jumping straight to the selected tab's provider.
+- A built-in catalog (`agents-catalog.json`) of CLI agents beyond the twelve: only maintained ones with a working way to read usage
+  or plan limits (Qwen Code, Mistral Vibe, Factory Droid, Augment, DeepSeek Harness, MiniMax Code, OpenClaw), each with how it
+  reports usage, a tab note, install detection and unverified claims flagged. Gemini CLI, Aider and agents with nothing to read are
+  left out. Uninstalled ones stay hidden by the existing switch.
+- A handoff note: when a session meter's warning fires, `handoff/HANDOFF.md` is written in the active repo (what we were working on,
+  what's done, what's next, open problems, from git and CLAUDE.md), with one line in AGENTS.md pointing agents at it; rebuilt each
+  time. Off switch under Alerts in the gear settings.
+- Screenshots and both GIFs retaken.
+
 ## 1.12.1 - 2026-11-22
 - Fix: alerts no longer repeat while a condition stays true. The 95% warning fired on every refresh because Claude's reset time
   carries microseconds that change each fetch, so each refresh looked like a new window. Alerts are now remembered per agent

@@ -24,8 +24,9 @@ you have installed.
 
 ![The panel on the Claude Code tab](docs/screenshot.png)
 
-The header has the **+** (Omarchy's add-subscription flow), **>_** (start your default agent) and gear buttons; the
-tabs sit below it, then the selected agent's limits and models, and a **LAUNCH** row at the bottom: **Claude Squad** as the main button and a smaller **App** beside it.
+The header has four square buttons, all the same style: **+** (add a subscription: pick an agent, then Omarchy's own
+add-account flow runs), **>_** (start your default agent), **CS** (Claude Squad) and the gear. The tabs sit below it, then the
+selected agent's limits and models.
 
 ## Quick start (new to Omarchy?)
 
@@ -137,8 +138,9 @@ local until you sign in).
   previous reset time, and other agents never get one (an early drop on them is more likely
   you spending a banked reset yourself).
 
-**The gear icon** in the panel header opens a short settings view (shown below), grouped under three headings:
-**Display** (hide uninstalled agents, show unused models), **Reset celebration** (the animation, opening the panel on
+**The gear icon** in the panel header opens a short settings view (shown below), grouped under four headings:
+**Display** (hide uninstalled agents, show unused models), **Alerts** (write a handoff note near the limit),
+**Reset celebration** (the animation, opening the panel on
 reset, the sound and its volume, and **Test session reset**, **Test weekly reset** and **Test surprise reset** buttons
 that replay each celebration any time) and **Tabs** (a switch per agent, plus **Reset order**).
 
@@ -147,7 +149,7 @@ that replay each celebration any time) and **Tabs** (a switch per agent, plus **
 **Only plan limits, usage and resets are shown.** Purchasable credit balances, overage,
 on-demand spend and top-ups are deliberately never displayed.
 
-### Multiple accounts and the App button
+### Multiple accounts and the + button
 
 If an agent has more than one signed-in account in Omarchy's own account list (`omarchy agent account`),
 its tab lists each account: label, plan, an ACTIVE mark, and its own session and weekly meters. The tab
@@ -155,11 +157,11 @@ chip, the bar number and the alerts use the worst meter across the accounts, and
 names the account that reset. The plugin only reads Omarchy's usage records through
 `omarchy-agent-account-list`; it never reads or stores credentials, and email addresses are dropped.
 
-Under the **LAUNCH** heading at the bottom, the smaller, quieter **App** button (beside the main **Claude Squad** button) starts
-the selected agent's own CLI on building a new Omarchy app, the same task the stock panel's App tile gives the default agent:
-Claude Code opens `claude`, Antigravity `agy`, Grok `grok`, and so on, in a terminal, started plainly (no
-permission-skipping flags) from `~/Work` when that folder exists. An agent with no CLI has no button; Kimi can't take a
-starting prompt, so it opens with the prompt on the clipboard. The hover tooltip names the agent.
+The **+** button opens a short picker first (Claude Code, Codex or Grok, the agents Omarchy can add an account for), and
+only then runs Omarchy's add-account flow for the one you choose, in a terminal. It asks for a name if you already have
+an account for that agent.
+
+![The add-subscription picker](docs/add.png)
 
 ![Two accounts on one agent (illustrative: staged data)](docs/accounts.png)
 
@@ -169,9 +171,9 @@ starting prompt, so it opens with the prompt on the clipboard. The hover tooltip
 
 ![Choosing agents for Claude Squad](docs/squad.png)
 
-The **Claude Squad** button (the main button under **LAUNCH**) opens [Claude Squad](https://github.com/smtg-ai/claude-squad) (`cs`) with a
+The **CS** button in the header opens [Claude Squad](https://github.com/smtg-ai/claude-squad) (`cs`) with a
 session for each agent you choose, all in **one window**. It first checks that `cs` is installed and offers a one-click
-install (it runs the project's install script in a terminal, so you see it). Then tick the agents and press **Run**.
+install (it runs the project's install script in a terminal, so you see it). The picker opens under the header: tick the agents and press **Run**.
 
 A single terminal opens, always shows a folder picker first (the last repo you used is preselected, so Enter reuses
 it), shows which repo it is about to open, takes the repo's name as its title, and starts one `cs` session per ticked
@@ -190,6 +192,27 @@ The folder picker offers your recent git repos (the ones you picked before, plus
 desktop files hidden), then **Create a new project** (a folder in `~/Projects` with git set up and a first commit), then
 **Browse...** for anywhere else (a plain folder gets `git init` after you confirm). The window opens tiled, like a normal
 terminal.
+
+### The agent catalog
+
+Beyond the twelve agents it reads directly, the plugin has a built-in catalog (`agents-catalog.json`) of CLI agents. An agent is
+listed only if it is still maintained **and** has a working way to read usage or plan limits (an Omarchy usage record, or a
+documented command or API); the catalog says which for each entry (`maintained` and `reads`). Today that is Qwen Code, Mistral
+Vibe, Factory Droid, Augment (Auggie), DeepSeek Harness, MiniMax Code and OpenClaw. Each records how it reports usage (session and
+weekly, monthly credits, request count, bring your own key, free, or no usage data), which sets the note on its tab, and its
+binaries, which is how an install is detected. Agents you don't have stay off the bar through **Hide agents that aren't
+installed**, like every other tab. Entries I couldn't fully verify are flagged `unsure` with the reason, and the tab says so.
+Agents that were researched and left out (Gemini CLI, Aider, Cline, Goose and others) are listed with the reason under `dropped`.
+
+### The handoff note
+
+When a **session** meter's warning fires (usage first passes the threshold, or the limit is hit), the plugin writes
+`handoff/HANDOFF.md` in the active repo: what was being worked on, what's done, what's next and any open problems, built from
+recent git commits, the working tree and the repo's `CLAUDE.md` (nothing is invented: a part with no source says so, and emails
+and tokens are scrubbed). It also adds one line to `AGENTS.md` (creating the file if needed) telling any agent to read the
+`handoff/` folder first. The note is rebuilt each time the warning fires. The active repo is the one the most recent Claude Code
+session worked in, else the last folder used for Claude Squad. `handoff/` is added to the repo's local `.git/info/exclude`, so it
+stays on your machine unless you choose to commit it. Turn it off under **Alerts** in the gear settings.
 
 ### Tab order and the default agent
 
@@ -256,14 +279,15 @@ three are set only in the plugin's entry in `~/.config/omarchy/shell.json`:
 |---|---|---|
 | `tabOrder` | all 12, as listed | Comma-separated agent ids, in tab order. Ids you leave out are appended in default order. |
 | `refreshIntervalSec` | 300 | How often data refreshes. Minimum 60. |
-| `notifyThreshold` | 95 | Notify when a session or weekly limit passes this percent. |
+| `notifyThreshold` | 95 | Notify when a session or weekly limit passes this percent (once per window, and once more if the limit is hit). |
 
 Gear settings, all on by default: `hideUninstalledAgents`, `showUnusedModels`,
 `resetAnimation`, `resetSound` (with `resetVolume`, 0-100, default 60), `autoOpenOnReset`,
-and `hiddenAgents` (the tabs you hid). They also work as keys in `shell.json`.
+`handoffNote`, and `hiddenAgents` (the tabs you hid), plus `tabOrder` (your saved order, set by dragging). They also work as keys in `shell.json`.
 
 Agent ids: `claude`, `antigravity`, `grok`, `codex`, `copilot`, `cursor`, `opencode`,
-`kimi`, `kiro`, `devin`, `amp`, `hermes`. Back up `shell.json` before editing it, and restart
+`kimi`, `kiro`, `devin`, `amp`, `hermes`, plus the catalog agents (`qwen`, `vibe`, `droid`, `auggie`, `dsh`,
+`mcode`, `openclaw`). Back up `shell.json` before editing it, and restart
 the shell after changing a setting there.
 
 ## Where the data comes from
@@ -311,7 +335,9 @@ that is truly gone. Edits apply on the next refresh, and a malformed file is ign
   agyresets.com lookup above, made only when a surprise Antigravity reset is detected, with
   a plain request that carries nothing about you. Reset announcements come from
   [agyresets.com](https://agyresets.com/); please credit it if you reuse that data.
-- Everything the plugin keeps is in `~/.local/state/omarchy/agent-usage-tabs/`.
+- Everything the plugin keeps is in `~/.local/state/omarchy/agent-usage-tabs/`, with two exceptions it is told to make: the
+  handoff note (`handoff/` and one line in `AGENTS.md`, in the repo you are working in; off switch in the gear settings) and
+  `~/.claude-squad/config.json` and `~/.config/omarchy/defaults/agent`, which Claude Squad and the default-agent link write.
 - The sounds (the cha-ching and the surprise jackpot) and the notification pictures (the
   cash-burst and the surprise lightning-burst) are self-made (see `sounds/make-*.py` and
   `notify/*.svg`) and released to the public domain.
