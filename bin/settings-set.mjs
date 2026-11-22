@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { catalogIds } from "./catalog.mjs";
 
-export const ALLOWED = ["hideUninstalledAgents", "showUnusedModels", "resetAnimation", "resetSound", "autoOpenOnReset"];
+export const ALLOWED = ["hideUninstalledAgents", "showUnusedModels", "resetAnimation", "resetSound", "autoOpenOnReset", "handoffNote"];
 export const CORE_IDS = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"];
 // The catalog agents (agents-catalog.json) are real tabs too: they can be hidden and reordered like the rest.
 export const AGENT_IDS = [...CORE_IDS, ...catalogIds()];

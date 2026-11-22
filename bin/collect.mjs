@@ -24,6 +24,7 @@ import { makeInstalledCheck, agentCli } from "./installed.mjs";
 import { planLoginNotices, planInstallNotices } from "./login-watch.mjs";
 import { buildAccounts } from "./accounts.mjs";
 import { loadCatalog, tabNote } from "./catalog.mjs";
+import { maybeWriteHandoff } from "./handoff.mjs";
 import { createDiagnostics, checkAgentData } from "./diagnostics.mjs";
 
 const HOME = os.homedir();
@@ -333,14 +334,27 @@ function untilReset(iso) {
   const m = Math.floor(ms / 60000), h = Math.floor(m / 60), dd = Math.floor(h / 24);
   return dd > 0 ? `resets in ${dd}d ${h % 24}h` : h > 0 ? `resets in ${h}h ${m % 60}m` : `resets in ${Math.max(1, m)}m`;
 }
+// When a SESSION meter's warning (or limit alert) fires, write handoff/HANDOFF.md in the active repo and point AGENTS.md at
+// it, rebuilt each time. One note per run, for the agent closest to its limit. Switch it off in the gear settings.
+function writeHandoffNote(sent) {
+  try {
+    maybeWriteHandoff({ sent, settings: readJson(path.join(OUT_DIR, "settings.json")), untilReset,
+      projectsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), "projects"), squadDirFile: path.join(OUT_DIR, "squad-dir") });
+  } catch (e) { diag.add("handoff", `couldn't write the handoff note: ${String(e.message || e)}`); }
+}
 function notifyHighUsage(list) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const { toSend, memory } = planAlerts(list, readJson(NOTIFIED) || {}, THRESHOLD);
+  const sentSession = [];
   for (const item of toSend) {
     const { title, body } = alertText(item, untilReset(item.limit.resetsAt));
     const r = spawnSync("notify-send", ["-a", "Cook Meter", "-u", "critical", "-i", "dialog-warning", "-h", "boolean:suppress-sound:true", title, body], { env: ENV, timeout: 5000 });
-    if (r.status === 0) markFired(memory, item); // a failed send is not remembered, so it retries; a sent one never repeats this window
+    if (r.status === 0) {
+      markFired(memory, item); // a failed send is not remembered, so it retries; a sent one never repeats this window
+      sentSession.push(item);
+    }
   }
+  writeHandoffNote(sentSession);
   fs.writeFileSync(NOTIFIED, JSON.stringify(memory) + "\n", { mode: 0o600 });
 }
 // ------------------------------------------------------- reset celebration

@@ -91,6 +91,7 @@ Panel {
     var v = userSettings.resetVolume !== undefined ? Number(userSettings.resetVolume) : Number(root.setting("resetVolume", 60))
     return isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 60
   }
+  readonly property bool handoffNote: userSettings.handoffNote !== false
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
   readonly property bool showDetail: !!agent && !settingsOpen
@@ -1233,6 +1234,14 @@ Panel {
               label: "Show unused models"
               checked: root.showUnusedModels
               onToggled: root.writeSetting(["showUnusedModels", String(!root.showUnusedModels)])
+            }
+
+            PanelSectionHeader { width: parent.width; text: "ALERTS" }
+            SettingSwitch {
+              width: parent.width
+              label: "Write a handoff note near the limit"
+              checked: root.handoffNote
+              onToggled: root.writeSetting(["handoffNote", String(!root.handoffNote)])
             }
 
             PanelSectionHeader { width: parent.width; text: "RESET CELEBRATION" }
