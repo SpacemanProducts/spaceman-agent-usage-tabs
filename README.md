@@ -140,7 +140,7 @@ every tab.
 **Only plan limits, usage and resets are shown.** Purchasable credit balances, overage,
 on-demand spend and top-ups are deliberately never displayed.
 
-### Multiple accounts and the App / Theme buttons
+### Multiple accounts and the App button
 
 If an agent has more than one signed-in account in Omarchy's own account list (`omarchy agent account`),
 its tab lists each account: label, plan, an ACTIVE mark, and its own session and weekly meters. The tab
@@ -148,8 +148,9 @@ chip, the bar number and the alerts use the worst meter across the accounts, and
 names the account that reset. The plugin only reads Omarchy's usage records through
 `omarchy-agent-account-list`; it never reads or stores credentials, and email addresses are dropped.
 
-A bottom row with **App** and **Theme** buttons is always shown. Each has a hover tooltip and starts
-your default agent on a new app or theme (`omarchy-agent-prompt`), the way Omarchy's agents panel does.
+A bottom **App** button opens the selected agent's own CLI in a terminal: Claude Code opens `claude`,
+Antigravity `agy`, Grok `grok`, and so on, started plainly (no permission-skipping flags) from `~/Work` when
+that folder exists. An agent with no CLI has no button, and the hover tooltip names the agent.
 
 ## Known gap: banked limit resets can't be read
 

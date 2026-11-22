@@ -20,7 +20,7 @@ import { planAlerts } from "./alert-state.mjs";
 import { buildModels } from "./models.mjs";
 import { liveModels } from "./live-models.mjs";
 import { planInfo } from "./plan-info.mjs";
-import { makeInstalledCheck } from "./installed.mjs";
+import { makeInstalledCheck, agentCli } from "./installed.mjs";
 import { planLoginNotices, planInstallNotices } from "./login-watch.mjs";
 import { buildAccounts } from "./accounts.mjs";
 import { createDiagnostics, checkAgentData } from "./diagnostics.mjs";
@@ -204,7 +204,7 @@ for (const a of AGENTS) {
     agents.push({ id: a.id, name: a.name, installed: false, plan: "", status: "Not installed", limits: [], models: [], modelScope: "", days: [], today: 0 });
     continue;
   }
-  const out = { id: a.id, name: a.name, installed: true, plan: "", status: "", limits: [], models: [], modelScope: "", days: [] };
+  const out = { id: a.id, name: a.name, installed: true, cli: agentCli(a.bins, isInstalled), plan: "", status: "", limits: [], models: [], modelScope: "", days: [] };
   if (a.id === "claude") {
     const { byModel, byDay } = claudeTranscripts();
     const lim = await claudeLimits(prevAgent("claude"));

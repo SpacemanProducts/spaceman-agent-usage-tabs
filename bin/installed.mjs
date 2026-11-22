@@ -24,3 +24,7 @@ export function makeInstalledCheck({ dirs, env, executable = defaultExecutable, 
     return memo.get(b);
   }));
 }
+
+// The command that opens an agent's own CLI: its first binary that is really
+// installed, or "" when it has none (the panel then hides its App button).
+export const agentCli = (bins, isInstalled) => (bins || []).find((b) => isInstalled([b])) || "";

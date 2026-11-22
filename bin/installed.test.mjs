@@ -18,3 +18,11 @@ isInstalled(["crush"]); isInstalled(["crush"]); assert.equal(whichCalls, 2, "mis
 assert.equal(makeInstalledCheck({ dirs, executable: (f) => f === "/home/u/.local/share/mise/shims/amp", which: () => "/gone" })(["amp"]), false, "shim resolving to a missing file is not installed");
 assert.equal(makeInstalledCheck({ dirs: [], executable })(["claude"]), false, "no dirs");
 console.log("installed: all tests passed");
+
+{
+  const { agentCli } = await import("./installed.mjs");
+  assert.equal(agentCli(["agy", "antigravity"], (b) => b[0] === "antigravity"), "antigravity", "first installed binary");
+  assert.equal(agentCli(["grok"], () => false), "", "no CLI -> empty");
+  assert.equal(agentCli(undefined, () => true), "");
+  console.log("installed: agentCli tests passed");
+}

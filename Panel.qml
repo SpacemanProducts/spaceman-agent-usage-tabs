@@ -220,16 +220,15 @@ Panel {
     settingsOpen = false
   }
 
-  // A way into making Omarchy your own: start the default agent on a new app or theme.
-  readonly property var starters: [
-    { glyph: "\u{f03d8}", label: "Theme", tip: "Start your default agent on a new Omarchy theme", prompt: "Design me a new Omarchy theme. Ask what look or inspiration I want first, then build it following the Omarchy skill's theming guide and switch to it." },
-    { glyph: "\u{f08c6}", label: "App", tip: "Start your default agent on a new app for this desktop", prompt: "Build me a new desktop app for my Omarchy setup. Ask what it should do first, then make it following the omarchy-app skill and install it so it appears in the app launcher." }
-  ]
-  Process { id: starterLauncher; running: false }
-  function startPrompt(prompt) {
+  // The App button opens the selected agent's own CLI in a terminal (from ~/Work when it
+  // exists, since agents won't remember trust for $HOME). An agent with no CLI has no button.
+  readonly property string appCli: agent && agent.cli ? String(agent.cli) : ""
+  Process { id: appLauncher; running: false }
+  function launchApp() {
+    if (appCli === "") return
     close()
-    starterLauncher.command = ["omarchy-agent-prompt", prompt]
-    starterLauncher.running = true
+    appLauncher.command = ["bash", "-c", "cd \"$HOME/Work\" 2>/dev/null; exec omarchy-launch-tui \"$1\"", "launch", appCli]
+    appLauncher.running = true
   }
   function refreshNow() { if (!collector.running) collector.running = true }
 
@@ -572,7 +571,7 @@ Panel {
     WlrLayershell.keyboardFocus: root.autoOpened ? WlrKeyboardFocus.None
       : (panel.open ? (panel.focusPrimed ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive) : WlrKeyboardFocus.None)
     contentWidth: panel.fittedContentWidth(Style.space(520))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight + starterRow.height + Style.space(8), Style.space(660))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight + starterRow.height + (starterRow.visible ? Style.space(8) : 0), Style.space(660))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -597,7 +596,7 @@ Panel {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: starterRow.top
-        anchors.bottomMargin: Style.space(8)
+        anchors.bottomMargin: starterRow.visible ? Style.space(8) : 0
         contentWidth: width
         contentHeight: column.implicitHeight
         clip: true
@@ -1286,57 +1285,45 @@ Panel {
         }
       }
 
-      // ---------------- Make something: App and Theme, always shown. Each starts the
-      // default agent on a new app or theme through `omarchy-agent-prompt`, the same
-      // way Omarchy's own agents panel does. (No Plugin button: this is the plugin.)
-      Row {
+      // ---------------- App: opens the selected agent's CLI. Hidden for an agent with no CLI.
+      Rectangle {
         id: starterRow
+        visible: root.appCli !== ""
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        height: Style.space(36)
-        spacing: Style.space(8)
-
-        Repeater {
-          model: root.starters
-          Rectangle {
-            id: starter
-            required property var modelData
-            width: (starterRow.width - starterRow.spacing) / 2
-            height: starterRow.height
-            radius: Style.cornerRadius
-            color: starterArea.containsMouse ? root.track : "transparent"
-            border.width: 1
-            border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
-            Row {
-              anchors.centerIn: parent
-              spacing: Style.space(8)
-              Text {
-                textFormat: Text.PlainText
-                text: starter.modelData.glyph
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.title
-              }
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: starter.modelData.label
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-            }
-            MouseArea {
-              id: starterArea
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.startPrompt(starter.modelData.prompt)
-            }
-            PanelToolTip { visible: starterArea.containsMouse; text: starter.modelData.tip; fontFamily: root.fontFamily }
+        height: visible ? Style.space(36) : 0
+        radius: Style.cornerRadius
+        color: appArea.containsMouse ? root.track : "transparent"
+        border.width: 1
+        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
+        Row {
+          anchors.centerIn: parent
+          spacing: Style.space(8)
+          Text {
+            textFormat: Text.PlainText
+            text: "\u{f08c6}"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+          }
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: "App"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
           }
         }
+        MouseArea {
+          id: appArea
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.launchApp()
+        }
+        PanelToolTip { visible: appArea.containsMouse; text: "Open " + (root.agent ? root.agent.name : "") + " in a terminal (" + root.appCli + ")"; fontFamily: root.fontFamily }
       }
     }
   }
