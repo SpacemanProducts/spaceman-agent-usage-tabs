@@ -17,7 +17,7 @@ case "$1" in
 esac
 `, { mode: 0o755 });
 const gitEnv = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
-const run = (args = ["codex"], env = {}) => spawnSync("bash", [script, ...args], { encoding: "utf8", input: "\n", env: { PATH: "/usr/bin:/bin", HOME: home, ...gitEnv, ...env } });
+const run = (args = ["codex"], env = {}) => spawnSync("bash", [script, ...args], { encoding: "utf8", input: "\n", env: { PATH: "/usr/bin:/bin", HOME: home, ...gitEnv, SQUAD_DRIVER: "/nonexistent", ...env } });
 const real = (p) => fs.realpathSync(p);
 
 // cs missing and the install declined: stops without running anything
@@ -80,19 +80,14 @@ fs.rmSync(path.join(home, ".local/state"), { recursive: true });
 r = run(["claude"], { GUM_CHOOSE: "+ Create a new project", GUM_INPUT: "../escape", GUM_LOG: log });
 assert.notEqual(r.status, 0); assert.ok(!fs.existsSync(path.join(home, "escape")));
 
-// several agents: the first runs here at once, each other gets its own terminal in the same folder.
-// The launcher below blocks for 4 s (like a real terminal launcher does until its window closes): this terminal
-// must not wait for it, or it would sit empty instead of running cs.
-const launchLog = path.join(tmp, "launch.log");
-fs.writeFileSync(path.join(bin, "omarchy-launch-tui"), `#!/bin/bash\necho "terminal: $* (SQUAD_DIR=$SQUAD_DIR)" >> "${launchLog}"\nsleep 4\n`, { mode: 0o755 });
+// several agents: ONE window; the driver gets the folder and every agent, and the profiles are written as the fallback
+const stub = path.join(tmp, "driver.py");
+fs.writeFileSync(stub, "import sys\nprint('driver', *sys.argv[1:])\n");
 fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
-const t0 = Date.now();
-r = spawnSync("bash", [script, "codex", "grok", "amp"], { encoding: "utf8", input: "\n", timeout: 3000, env: { PATH: "/usr/bin:/bin", HOME: home, ...gitEnv, SQUAD_DIR: repo } });
-assert.ok(Date.now() - t0 < 3000, "did not wait for the other terminals");
-assert.match(r.stdout, /cs -p codex in /, "the first agent runs in this terminal");
-await new Promise((res) => setTimeout(res, 500));
-const launched = fs.readFileSync(launchLog, "utf8");
-assert.match(launched, /terminal: --app-id=org\.omarchy\.squad bash .*squad\.sh grok \(SQUAD_DIR=.*repo\)/);
-assert.match(launched, /terminal: --app-id=org\.omarchy\.squad bash .*squad\.sh amp /);
+r = spawnSync("bash", [script, "codex", "grok", "amp"], { encoding: "utf8", input: "\n", env: { PATH: "/usr/bin:/bin", HOME: home, ...gitEnv, SQUAD_DIR: repo, SQUAD_DRIVER: stub } });
+assert.match(r.stdout, new RegExp(`driver ${real(repo)} codex grok amp\\n$`), "one driver run with the folder and all agents");
+assert.match(r.stdout, /Claude Squad: codex,grok,amp in repo/);
+const prof = JSON.parse(fs.readFileSync(path.join(home, ".claude-squad/config.json"), "utf8")).profiles;
+assert.deepEqual(prof.map((p) => p.program), ["codex", "grok", "amp"], "profiles written as the fallback");
 fs.rmSync(tmp, { recursive: true });
 console.log("squad: all tests passed");

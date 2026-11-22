@@ -1624,7 +1624,7 @@ Panel {
               }
             }
             MouseArea { id: squadArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleSquad() }
-            PanelToolTip { visible: squadArea.containsMouse; text: "Run Claude Squad (cs) with the agents you pick"; fontFamily: root.fontFamily }
+            PanelToolTip { visible: squadArea.containsMouse; text: "Open Claude Squad with a session per agent you pick"; fontFamily: root.fontFamily }
           }
           Rectangle {
             id: appTile
@@ -1767,7 +1767,7 @@ Panel {
                 font.bold: true
               }
               MouseArea { id: runArea; anchors.fill: parent; enabled: runTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.launchSquad() }
-              PanelToolTip { visible: runArea.containsMouse; text: "Opens a terminal in a git repo folder and runs cs -p for each agent"; fontFamily: root.fontFamily }
+              PanelToolTip { visible: runArea.containsMouse; text: "Opens one Claude Squad window in a git repo folder, with a session started for each agent"; fontFamily: root.fontFamily }
             }
           }
         }

@@ -1,10 +1,11 @@
 #!/bin/bash
 # The Squad button: run Claude Squad (`cs`) with one agent, in a git repo folder.
 # Usage: squad.sh <agent-cli>...    squad.sh --install   (install Claude Squad)
-# With several agents, the first runs in this terminal and each other gets a terminal of its own. Its app-id is
-# org.omarchy.squad (not org.omarchy.bash, which Omarchy's window rules float), so it opens as a normal tiled window.
+# ONE window, however many agents: it starts a Claude Squad session per agent inside cs (bin/squad-drive.py). Its app-id
+# is org.omarchy.squad (not org.omarchy.bash, which Omarchy's window rules float), so it opens as a normal tiled window.
 # The folder: $SQUAD_DIR, else the last one used. Otherwise a picker offers recent git repos, "Create a new project"
 # (in ~/Projects, git-initialized with a first commit) and "Browse..." for anywhere else.
+HERE=$(dirname "$(readlink -f "$0")")
 arg=${1:?usage: squad.sh <agent-cli>... | --install}
 export PATH="$HOME/.local/bin:$PATH"
 INSTALL='curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.sh | bash'
@@ -84,7 +85,15 @@ done
 # Say which repo this is about to open, and name the terminal after it.
 name=$(basename "$dir")
 printf '\033]0;%s\007' "$name"
-echo "Claude Squad: $(IFS=,; echo "${clis[0]}") in $name"
+echo "Claude Squad: $(IFS=,; echo "${clis[*]}") in $name"
 echo "  ${dir/#$HOME/\~}"
 sleep 1.2
+
+# Fallback: also list the agents as profiles in cs's config, for a cs version that offers a profile picker.
+node "$HERE/squad-profiles.mjs" "$HOME/.claude-squad/config.json" "${clis[@]}" 2>/dev/null
+
+# ONE window: squad-drive.py starts a session per agent inside cs (cs has no command line for that) and leaves you in
+# cs. Without python3 it just opens cs on the first agent.
+DRIVER="${SQUAD_DRIVER:-$HERE/squad-drive.py}"
+if command -v python3 >/dev/null && [[ -f $DRIVER ]]; then exec python3 "$DRIVER" "$dir" "${clis[@]}"; fi
 cd "$dir" && exec cs -p "${clis[0]}"

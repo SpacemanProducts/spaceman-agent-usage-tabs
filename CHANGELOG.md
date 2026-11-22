@@ -6,15 +6,12 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
-## 1.10.0 - 2026-11-22
-- A **Claude Squad** button next to App. It checks that `cs` is installed (one-click install if not), lets you tick which
-  agents to run, then opens a terminal and runs `cs -p <agent>` for each. The git repo folder is the last one used, else a picker with
-  three things: recent git repos (backups and desktop files hidden), Create a new project (in ~/Projects, git-initialized
-  with a first commit) and Browse... for anywhere else. Screenshots retaken with the button.
-  The terminal opens as a normal tiled window (its own app-id, `org.omarchy.squad`; `org.omarchy.bash` is floated by
-  Omarchy's window rules), and so do the App button's terminals. With several agents ticked, the first terminal no longer
-  sits empty waiting for the others to open (they start in the background). Before launching it shows which repo it is
-  about to open, and the terminal title is the repo name.
+## 1.11.0 - 2026-11-22
+- **Claude Squad** button next to App: checks that `cs` is installed (one-click install if not), lets you tick agents, then
+  opens ONE tiled window in a git repo folder and starts a `cs` session per agent in it (the plugin types the keys, since
+  `cs` has no command for it). It shows the repo first and titles the terminal after it. The folder is the last one used,
+  else a picker with recent git repos, Create a new project and Browse... The agents are also written as `cs` profiles as
+  a fallback (cs 1.0.20 shows no profile picker). App-button terminals now tile too. Screenshots retaken with the button.
 
 ## 1.9.0 - 2026-11-22
 - A gray tab (no meter at all) now says why: not installed, not signed in, or no usage source.

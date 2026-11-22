@@ -166,13 +166,22 @@ opens with the prompt on the clipboard. The hover tooltip names the agent.
 
 ![Choosing agents for Claude Squad](docs/squad.png)
 
-The **Claude Squad** button (next to App) runs [Claude Squad](https://github.com/smtg-ai/claude-squad) (`cs`) with the agents
-you choose. It first checks that `cs` is installed and offers a one-click install (it runs the project's install script in
-a terminal, so you see it). Then tick the agents to run and press **Run**: a terminal opens in a git repo folder and runs
-`cs -p <agent>`, with one terminal per extra agent. The folder is the last one used; the first time, a
-small picker offers your recent git repos (the ones you picked before, plus the repos in `~/Projects`, with backups and
-desktop files hidden), then **Create a new project** (a folder in `~/Projects` with git set up and a first commit), then
-**Browse...** for anywhere else (a plain folder gets `git init` after you confirm). Before launching it shows which repo it is about to open, and each terminal is titled with the repo name. The terminals open as normal tiled windows. It needs `tmux` and `git`.
+The **Claude Squad** button (next to App) opens [Claude Squad](https://github.com/smtg-ai/claude-squad) (`cs`) with a
+session for each agent you choose, all in **one window**. It first checks that `cs` is installed and offers a one-click
+install (it runs the project's install script in a terminal, so you see it). Then tick the agents and press **Run**.
+
+A single terminal opens in a git repo folder, shows which repo it is about to open, takes the repo's name as its title,
+and starts one `cs` session per ticked agent. `cs` has no command line for creating sessions, so the plugin types the
+keys for you (`n`, a name, Enter, then detach), running `cs -p <agent>` for each so every session keeps its own
+program, and leaves you in the session list. It needs `python3`, `tmux` and `git`; without Python it opens `cs` on the
+first agent only. The agents are also written as profiles in `~/.claude-squad/config.json` (your own profiles and
+`default_program` are left alone) as a fallback for a `cs` version that offers a profile picker; `cs` 1.0.20 does not
+show one.
+
+The folder is the last one used; the first time, a small picker offers your recent git repos (the ones you picked
+before, plus the repos in `~/Projects`, with backups and desktop files hidden), then **Create a new project** (a folder
+in `~/Projects` with git set up and a first commit), then **Browse...** for anywhere else (a plain folder gets `git init`
+after you confirm). The window opens tiled, like a normal terminal.
 
 ### Tab order and the default agent
 
