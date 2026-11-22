@@ -3,8 +3,11 @@
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.6.2 - 2026-11-22
+- The App button is now the stock panel's small tinted square (icon only), bottom right, not full width.
+
 ## 1.6.1 - 2026-11-22
-- The bottom button is now a single **App** button that opens the selected agent's own CLI in a terminal
+- The bottom button is now a single small **App** button (the stock panel's 34-unit tinted square, bottom right) that opens the selected agent's own CLI in a terminal
   (Claude Code opens `claude`, Antigravity `agy`, Grok `grok`, ...), with no permission-skipping flags. It is hidden
   for an agent with no CLI, and its tooltip names the agent. The Theme button is gone.
 

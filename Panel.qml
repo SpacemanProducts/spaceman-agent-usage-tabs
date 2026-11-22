@@ -1286,35 +1286,25 @@ Panel {
       }
 
       // ---------------- App: opens the selected agent's CLI. Hidden for an agent with no CLI.
+      // Same tinted square as the stock panel's hero buttons (34 wide), on the right.
       Rectangle {
         id: starterRow
         visible: root.appCli !== ""
-        anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        height: visible ? Style.space(36) : 0
+        width: Style.space(34)
+        height: visible ? width : 0
         radius: Style.cornerRadius
-        color: appArea.containsMouse ? root.track : "transparent"
-        border.width: 1
-        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
-        Row {
+        color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, appArea.containsMouse ? 0.3 : 0.12)
+        border.width: appArea.containsMouse ? Math.max(1, Style.hoverBorderWidth) : 0
+        border.color: Color.accent
+        Text {
           anchors.centerIn: parent
-          spacing: Style.space(8)
-          Text {
-            textFormat: Text.PlainText
-            text: "\u{f08c6}"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-          }
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            textFormat: Text.PlainText
-            text: "App"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-          }
+          textFormat: Text.PlainText
+          text: "\u{f08c6}"
+          color: Color.accent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.heading
         }
         MouseArea {
           id: appArea
