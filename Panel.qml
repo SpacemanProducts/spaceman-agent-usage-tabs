@@ -527,6 +527,8 @@ Panel {
     function settings(): string { root.settingsOpen = !root.settingsOpen; return root.settingsOpen ? "open" : "closed" }
     // Test hook: show the picker as if cs were missing (or present) without running the check.
     function squadPreview(state: string): string { root.squadOpen = true; root.squadHasCs = state; return state }
+    // Test hook: select a tab by agent id (used to retake the README screenshots).
+    function select(id: string): string { root.selectedId = id; return root.selectedId }
     function squad(): string { root.toggleSquad(); return root.squadOpen ? "open" : "closed" }
     function resetOrder(): string { root.resetOrder(); return "ok" }
     // Test hook: drop chip `from` as if it were dragged onto chip `to` (same hit-testing as a real drag).

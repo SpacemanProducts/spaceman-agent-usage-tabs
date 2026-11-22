@@ -47,6 +47,7 @@ fs.writeFileSync(path.join(bin, "gum"), `#!/bin/bash
 case "$1" in
   choose) cat > "$GUM_LOG"; echo "$GUM_CHOOSE" ;;
   input) echo "$GUM_INPUT" ;;
+  file) echo "$GUM_FILE" ;;
   confirm) [[ \${GUM_CONFIRM:-yes} == yes ]] ;;
 esac
 `, { mode: 0o755 });
@@ -54,8 +55,18 @@ const log = path.join(tmp, "gum.log");
 fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
 r = run(["claude"], { GUM_CHOOSE: "my-app", GUM_LOG: log });
 const offered = fs.readFileSync(log, "utf8").trim().split("\n").sort();
-assert.deepEqual(offered, ["+ Create a new project", "my-app", "nested/tool"], "only real repos, no backups or desktop files");
+assert.deepEqual(offered, ["+ Create a new project", "Browse...", "my-app", "nested/tool"].sort(), "recent repos, Create, Browse: nothing else");
+const lines = fs.readFileSync(log, "utf8").trim().split("\n"); assert.deepEqual(lines.slice(-2), ["+ Create a new project", "Browse..."], "the two actions come after the repos");
 assert.equal(r.stdout.trim(), `cs -p claude in ${real(path.join(proj, "my-app"))}`);
+// Browse: pick a plain folder anywhere -> git init, and it shows up as a recent repo next time
+const elsewhere = path.join(tmp, "elsewhere"); fs.mkdirSync(elsewhere);
+fs.rmSync(path.join(home, ".local/state/omarchy/agent-usage-tabs/squad-dir"));
+r = run(["claude"], { GUM_CHOOSE: "Browse...", GUM_FILE: elsewhere, GUM_LOG: log });
+assert.equal(r.stdout.trim(), `cs -p claude in ${real(elsewhere)}`);
+assert.ok(fs.existsSync(path.join(elsewhere, ".git")), "browsed folder was git-initialized");
+fs.rmSync(path.join(home, ".local/state/omarchy/agent-usage-tabs/squad-dir"));
+run(["claude"], { GUM_CHOOSE: "my-app", GUM_LOG: log });
+assert.ok(fs.readFileSync(log, "utf8").includes(elsewhere.replace(os.homedir(), "~")) || fs.readFileSync(log, "utf8").includes(elsewhere), "a browsed repo is listed as recent");
 // create a new project: lands in Projects, git-initialized with a first commit
 fs.rmSync(path.join(home, ".local/state"), { recursive: true });
 r = run(["claude"], { GUM_CHOOSE: "+ Create a new project", GUM_INPUT: "squad-demo", GUM_LOG: log });

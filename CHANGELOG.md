@@ -8,9 +8,9 @@ Bump the version in `manifest.json` and add a line here with every change
 
 ## 1.10.0 - 2026-11-22
 - A **Claude Squad** button next to App. It checks that `cs` is installed (one-click install if not), lets you tick which
-  agents to run, then opens a terminal and runs `cs -p <agent>` for each. The git repo folder is the last one used, else a picker
-  that starts in ~/Projects and lists only git repos (backups and desktop files hidden), or creates a new project there
-  (git-initialized with a first commit).
+  agents to run, then opens a terminal and runs `cs -p <agent>` for each. The git repo folder is the last one used, else a picker with
+  three things: recent git repos (backups and desktop files hidden), Create a new project (in ~/Projects, git-initialized
+  with a first commit) and Browse... for anywhere else. Screenshots retaken with the button.
 
 ## 1.9.0 - 2026-11-22
 - A gray tab (no meter at all) now says why: not installed, not signed in, or no usage source.
