@@ -52,3 +52,9 @@ assert.deepEqual(applyOrder({ tabOrder: ["grok"] }, "reset").tabOrder, DEFAULT_O
 assert.deepEqual(DEFAULT_ORDER.slice(0, 4), ["claude", "antigravity", "grok", "codex"]);
 for (const bad of ["", "nope", "claude,claude", "claude,,"]) if (bad !== "claude,,") assert.throws(() => applyOrder({}, bad), /distinct known agent ids/, `rejects ${JSON.stringify(bad)}`);
 console.log("settings-set: tab order tests passed");
+
+// Catalog agents are real tabs: they can be hidden and reordered
+assert.deepEqual(applyHidden({}, "aider", "true"), { hiddenAgents: ["aider"] });
+assert.deepEqual(applyOrder({}, "gemini,claude").tabOrder, ["gemini", "claude"]);
+assert.equal(DEFAULT_ORDER.indexOf("claude"), 0); assert.ok(DEFAULT_ORDER.indexOf("cline") > DEFAULT_ORDER.indexOf("hermes"), "catalog agents come after the core twelve");
+console.log("settings-set: catalog ids ok");

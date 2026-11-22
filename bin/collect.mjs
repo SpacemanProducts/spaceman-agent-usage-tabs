@@ -23,6 +23,7 @@ import { planInfo } from "./plan-info.mjs";
 import { makeInstalledCheck, agentCli } from "./installed.mjs";
 import { planLoginNotices, planInstallNotices } from "./login-watch.mjs";
 import { buildAccounts } from "./accounts.mjs";
+import { loadCatalog, tabNote } from "./catalog.mjs";
 import { createDiagnostics, checkAgentData } from "./diagnostics.mjs";
 
 const HOME = os.homedir();
@@ -53,6 +54,10 @@ const AGENTS = [
   { id: "amp", name: "Amp", bins: ["amp"] },
   { id: "hermes", name: "Hermes", bins: ["hermes"], builtin: "hermes" },
 ];
+
+// The catalog agents (agents-catalog.json) get a tab too, found by their binaries, with a note for how they report usage.
+const CATALOG = loadCatalog();
+for (const c of CATALOG.agents) AGENTS.push({ id: c.id, name: c.name, bins: c.bins, catalog: c });
 
 const isInstalled = makeInstalledCheck({ dirs: PATH_DIRS, env: ENV });
 
@@ -210,6 +215,9 @@ for (const a of AGENTS) {
     const lim = await claudeLimits(prevAgent("claude"));
     Object.assign(out, { plan: lim.plan || "", limits: lim.limits || [], status: lim.status || "", models: modelRows(byModel), modelScope: "last 7 days", days: daysFrom(byDay), limitsFetchedAt: lim.fetchedAt || 0, resets: lim.resets || null,
       signedIn: fs.existsSync(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), ".credentials.json")) });
+  } else if (a.catalog) {
+    // No usage collector: say how this agent reports usage (from the catalog) instead of showing meters.
+    Object.assign(out, { usageType: a.catalog.usageType, planNote: tabNote(a.catalog, CATALOG.types), signedIn: null, catalog: true });
   } else {
     const local = a.builtin ? fromBuiltin(a.builtin, a.id) : null;
     if (local) Object.assign(out, local, { status: "" });

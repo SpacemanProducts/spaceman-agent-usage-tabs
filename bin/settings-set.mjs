@@ -6,9 +6,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { catalogIds } from "./catalog.mjs";
 
 export const ALLOWED = ["hideUninstalledAgents", "showUnusedModels", "resetAnimation", "resetSound", "autoOpenOnReset"];
-export const AGENT_IDS = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"];
+export const CORE_IDS = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"];
+// The catalog agents (agents-catalog.json) are real tabs too: they can be hidden and reordered like the rest.
+export const AGENT_IDS = [...CORE_IDS, ...catalogIds()];
 
 // The reset sound volume: an integer 0-100.
 export function applyVolume(current, value) {
@@ -32,7 +35,7 @@ export function applyHidden(current, id, hidden) {
 
 // The tab order: a comma-separated list of known agent ids, saved so it survives restarts.
 // "reset" restores the default order (explicitly, so it also overrides a tabOrder set in shell.json).
-export const DEFAULT_ORDER = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"];
+export const DEFAULT_ORDER = AGENT_IDS;   // the twelve core agents first, then the catalog agents, "and the rest" at the end
 export function applyOrder(current, csv) {
   const ids = csv === "reset" ? DEFAULT_ORDER : String(csv || "").split(",").map((x) => x.trim()).filter(Boolean);
   const bad = ids.find((x) => !AGENT_IDS.includes(x));

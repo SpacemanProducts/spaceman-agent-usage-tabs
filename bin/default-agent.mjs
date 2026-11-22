@@ -16,6 +16,8 @@ import { fileURLToPath } from "node:url";
 export const DEFAULT_NAMES = {
   claude: "claude", antigravity: "agy", grok: "grok", codex: "codex", copilot: "copilot", cursor: "cursor-agent",
   opencode: "opencode", kimi: "kimi", kiro: "kiro-cli", devin: "devin", amp: "amp", hermes: "hermes",
+  // catalog agents that `omarchy default agent` also supports
+  pi: "pi", omp: "omp", crush: "crush", qwen: "qwen", dsh: "dsh", mcode: "mcode", kilo: "kilo", commandcode: "commandcode", openclaw: "openclaw",
 };
 
 // What to do for a first tab: { name } to set, { skip: reason } to leave the default alone.

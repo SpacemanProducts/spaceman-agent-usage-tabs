@@ -154,7 +154,8 @@ Panel {
   readonly property string firstId: agents.length > 0 ? agents[0].id : ""
   readonly property bool firstInstalled: agents.length > 0 && !!agents[0].cli
   readonly property var defaultNames: ({ claude: "claude", antigravity: "agy", grok: "grok", codex: "codex", copilot: "copilot", cursor: "cursor-agent",
-    opencode: "opencode", kimi: "kimi", kiro: "kiro-cli", devin: "devin", amp: "amp", hermes: "hermes" })
+    opencode: "opencode", kimi: "kimi", kiro: "kiro-cli", devin: "devin", amp: "amp", hermes: "hermes",
+    pi: "pi", omp: "omp", crush: "crush", qwen: "qwen", dsh: "dsh", mcode: "mcode", kilo: "kilo", commandcode: "commandcode", openclaw: "openclaw" })
   property string currentDefault: ""
   function isDefaultAgent(a) { return !!a && currentDefault !== "" && defaultNames[a.id] === currentDefault }
   onFirstIdChanged: applyDefault()
@@ -286,6 +287,7 @@ Panel {
   function grayReason(a) {
     if (!a || ChipMeters.chipMeters(a).session >= 0) return ""
     if (String(a.status || "") !== "") return ""
+    if (a.usageType) return ""               // a catalog agent: its tab note already says how it reports usage
     if (a.installed === false) return "Not installed."
     if (a.signedIn === false) return "Not signed in. Sign in with " + (a.cli || a.name) + " to see limits."
     return "No usage source: " + a.name + " doesn't report limits here."
