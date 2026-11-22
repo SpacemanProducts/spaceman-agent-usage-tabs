@@ -103,3 +103,27 @@ console.log("reset-celebration: all tests passed");
   assert.deepEqual(got.accounts, ["Work"], "only the account that dropped is named");
   assert.equal(resetNotice(now, ["Session"], got).title, "Claude Code (Work) session reset, go cook.");
 }
+
+// ---- once per reset: a window that already celebrated never celebrates again (flicker, restart, duplicate detection)
+{
+  const NOW = Date.parse("2026-11-22T10:00:00Z");
+  const due = "2026-11-22T09:59:00.372911+00:00";          // the window that just ended (microseconds wobble per fetch)
+  const dueWobble = "2026-11-22T09:59:01.100004+00:00";
+  const mk = (percent, resetsAt) => [{ id: "claude", name: "Claude Code", limits: [{ title: "Session", percent, resetsAt }] }];
+  let fired = {};
+  const run = (before, after, now) => { const seen = []; applyResets(after, before, (a, w) => seen.push(w), now, fired); fired = JSON.parse(JSON.stringify(fired)); return seen; };
+  assert.equal(run(mk(0.96, due), mk(0.03, "2026-11-22T15:00:00Z"), NOW).length, 1, "the reset celebrates");
+  // the meter flickers back up and drops again, still describing the SAME ended window: no second celebration
+  assert.equal(run(mk(0.96, dueWobble), mk(0.03, "2026-11-22T15:00:00Z"), NOW + 60000).length, 0, "same window: once");
+  assert.equal(run(mk(0.96, due), mk(0.03, "2026-11-22T15:00:00Z"), NOW + 120000).length, 0, "even after a restart (state kept as JSON)");
+  // the next window ends and resets 5 hours later: that is a new reset, so it celebrates once
+  const next = "2026-11-22T15:00:00Z";
+  assert.equal(run(mk(0.97, next), mk(0.02, "2026-11-22T20:00:00Z"), NOW + 5 * 3600000 + 60000).length, 1, "the next window's reset celebrates");
+  assert.equal(run(mk(0.97, next), mk(0.02, "2026-11-22T20:00:00Z"), NOW + 5 * 3600000 + 120000).length, 0);
+  // a meter with no reset time: at most one celebration an hour
+  fired = {};
+  const nt = (p) => [{ id: "grok", name: "Grok", limits: [{ title: "Weekly", percent: p }] }];
+  assert.equal(run(nt(0.9), nt(0.05), NOW).length, 1);
+  assert.equal(run(nt(0.9), nt(0.05), NOW + 10 * 60000).length, 0, "no reset time: not again within the hour");
+  assert.equal(run(nt(0.9), nt(0.05), NOW + 2 * 3600000).length, 1);
+}

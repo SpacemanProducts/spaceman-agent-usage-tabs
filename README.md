@@ -111,7 +111,10 @@ local until you sign in).
 | Hermes | "Free and local", or the Nous Portal free-tier note once you're signed in. |
 
 **Alerts and the reset celebration**
-- A notification when any agent's session or weekly limit passes 95%, once per window.
+- **Each alert fires once per usage window, per agent:** one notification when a session or weekly limit first passes the threshold
+  (95% by default, adjustable), one when the limit is hit (100%), and one celebration per reset. What already fired is remembered
+  across restarts and forgotten only when that window resets, so a meter that stays high, flickers or briefly fails to load
+  never repeats an alert.
 - When a session or weekly meter drops by more than 50 points, that's a reset, and you
   get a short celebration: the panel opens on that agent's tab (**without taking keyboard
   focus**), confetti bursts over its chip while the chip flashes green, a short cha-ching

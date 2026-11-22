@@ -16,7 +16,7 @@ import { fetchResets, corroborate } from "./agy-resets.mjs";
 import { playSound } from "./play-sound.mjs";
 import { planLimitsOnly } from "./plan-limits.mjs";
 import { codexResets } from "./codex-resets.mjs";
-import { planAlerts } from "./alert-state.mjs";
+import { planAlerts, markFired, alertText } from "./alert-state.mjs";
 import { buildModels } from "./models.mjs";
 import { liveModels } from "./live-models.mjs";
 import { planInfo } from "./plan-info.mjs";
@@ -327,11 +327,10 @@ function untilReset(iso) {
 function notifyHighUsage(list) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const { toSend, memory } = planAlerts(list, readJson(NOTIFIED) || {}, THRESHOLD);
-  for (const { agent: a, limit: l, key } of toSend) {
-    const pct = Math.round(l.percent * 100);
-    const body = [`${l.title} limit at ${pct}%`, untilReset(l.resetsAt)].filter(Boolean).join(" — ");
-    const r = spawnSync("notify-send", ["-a", "Cook Meter", "-u", "critical", "-i", "dialog-warning", "-h", "boolean:suppress-sound:true", `${a.name}: ${pct}% used`, body], { env: ENV, timeout: 5000 });
-    if (r.status === 0) memory[key] = Date.now(); // a failed send is not remembered, so it retries
+  for (const item of toSend) {
+    const { title, body } = alertText(item, untilReset(item.limit.resetsAt));
+    const r = spawnSync("notify-send", ["-a", "Cook Meter", "-u", "critical", "-i", "dialog-warning", "-h", "boolean:suppress-sound:true", title, body], { env: ENV, timeout: 5000 });
+    if (r.status === 0) markFired(memory, item); // a failed send is not remembered, so it retries; a sent one never repeats this window
   }
   fs.writeFileSync(NOTIFIED, JSON.stringify(memory) + "\n", { mode: 0o600 });
 }
@@ -342,7 +341,11 @@ function notifyHighUsage(list) {
 // hand it defaults to 60. One cha-ching per run, however many agents reset.
 const SOUND_VOLUME = Number.isFinite(argAfter("--volume")) ? argAfter("--volume") : 60;
 const pendingResets = [];
-applyResets(agents, prev?.agents, (a, windows, info) => pendingResets.push({ a, windows, info }));
+const RESET_FIRED = path.join(OUT_DIR, "reset-fired.json");   // which windows already celebrated, kept across restarts
+const resetFired = readJson(RESET_FIRED) || {};
+applyResets(agents, prev?.agents, (a, windows, info) => pendingResets.push({ a, windows, info }), Date.now(), resetFired);
+fs.mkdirSync(OUT_DIR, { recursive: true });
+fs.writeFileSync(RESET_FIRED, JSON.stringify(resetFired) + "\n", { mode: 0o600 });
 let resetHappened = false, surpriseHappened = false, announcements = null;
 for (const { a, windows, info } of pendingResets) {
   resetHappened = true;

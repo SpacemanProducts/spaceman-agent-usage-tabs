@@ -6,6 +6,13 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.12.1 - 2026-11-22
+- Fix: alerts no longer repeat while a condition stays true. The 95% warning fired on every refresh because Claude's reset time
+  carries microseconds that change each fetch, so each refresh looked like a new window. Alerts are now remembered per agent
+  and window (not per reset string), in two levels: a warning when usage first passes the threshold, and one when the limit is
+  hit (100%), each once. They survive restarts and clear only when the window resets. Reset celebrations are likewise once per
+  reset, remembered across restarts. Tests hold usage at 100% (and 96%) for many checks and confirm one alert.
+
 ## 1.12.0 - 2026-11-22
 - A quieter, more native-feeling panel: chips get thin, softer borders and a bit more space between them, the header buttons
   are faint theme tints, and the usage bars are slightly thicker so they stand out. Meter colors stay on the chips.

@@ -4,6 +4,9 @@
 import { classifyResets, windowPhrase, magnitudeOf } from "./reset-detect.mjs";
 
 export const FLASH_MS = 10000;
+const SAME_WINDOW_MS = 5 * 60 * 1000;   // reset times of one window wobble by seconds
+const NO_TIME_GAP_MS = 60 * 60 * 1000;  // without a reset time, one celebration per meter per hour at most
+const FIRED_KEEP_MS = 3 * 24 * 3600 * 1000;
 
 // Agents that get a surprise celebration: an early drop on them can only be the
 // provider resetting meters (there is no banked reset the user could have spent),
@@ -61,7 +64,26 @@ export function resetNotifyArgs(notice, imagePath) {
 // `notify(agent, windows, info)` is called once per detected reset. The kind is
 // "surprise" only for agents in SURPRISE_AGENTS, and only when a meter dropped
 // before its recorded reset time; everything else is "scheduled".
-export function applyResets(agents, prevAgents, notify, now = Date.now()) {
+// Once per reset: a window that already celebrated must not celebrate again (a meter that flickers, a restart, a
+// duplicate detection). `fired` is a plain object the caller saves between runs: "agent|meter" -> { endMs, at }, where
+// endMs is when the window that just ended was due to reset (its previous resetsAt), if known.
+function newReset(fired, key, prevLimits, title, now) {
+  const prevIso = (Array.isArray(prevLimits) ? prevLimits : []).find((l) => l && l.title === title)?.resetsAt;
+  const endMs = Number.isFinite(Date.parse(prevIso || "")) ? Date.parse(prevIso) : null;
+  const rec = fired[key];
+  if (rec) {
+    if (endMs && rec.endMs && Math.abs(endMs - rec.endMs) <= SAME_WINDOW_MS) return false;
+    if (!endMs && now - rec.at < NO_TIME_GAP_MS) return false;
+  }
+  fired[key] = { endMs, at: now };
+  return true;
+}
+function pruneFired(fired, now) {
+  for (const k of Object.keys(fired)) if (!fired[k] || now - fired[k].at > FIRED_KEEP_MS) delete fired[k];
+}
+
+export function applyResets(agents, prevAgents, notify, now = Date.now(), fired = {}) {
+  pruneFired(fired, now);
   const prev = new Map((Array.isArray(prevAgents) ? prevAgents : []).filter((a) => a && a.id).map((a) => [a.id, a]));
   for (const a of agents || []) {
     const before = prev.get(a.id);
@@ -71,10 +93,11 @@ export function applyResets(agents, prevAgents, notify, now = Date.now()) {
       details = [];
       const prevAcc = new Map((before?.accounts || []).map((x) => [x.id, x]));
       for (const acc of a.accounts) {
-        const d = classifyResets(prevAcc.get(acc.id)?.limits, acc.limits, now);
+        const prevLimits = prevAcc.get(acc.id)?.limits;
+        const d = classifyResets(prevLimits, acc.limits, now).filter((x) => newReset(fired, `${a.id}:${acc.id}|${x.title}`, prevLimits, x.title, now));
         if (d.length) { accounts.push(acc.label); details.push(...d); }
       }
-    } else details = classifyResets(before?.limits, a.limits, now);
+    } else details = classifyResets(before?.limits, a.limits, now).filter((x) => newReset(fired, `${a.id}|${x.title}`, before?.limits, x.title, now));
     if (details.length) {
       const windows = details.map((d) => d.title);
       const kind = SURPRISE_AGENTS[a.id] && details.some((d) => d.surprise) ? "surprise" : "scheduled";
