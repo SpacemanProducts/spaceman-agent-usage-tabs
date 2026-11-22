@@ -184,9 +184,9 @@ in the session list. It needs `python3`, `tmux` and `git`; without Python it ope
 
 A session counts as **started** once the agent's program is running in its tmux session, so an agent waiting on a trust or
 login prompt (Codex asking whether to trust the folder, say) is a successful start. The window says `COULD NOT START` only if
-the session never came up or its program exited at once. The agents are also written as profiles in
-`~/.claude-squad/config.json` (your own profiles and `default_program` are left alone) as a fallback for a `cs` version that
-offers a profile picker; `cs` 1.0.20 does not show one.
+the session never came up or its program exited at once.
+The plugin never edits `cs`'s own config; it only types the keys `cs` already accepts. Only one Squad window can be open at a time: a second launch says so, because two `cs` processes
+overwrite each other's saved sessions.
 
 The folder picker offers your recent git repos (the ones you picked before, plus the repos in `~/Projects`, with backups and
 desktop files hidden), then **Create a new project** (a folder in `~/Projects` with git set up and a first commit), then

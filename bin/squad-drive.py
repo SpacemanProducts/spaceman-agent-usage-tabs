@@ -59,6 +59,22 @@ class Cs:
 
 STATE = os.path.join(os.path.expanduser("~"), ".claude-squad", "state.json")
 
+# One Claude Squad window at a time. Two cs processes share one state file and overwrite each other's sessions, so the
+# first launch holds this lock for as long as its window lives and a second launch refuses (squad.sh checks first).
+# flock(2) locks vanish when the process dies, so a crashed window never leaves it stuck. The fd is non-inheritable
+# (Python's default), so cs and the tmux server it starts do not hold it after the window closes.
+LOCK = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state"), "omarchy", "agent-usage-tabs", "squad.lock")
+
+def take_lock():
+    os.makedirs(os.path.dirname(LOCK), exist_ok=True)
+    fd = os.open(LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
 def saved(title):
     """Is the session recorded in cs's own state file? (That is what lists it next time.)"""
     try:
@@ -132,6 +148,10 @@ def start_session(cs, title):
 
 def main():
     repo, agents = sys.argv[1], sys.argv[2:]
+    held = take_lock()                      # kept for the whole run: closed only when this process exits
+    if held is None:
+        say("Claude Squad is already open in another window. Use that one, or close it and launch again.")
+        sys.exit(3)
     os.chdir(repo)
     stamp = time.strftime("%H%M")
     for i, agent in enumerate(agents):
@@ -180,4 +200,7 @@ def interactive(cs):
         termios.tcsetattr(0, termios.TCSADRAIN, old)
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:2] == ["--hold"]:         # test helper: hold the lock for N seconds
+        fd = take_lock(); time.sleep(float(sys.argv[2])) if fd is not None else sys.exit(3)
+    else:
+        main()

@@ -83,7 +83,7 @@ fs.rmSync(path.join(home, ".local/state"), { recursive: true });
 r = run(["claude"], { GUM_CHOOSE: "+ Create a new project", GUM_INPUT: "../escape", GUM_LOG: log });
 assert.notEqual(r.status, 0); assert.ok(!fs.existsSync(path.join(home, "escape")));
 
-// several agents: ONE window; the driver gets the folder and every agent, and the profiles are written as the fallback
+// several agents: ONE window; the driver gets the folder and every agent
 // Any terminal launcher call here would be an extra window: this one records its calls so the test can prove there are none.
 const launchLog = path.join(tmp, "launch.log");
 fs.writeFileSync(path.join(bin, "omarchy-launch-tui"), `#!/bin/bash\necho "$*" >> "${launchLog}"\n`, { mode: 0o755 });
@@ -93,9 +93,32 @@ fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
 r = spawnSync("bash", [script, "codex", "grok", "amp"], { encoding: "utf8", input: "\n", env: { PATH: "/usr/bin:/bin", HOME: home, ...gitEnv, SQUAD_DIR: repo, SQUAD_DRIVER: stub } });
 assert.match(r.stdout, new RegExp(`driver ${real(repo)} codex grok amp\\n$`), "one driver run with the folder and all agents");
 assert.match(r.stdout, /Claude Squad: codex,grok,amp in repo/);
-const prof = JSON.parse(fs.readFileSync(path.join(home, ".claude-squad/config.json"), "utf8")).profiles;
-assert.deepEqual(prof.map((p) => p.program), ["codex", "grok", "amp"], "profiles written as the fallback");
+assert.ok(!fs.existsSync(path.join(home, ".claude-squad")), "cs's own config is never touched");
 await new Promise((res) => setTimeout(res, 800));
 assert.ok(!fs.existsSync(launchLog), "no extra terminal windows were opened: " + (fs.existsSync(launchLog) ? fs.readFileSync(launchLog, "utf8") : ""));
+// ---- one Claude Squad window at a time: while another window holds the lock, a launch refuses and says so
+{
+  const driver = path.join(path.dirname(script), "squad-drive.py");
+  const env2 = { ...process.env, HOME: home, XDG_STATE_HOME: "" };
+  const { spawn } = await import("node:child_process");
+  const holder = spawn("python3", [driver, "--hold", "6"], { env: env2, stdio: "ignore" });
+  await new Promise((res) => setTimeout(res, 800));
+  const t1 = Date.now();
+  const second = spawnSync("bash", [script, "claude"], { encoding: "utf8", input: "\n", env: { PATH: "/usr/bin:/bin", HOME: home, ...gitEnv, SQUAD_DIR: repo, SQUAD_DRIVER: "/nonexistent" } });
+  assert.notEqual(second.status, 0, "a second launch does not go ahead");
+  assert.match(second.stdout, /already open in another window/);
+  assert.ok(!/Claude Squad: claude in/.test(second.stdout), "it never got as far as running cs");
+  assert.ok(Date.now() - t1 < 5000, "it refused at once, without waiting");
+  // the driver itself refuses too (the race where two launches pass the early check together)
+  const drv = spawnSync("python3", [driver, repo, "bash"], { encoding: "utf8", env: env2, timeout: 10000 });
+  assert.equal(drv.status, 3); assert.match(drv.stdout, /already open in another window/);
+  await new Promise((res) => holder.on("exit", res));       // the holder ends: the lock is released with it
+  const after = run(["codex"], { SQUAD_DIR: repo });
+  assert.equal(after.status, 0, after.stderr); assert.match(after.stdout, /cs -p codex in /, "launches normally again once the other window is closed");
+  // a crashed holder cannot leave it stuck: kill one hard and launch right away
+  const crashed = spawn("python3", [driver, "--hold", "60"], { env: env2, stdio: "ignore" });
+  await new Promise((res) => setTimeout(res, 800)); crashed.kill("SIGKILL"); await new Promise((res) => crashed.on("exit", res));
+  assert.equal(run(["codex"], { SQUAD_DIR: repo }).status, 0, "a killed window leaves no stale lock");
+}
 fs.rmSync(tmp, { recursive: true });
 console.log("squad: all tests passed");

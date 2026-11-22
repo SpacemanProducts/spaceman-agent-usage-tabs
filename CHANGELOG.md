@@ -6,6 +6,12 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.13.1 - 2026-11-22
+- Claude Squad opens one window at a time: the window holds a lock while it is open, and a second launch says so instead of running a
+  second `cs` that would overwrite the first one's saved sessions. A crashed window leaves no stale lock.
+- The plugin no longer writes `cs` profiles into `~/.claude-squad/config.json` (cs 1.0.20 shows no profile picker, so it did nothing
+  useful). It never edits cs's own config now.
+
 ## 1.13.0 - 2026-11-22
 - A **CS** header button (same style as + and >_) opens Claude Squad; the bottom Launch row and the App button are gone. The Claude
   Squad picker now opens under the header.
@@ -43,8 +49,7 @@ Bump the version in `manifest.json` and add a line here with every change
 - **Claude Squad** button next to App: checks that `cs` is installed (one-click install if not), lets you tick agents, then
   opens ONE tiled window in a git repo folder and starts a `cs` session per agent in it (the plugin types the keys, since
   `cs` has no command for it). It shows the repo first and titles the terminal after it. The folder is the last one used,
-  else a picker with recent git repos, Create a new project and Browse... The agents are also written as `cs` profiles as
-  a fallback (cs 1.0.20 shows no profile picker). App-button terminals now tile too. Screenshots retaken with the button.
+  else a picker with recent git repos, Create a new project and Browse... App-button terminals now tile too. Screenshots retaken with the button.
 
 ## 1.9.0 - 2026-11-22
 - A gray tab (no meter at all) now says why: not installed, not signed in, or no usage source.

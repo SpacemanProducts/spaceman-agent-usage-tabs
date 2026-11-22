@@ -24,6 +24,16 @@ pause() { read -rn1 -p "Press any key to close "; }
 if [[ $arg == --install ]]; then install_cs; command -v cs >/dev/null && echo "Done: cs is installed." || echo "cs still not found."; pause; exit; fi
 clis=("$@")
 
+# One Squad window at a time (the driver holds this lock while its window is open): two cs processes would overwrite each
+# other's saved sessions. Checked first, so a second launch says so before asking for a folder.
+LOCK="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agent-usage-tabs/squad.lock"
+mkdir -p "$(dirname "$LOCK")"
+if ! flock -n "$LOCK" true; then
+  echo "Claude Squad is already open in another window."
+  echo "Use that one, or close it and launch again."
+  pause; exit 1
+fi
+
 if ! command -v cs >/dev/null; then
   echo "Squad needs Claude Squad (cs)."
   gum confirm "Install it now?" || exit 130
@@ -91,9 +101,6 @@ printf '\033]0;%s\007' "$name"
 echo "Claude Squad: $(IFS=,; echo "${clis[*]}") in $name"
 echo "  ${dir/#$HOME/\~}"
 sleep 1.2
-
-# Fallback: also list the agents as profiles in cs's config, for a cs version that offers a profile picker.
-node "$HERE/squad-profiles.mjs" "$HOME/.claude-squad/config.json" "${clis[@]}" 2>/dev/null
 
 # ONE window: squad-drive.py starts a session per agent inside cs (cs has no command line for that) and leaves you in
 # cs. Without python3 it just opens cs on the first agent.
