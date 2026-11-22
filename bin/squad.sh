@@ -76,7 +76,15 @@ remember "$dir"
 mkdir -p "$(dirname "$state")" && printf '%s\n' "$dir" >"$state"
 
 # Every other agent: its own terminal in the same folder (the folder is settled now, so nothing asks again).
+# They start in the background: the launcher stays attached until its window closes, and waiting for it here would
+# leave this terminal sitting empty instead of running cs.
 for extra in "${clis[@]:1}"; do
-  SQUAD_DIR="$dir" omarchy-launch-tui --app-id=org.omarchy.squad bash "$0" "$extra"
+  (SQUAD_DIR="$dir" setsid omarchy-launch-tui --app-id=org.omarchy.squad bash "$0" "$extra" >/dev/null 2>&1 &)
 done
+# Say which repo this is about to open, and name the terminal after it.
+name=$(basename "$dir")
+printf '\033]0;%s\007' "$name"
+echo "Claude Squad: $(IFS=,; echo "${clis[0]}") in $name"
+echo "  ${dir/#$HOME/\~}"
+sleep 1.2
 cd "$dir" && exec cs -p "${clis[0]}"

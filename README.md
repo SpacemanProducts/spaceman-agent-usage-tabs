@@ -172,7 +172,7 @@ a terminal, so you see it). Then tick the agents to run and press **Run**: a ter
 `cs -p <agent>`, with one terminal per extra agent. The folder is the last one used; the first time, a
 small picker offers your recent git repos (the ones you picked before, plus the repos in `~/Projects`, with backups and
 desktop files hidden), then **Create a new project** (a folder in `~/Projects` with git set up and a first commit), then
-**Browse...** for anywhere else (a plain folder gets `git init` after you confirm). The terminals open as normal tiled windows. It needs `tmux` and `git`.
+**Browse...** for anywhere else (a plain folder gets `git init` after you confirm). Before launching it shows which repo it is about to open, and each terminal is titled with the repo name. The terminals open as normal tiled windows. It needs `tmux` and `git`.
 
 ### Tab order and the default agent
 

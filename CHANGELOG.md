@@ -12,7 +12,9 @@ Bump the version in `manifest.json` and add a line here with every change
   three things: recent git repos (backups and desktop files hidden), Create a new project (in ~/Projects, git-initialized
   with a first commit) and Browse... for anywhere else. Screenshots retaken with the button.
   The terminal opens as a normal tiled window (its own app-id, `org.omarchy.squad`; `org.omarchy.bash` is floated by
-  Omarchy's window rules), and so do the App button's terminals.
+  Omarchy's window rules), and so do the App button's terminals. With several agents ticked, the first terminal no longer
+  sits empty waiting for the others to open (they start in the background). Before launching it shows which repo it is
+  about to open, and the terminal title is the repo name.
 
 ## 1.9.0 - 2026-11-22
 - A gray tab (no meter at all) now says why: not installed, not signed in, or no usage source.

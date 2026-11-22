@@ -33,7 +33,9 @@ assert.ok(fs.existsSync(path.join(bin, "cs")), "installed cs");
 // cs present, repo given: runs `cs -p <agent>` inside it
 fs.writeFileSync(path.join(bin, "cs"), '#!/bin/bash\necho "cs $* in $PWD"\n', { mode: 0o755 });
 r = run(["codex"], { SQUAD_DIR: repo });
-assert.equal(r.stdout.trim(), `cs -p codex in ${real(repo)}`);
+assert.match(r.stdout, /Claude Squad: codex in repo\n/, "says which repo it is about to open");
+assert.ok(r.stdout.includes("\u001b]0;repo\u0007"), "the terminal title is the repo name");
+assert.match(r.stdout, new RegExp(`cs -p codex in ${real(repo)}\\n$`));
 r = run();
 assert.match(r.stdout, new RegExp(`in ${real(repo)}\\n$`), "remembers the last repo");
 fs.rmSync(path.join(home, ".local/state"), { recursive: true });
@@ -57,12 +59,12 @@ r = run(["claude"], { GUM_CHOOSE: "my-app", GUM_LOG: log });
 const offered = fs.readFileSync(log, "utf8").trim().split("\n").sort();
 assert.deepEqual(offered, ["+ Create a new project", "Browse...", "my-app", "nested/tool"].sort(), "recent repos, Create, Browse: nothing else");
 const lines = fs.readFileSync(log, "utf8").trim().split("\n"); assert.deepEqual(lines.slice(-2), ["+ Create a new project", "Browse..."], "the two actions come after the repos");
-assert.equal(r.stdout.trim(), `cs -p claude in ${real(path.join(proj, "my-app"))}`);
+assert.ok(r.stdout.trim().endsWith(`cs -p claude in ${real(path.join(proj, "my-app"))}`), r.stdout);
 // Browse: pick a plain folder anywhere -> git init, and it shows up as a recent repo next time
 const elsewhere = path.join(tmp, "elsewhere"); fs.mkdirSync(elsewhere);
 fs.rmSync(path.join(home, ".local/state/omarchy/agent-usage-tabs/squad-dir"));
 r = run(["claude"], { GUM_CHOOSE: "Browse...", GUM_FILE: elsewhere, GUM_LOG: log });
-assert.equal(r.stdout.trim(), `cs -p claude in ${real(elsewhere)}`);
+assert.ok(r.stdout.trim().endsWith(`cs -p claude in ${real(elsewhere)}`), r.stdout);
 assert.ok(fs.existsSync(path.join(elsewhere, ".git")), "browsed folder was git-initialized");
 fs.rmSync(path.join(home, ".local/state/omarchy/agent-usage-tabs/squad-dir"));
 run(["claude"], { GUM_CHOOSE: "my-app", GUM_LOG: log });
@@ -71,19 +73,26 @@ assert.ok(fs.readFileSync(log, "utf8").includes(elsewhere.replace(os.homedir(), 
 fs.rmSync(path.join(home, ".local/state"), { recursive: true });
 r = run(["claude"], { GUM_CHOOSE: "+ Create a new project", GUM_INPUT: "squad-demo", GUM_LOG: log });
 const made = path.join(proj, "squad-demo");
-assert.equal(r.stdout.trim(), `cs -p claude in ${real(made)}`);
+assert.ok(r.stdout.trim().endsWith(`cs -p claude in ${real(made)}`), r.stdout);
 assert.ok(spawnSync("git", ["-C", made, "log", "--oneline"], { encoding: "utf8" }).stdout.includes("Initial commit"), "has a first commit");
 // a name that isn't a plain folder name is refused
 fs.rmSync(path.join(home, ".local/state"), { recursive: true });
 r = run(["claude"], { GUM_CHOOSE: "+ Create a new project", GUM_INPUT: "../escape", GUM_LOG: log });
 assert.notEqual(r.status, 0); assert.ok(!fs.existsSync(path.join(home, "escape")));
 
-// several agents: the first runs here, each other gets its own terminal in the same folder
-fs.writeFileSync(path.join(bin, "omarchy-launch-tui"), '#!/bin/bash\necho "terminal: $* (SQUAD_DIR=$SQUAD_DIR)"\n', { mode: 0o755 });
+// several agents: the first runs here at once, each other gets its own terminal in the same folder.
+// The launcher below blocks for 4 s (like a real terminal launcher does until its window closes): this terminal
+// must not wait for it, or it would sit empty instead of running cs.
+const launchLog = path.join(tmp, "launch.log");
+fs.writeFileSync(path.join(bin, "omarchy-launch-tui"), `#!/bin/bash\necho "terminal: $* (SQUAD_DIR=$SQUAD_DIR)" >> "${launchLog}"\nsleep 4\n`, { mode: 0o755 });
 fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
-r = run(["codex", "grok", "amp"], { SQUAD_DIR: repo });
-assert.match(r.stdout, /terminal: --app-id=org\.omarchy\.squad bash .*squad\.sh grok \(SQUAD_DIR=.*repo\)/);
-assert.match(r.stdout, /terminal: --app-id=org\.omarchy\.squad bash .*squad\.sh amp /);
+const t0 = Date.now();
+r = spawnSync("bash", [script, "codex", "grok", "amp"], { encoding: "utf8", input: "\n", timeout: 3000, env: { PATH: "/usr/bin:/bin", HOME: home, ...gitEnv, SQUAD_DIR: repo } });
+assert.ok(Date.now() - t0 < 3000, "did not wait for the other terminals");
 assert.match(r.stdout, /cs -p codex in /, "the first agent runs in this terminal");
+await new Promise((res) => setTimeout(res, 500));
+const launched = fs.readFileSync(launchLog, "utf8");
+assert.match(launched, /terminal: --app-id=org\.omarchy\.squad bash .*squad\.sh grok \(SQUAD_DIR=.*repo\)/);
+assert.match(launched, /terminal: --app-id=org\.omarchy\.squad bash .*squad\.sh amp /);
 fs.rmSync(tmp, { recursive: true });
 console.log("squad: all tests passed");
