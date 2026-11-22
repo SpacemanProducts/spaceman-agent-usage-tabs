@@ -222,8 +222,8 @@ Panel {
 
   // A way into making Omarchy your own: start the default agent on a new app or theme.
   readonly property var starters: [
-    { glyph: "\u{f08c6}", label: "App", tip: "Start your default agent on a new app for this desktop", prompt: "Build me a new desktop app for my Omarchy setup. Ask what it should do first, then make it following the omarchy-app skill and install it so it appears in the app launcher." },
-    { glyph: "\u{f03d8}", label: "Theme", tip: "Start your default agent on a new Omarchy theme", prompt: "Design me a new Omarchy theme. Ask what look or inspiration I want first, then build it following the Omarchy skill's theming guide and switch to it." }
+    { glyph: "\u{f03d8}", label: "Theme", tip: "Start your default agent on a new Omarchy theme", prompt: "Design me a new Omarchy theme. Ask what look or inspiration I want first, then build it following the Omarchy skill's theming guide and switch to it." },
+    { glyph: "\u{f08c6}", label: "App", tip: "Start your default agent on a new app for this desktop", prompt: "Build me a new desktop app for my Omarchy setup. Ask what it should do first, then make it following the omarchy-app skill and install it so it appears in the app launcher." }
   ]
   Process { id: starterLauncher; running: false }
   function startPrompt(prompt) {
