@@ -220,14 +220,14 @@ Panel {
     settingsOpen = false
   }
 
-  // The App button opens the selected agent's own CLI in a terminal (from ~/Work when it
-  // exists, since agents won't remember trust for $HOME). An agent with no CLI has no button.
+  // The App button starts the selected agent's own CLI on building a new Omarchy app (the
+  // stock panel's App tile does the same for the default agent). An agent with no CLI has no button.
   readonly property string appCli: agent && agent.cli ? String(agent.cli) : ""
   Process { id: appLauncher; running: false }
   function launchApp() {
     if (appCli === "") return
     close()
-    appLauncher.command = ["bash", "-c", "cd \"$HOME/Work\" 2>/dev/null; exec omarchy-launch-tui \"$1\"", "launch", appCli]
+    appLauncher.command = ["node", pluginDir + "/bin/launch-agent.mjs", appCli]
     appLauncher.running = true
   }
   function refreshNow() { if (!collector.running) collector.running = true }
@@ -1285,26 +1285,31 @@ Panel {
         }
       }
 
-      // ---------------- App: opens the selected agent's CLI. Hidden for an agent with no CLI.
-      // Same tinted square as the stock panel's hero buttons (34 wide), on the right.
+      // ---------------- App: starts the selected agent on a new Omarchy app. Hidden for an
+      // agent with no CLI. Styled like the stock panel's App tile, at its natural size, on the right.
       Rectangle {
         id: starterRow
         visible: root.appCli !== ""
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        width: Style.space(34)
-        height: visible ? width : 0
+        width: appRow.implicitWidth + Style.space(28)
+        height: visible ? appRow.implicitHeight + Style.space(20) : 0
         radius: Style.cornerRadius
-        color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, appArea.containsMouse ? 0.3 : 0.12)
-        border.width: appArea.containsMouse ? Math.max(1, Style.hoverBorderWidth) : 0
-        border.color: Color.accent
-        Text {
+        color: appArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14)
+                                     : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+        Row {
+          id: appRow
           anchors.centerIn: parent
-          textFormat: Text.PlainText
-          text: "\u{f08c6}"
-          color: Color.accent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.heading
+          spacing: Style.space(8)
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: "App"
+            color: appArea.containsMouse ? Color.accent : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
         }
         MouseArea {
           id: appArea
@@ -1313,7 +1318,7 @@ Panel {
           cursorShape: Qt.PointingHandCursor
           onClicked: root.launchApp()
         }
-        PanelToolTip { visible: appArea.containsMouse; text: "Open " + (root.agent ? root.agent.name : "") + " in a terminal (" + root.appCli + ")"; fontFamily: root.fontFamily }
+        PanelToolTip { visible: appArea.containsMouse; text: "Start " + (root.agent ? root.agent.name : "your agent") + " on building a new Omarchy app"; fontFamily: root.fontFamily }
       }
     }
   }

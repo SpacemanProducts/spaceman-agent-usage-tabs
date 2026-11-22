@@ -148,9 +148,11 @@ chip, the bar number and the alerts use the worst meter across the accounts, and
 names the account that reset. The plugin only reads Omarchy's usage records through
 `omarchy-agent-account-list`; it never reads or stores credentials, and email addresses are dropped.
 
-A small **App** button (bottom right, the same tinted square as the stock panel's) opens the selected agent's own CLI in a terminal: Claude Code opens `claude`,
-Antigravity `agy`, Grok `grok`, and so on, started plainly (no permission-skipping flags) from `~/Work` when
-that folder exists. An agent with no CLI has no button, and the hover tooltip names the agent.
+A small **App** button (bottom right, styled like the stock panel's App tile) starts the selected agent's own CLI
+on building a new Omarchy app, the same task the stock panel's App tile gives the default agent: Claude Code opens
+`claude`, Antigravity `agy`, Grok `grok`, and so on, in a terminal, started plainly (no permission-skipping flags)
+from `~/Work` when that folder exists. An agent with no CLI has no button; Kimi can't take a starting prompt, so it
+opens with the prompt on the clipboard. The hover tooltip names the agent.
 
 ## Known gap: banked limit resets can't be read
 
