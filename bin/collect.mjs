@@ -57,7 +57,7 @@ const AGENTS = [
 
 // The catalog agents (agents-catalog.json) get a tab too, found by their binaries, with a note for how they report usage.
 const CATALOG = loadCatalog();
-for (const c of CATALOG.agents) AGENTS.push({ id: c.id, name: c.name, bins: c.bins, catalog: c });
+for (const c of CATALOG.agents) AGENTS.push({ id: c.id, name: c.name, bins: c.bins, builtin: c.builtin, catalog: c });
 
 const isInstalled = makeInstalledCheck({ dirs: PATH_DIRS, env: ENV });
 
@@ -215,8 +215,8 @@ for (const a of AGENTS) {
     const lim = await claudeLimits(prevAgent("claude"));
     Object.assign(out, { plan: lim.plan || "", limits: lim.limits || [], status: lim.status || "", models: modelRows(byModel), modelScope: "last 7 days", days: daysFrom(byDay), limitsFetchedAt: lim.fetchedAt || 0, resets: lim.resets || null,
       signedIn: fs.existsSync(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), ".credentials.json")) });
-  } else if (a.catalog) {
-    // No usage collector: say how this agent reports usage (from the catalog) instead of showing meters.
+  } else if (a.catalog && !a.builtin) {
+    // No Omarchy usage record: say how this agent reports usage (from the catalog) instead of showing meters.
     Object.assign(out, { usageType: a.catalog.usageType, planNote: tabNote(a.catalog, CATALOG.types), signedIn: null, catalog: true });
   } else {
     const local = a.builtin ? fromBuiltin(a.builtin, a.id) : null;
@@ -264,6 +264,7 @@ for (const a of AGENTS) {
   if (a.id === "opencode") out.signedIn = null; // free models need no login
   if (a.id === "opencode" && (live || []).some((m) => /free/i.test(m.id)) && plans.opencode?.freeNote) out.planNote = plans.opencode.freeNote;
   delete out.copilotFree;
+  if (a.catalog && a.builtin) Object.assign(out, { usageType: a.catalog.usageType, planNote: tabNote(a.catalog, CATALOG.types), catalog: true });
 
   // Plan limits, usage and resets only: never spend, overage or top-up meters.
   out.limits = planLimitsOnly(out.limits);

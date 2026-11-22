@@ -155,7 +155,7 @@ Panel {
   readonly property bool firstInstalled: agents.length > 0 && !!agents[0].cli
   readonly property var defaultNames: ({ claude: "claude", antigravity: "agy", grok: "grok", codex: "codex", copilot: "copilot", cursor: "cursor-agent",
     opencode: "opencode", kimi: "kimi", kiro: "kiro-cli", devin: "devin", amp: "amp", hermes: "hermes",
-    pi: "pi", omp: "omp", crush: "crush", qwen: "qwen", dsh: "dsh", mcode: "mcode", kilo: "kilo", commandcode: "commandcode", openclaw: "openclaw" })
+    qwen: "qwen", dsh: "dsh", mcode: "mcode", openclaw: "openclaw" })
   property string currentDefault: ""
   function isDefaultAgent(a) { return !!a && currentDefault !== "" && defaultNames[a.id] === currentDefault }
   onFirstIdChanged: applyDefault()

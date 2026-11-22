@@ -1,6 +1,6 @@
 {
  "schemaVersion": 1,
- "about": "Agents beyond the twelve this plugin reads directly. usageType says how each reports usage; `unsure` flags a claim that could not be fully verified (with why). Researched 2026-11-22 from the linked sources.",
+ "about": "Agents beyond the twelve this plugin reads directly. An agent is listed only if it is still maintained AND has a working way to read usage or plan limits (an Omarchy usage record, or a documented CLI command or API): see each entry's `maintained` and `reads`. usageType says how it reports usage; `unsure` flags a claim that could not be fully verified. Researched 2026-11-22.",
  "types": {
   "session_weekly": {
    "label": "Session and weekly limits",
@@ -29,162 +29,22 @@
  },
  "agents": [
   {
-   "id": "cline",
-   "name": "Cline",
-   "bins": [
-    "cline"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "Free; you pay your model provider directly and set your own limits there. Optional ClinePass ($9.99/mo, curated open models) adds 5-hour, weekly and monthly limits. A few Cline-provided models are free in the CLI.",
-   "sources": [
-    "https://cline.bot/pricing",
-    "https://docs.cline.bot/getting-started/clinepass",
-    "https://docs.cline.bot/getting-started/free-models.md"
-   ],
-   "unsure": "Mixed: BYOK is the default, but ClinePass has real 5-hour/weekly/monthly windows. A ClinePass user would be session_weekly."
-  },
-  {
-   "id": "goose",
-   "name": "Goose",
-   "bins": [
-    "goose"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "Free and open source (Apache 2.0). You pay your model provider's rates; goose has no built-in budget or cap. A local model has no limits at all.",
-   "sources": [
-    "https://mintlify.com/block/goose/troubleshooting/faq",
-    "https://venturebeat.com/technology/claude-code-costs-up-to-usd200-a-month-goose-does-the-same-thing-for-free"
-   ]
-  },
-  {
    "id": "qwen",
    "name": "Qwen Code",
    "bins": [
     "qwen"
    ],
-   "usageType": "no_usage_data",
+   "usageType": "byok_no_limits",
    "note": "The free Qwen OAuth tier was cut to 100 requests/day on 2026-04-13 and discontinued on 2026-04-15. Now it runs on an API key or an Alibaba Coding Plan; Omarchy notes no way to read that plan's quota.",
    "sources": [
     "https://decrypt.co/364501/alibaba-shuts-down-free-tier-qwen-code",
     "https://github.com/QwenLM/qwen-code/issues/3267",
     "https://qwenlm.github.io/qwen-code-docs"
    ],
-   "unsure": "No official Alibaba pricing page was reachable. Older posts still cite 2,000 requests/day, which is out of date. Coding Plan limits are unverified."
-  },
-  {
-   "id": "crush",
-   "name": "Crush",
-   "bins": [
-    "crush"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "Free software; you pay whichever provider you configure (API key, subscription or local model). Charm's own Hyper provider is optional and subscription-based.",
-   "sources": [
-    "https://raw.githubusercontent.com/charmbracelet/crush/main/README.md",
-    "https://docs.llmgateway.io/guides/crush"
-   ],
-   "unsure": "Charm Hyper's free tier and limits are not published in anything reachable; only the provider side is capped."
-  },
-  {
-   "id": "kilo",
-   "name": "Kilo CLI",
-   "bins": [
-    "kilo",
-    "kilocode"
-   ],
-   "usageType": "monthly_credits",
-   "note": "Free CLI. Model use draws on a prepaid Kilo credit balance shared across Kilo products (inference at provider rates, no markup); Kilo Pass adds monthly credits. This plugin never shows purchasable balances.",
-   "sources": [
-    "https://kilo.ai/docs/getting-started/faq/credits-and-billing",
-    "https://kilo.ai/docs/gateway/usage-and-billing",
-    "https://kilo.ai/pricing"
-   ],
-   "unsure": "Credits are prepaid and expire, not strictly monthly; Kilo Pass prices came from a third-party summary. It is also BYOK-capable."
-  },
-  {
-   "id": "openhands",
-   "name": "OpenHands",
-   "bins": [
-    "openhands"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "The CLI is free and open source; you pay your LLM provider. OpenHands Cloud sells at-cost credits (new users get $20) and has its own daily-conversation cap on the free individual tier.",
-   "sources": [
-    "https://docs.openhands.dev/usage/llms/openhands-llms",
-    "https://openhands.dev/pricing",
-    "https://www.openhands.dev/blog/bring-your-own-llm-is-now-available-to-all-openhands-cloud-users"
-   ],
-   "unsure": "Cloud plan details (Pro price, the 10-conversations/day cap) came from third-party listings. Cloud users would be credit-based."
-  },
-  {
-   "id": "plandex",
-   "name": "Plandex",
-   "bins": [
-    "plandex",
-    "pdx"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "Free and open source (MIT), self-hosted or local, with your own provider keys (OpenRouter, OpenAI-compatible, Ollama). Plandex Cloud has shut down.",
-   "sources": [
-    "https://raw.githubusercontent.com/plandex-ai/plandex/main/README.md",
-    "https://dev.to/jovan_chan_9500711396d4e6/plandex-v2-review-2026-cloud-shut-down-self-hosted-survives-is-the-terminal-agent-still-worth-11pp"
-   ]
-  },
-  {
-   "id": "codewhale",
-   "name": "CodeWhale",
-   "bins": [
-    "codewhale"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "A DeepSeek-first terminal agent (formerly DeepSeek TUI). You supply an API key, normally DeepSeek's prepaid balance; it adds no limits of its own.",
-   "sources": [
-    "https://www.github.com/Hmbown/CodeWhale",
-    "https://docs.rs/crate/codewhale-cli/0.9.6"
-   ],
-   "unsure": "Only the project's own README was found, with no pricing or limits statement. The DeepSeek balance model is assumed from its default provider."
-  },
-  {
-   "id": "reasonix",
-   "name": "Reasonix",
-   "bins": [
-    "reasonix"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "A DeepSeek-focused terminal agent (MIT) built around prefix caching. You supply a DeepSeek API key and pay per token from your balance; it adds no limit of its own.",
-   "sources": [
-    "https://api-docs.deepseek.com/quick_start/agent_integrations/reasonix",
-    "https://raw.githubusercontent.com/esengine/DeepSeek-Reasonix/HEAD/README.md"
-   ],
-   "unsure": "Sources disagree on its implementation language and no pricing page exists beyond DeepSeek's own API terms."
-  },
-  {
-   "id": "aider",
-   "name": "Aider",
-   "bins": [
-    "aider"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "Free and open source (Apache 2.0). You pay API tokens at your provider's rates; any limits are your provider's. /tokens reports context size and cost in-session. A local Ollama model costs nothing.",
-   "sources": [
-    "https://dev.to/build996/aider-free-open-source-ai-coding-agent-for-your-terminal-4dbd",
-    "https://aider.chat"
-   ],
-   "unsure": "aider.chat itself was not reached; the facts come from guides. The format of /tokens was not verified."
-  },
-  {
-   "id": "gemini",
-   "name": "Gemini CLI",
-   "bins": [
-    "gemini"
-   ],
-   "usageType": "request_count",
-   "note": "Signing in with a Google account is free for 60 requests/minute and 1,000 requests/day; Google AI Pro raises it to 1,500/day and Ultra to 2,000/day. An agent step can use several requests. A Gemini API key gets 250/day (Flash only).",
-   "sources": [
-    "https://geminicli.com/docs/resources/quota-and-pricing",
-    "https://developers.google.com/gemini-code-assist/resources/quotas"
-   ],
-   "unsure": "One docs mirror listed only the daily cap and another a different tier layout; these figures are the most consistent ones but may have changed."
+   "unsure": "No official Alibaba pricing page was reachable. Older posts still cite 2,000 requests/day, which is out of date. Coding Plan limits are unverified.",
+   "builtin": "qwen",
+   "reads": "Omarchy's qwen usage record: tokens by model and day from Qwen Code's local session transcripts. No plan limit can be read.",
+   "maintained": "Qwen Code 0.17.x is on npm and its changelog has entries through April 2026."
   },
   {
    "id": "vibe",
@@ -197,7 +57,10 @@
    "sources": [
     "https://mistral.ai/en/pricing",
     "https://help.mistral.ai/en/articles/698531-why-am-i-hitting-api-rate-limits-and-how-do-i-increase-them"
-   ]
+   ],
+   "builtin": "vibe",
+   "reads": "Omarchy's vibe usage record: tokens from Mistral Vibe's local session logs. Mistral publishes no numeric plan limit.",
+   "maintained": "Mistral announced Vibe 2.0 and sells it with Le Chat Pro and Team."
   },
   {
    "id": "droid",
@@ -211,7 +74,9 @@
     "https://docs.factory.ai/pricing",
     "https://docs.factory.ai/pricing/individuals"
    ],
-   "unsure": "The pricing page still shows an older Standard Tokens table that conflicts with the rolling-window description; the windows are from the newer text."
+   "unsure": "The pricing page still shows an older Standard Tokens table that conflicts with the rolling-window description; the windows are from the newer text.",
+   "reads": "`/limits` inside Droid (a credit-usage breakdown by window) and Factory's analytics API (/cost/me/query, personal consumption).",
+   "maintained": "Factory's changelog has frequent releases (0.94.0 and later)."
   },
   {
    "id": "auggie",
@@ -226,33 +91,9 @@
     "https://docs.augmentcode.com/models/token-based-pricing",
     "https://www.augmentcode.com/pricing"
    ],
-   "unsure": "Augment's docs describe both credits and token-based billing and its plans changed more than once; the exact unit may be dollars of usage, not credits."
-  },
-  {
-   "id": "pi",
-   "name": "Pi",
-   "bins": [
-    "pi"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "A free coding harness. Sign in with a subscription you already have (Claude, ChatGPT, Copilot) or use any provider's API key; pi adds no limit of its own.",
-   "sources": [
-    "https://unpkg.com/@mariozechner/pi-coding-agent@0.73.1/docs/providers.md",
-    "https://unpkg.com/@mariozechner/pi-coding-agent@0.73.1/README.md"
-   ]
-  },
-  {
-   "id": "omp",
-   "name": "Oh My Pi",
-   "bins": [
-    "omp"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "A free fork of Pi with LSP, subagents and hash-anchored edits. Same model: sign in with /login or use a provider's API key; it adds no limit of its own.",
-   "sources": [
-    "https://raw.githubusercontent.com/can1357/oh-my-pi/main/README.md",
-    "https://docs.ollama.com/integrations/oh-my-pi"
-   ]
+   "unsure": "Augment's docs describe both credits and token-based billing and its plans changed more than once; the exact unit may be dollars of usage, not credits.",
+   "reads": "`auggie --print --show-credits` prints a credit usage summary for a run; the web credit dashboard shows monthly totals. No documented command returns the remaining allowance.",
+   "maintained": "Augment publishes Auggie CLI release notes (0.5.x and later) and a public repo."
   },
   {
    "id": "dsh",
@@ -266,7 +107,10 @@
     "https://docs.ollama.com/integrations/deepseek-harness",
     "https://api-docs.deepseek.com/quick_start/pricing"
    ],
-   "unsure": "Developer preview, and the name dsh is also used by community CLIs. The granted-credit expiry window is not published."
+   "unsure": "Developer preview, and the name dsh is also used by community CLIs. The granted-credit expiry window is not published.",
+   "builtin": "deepseek",
+   "reads": "Omarchy's deepseek usage record: tokens from dsh session logs, plus DeepSeek's balance endpoint (purchasable balances are never shown by this plugin).",
+   "maintained": "DeepSeek's open harness is in developer preview with Ollama and DeepSeek integration docs."
   },
   {
    "id": "mcode",
@@ -279,21 +123,10 @@
    "sources": [
     "https://platform.minimax.io/docs/m-plan/usage-rules",
     "https://platform.minimax.io/docs/m-plan/minimax-code"
-   ]
-  },
-  {
-   "id": "commandcode",
-   "name": "Command Code",
-   "bins": [
-    "commandcode"
    ],
-   "usageType": "monthly_credits",
-   "note": "Credit-based: a small monthly plan plus pay-as-you-go top-ups (purchased credits roll over), with new users getting $10 free. Request limits reset each billing cycle; usage is on the Studio billing page.",
-   "sources": [
-    "https://commandcode.ai/docs/resources/pricing-limits",
-    "https://commandcode.ai/pricing"
-   ],
-   "unsure": "Plan prices conflict between the official page ($1/mo Go) and a third-party article ($10/mo), and per-model credit amounts were not found."
+   "builtin": "minimax",
+   "reads": "Omarchy's minimax usage record: the 5-hour and weekly windows (also `/status` in mcode and `mmx quota`).",
+   "maintained": "MiniMax's M Plan docs describe MiniMax Code with current usage rules (2026)."
   },
   {
    "id": "openclaw",
@@ -307,7 +140,24 @@
     "https://docs.openclaw.ai/reference/api-usage-costs",
     "https://docs.openclaw.ai/concepts/usage-tracking/index.html"
    ],
-   "unsure": "Whether reusing a Claude subscription is allowed is described as unsettled; check Anthropic's terms. Docs mirrors span several versions."
+   "unsure": "Whether reusing a Claude subscription is allowed is described as unsettled; check Anthropic's terms. Docs mirrors span several versions.",
+   "reads": "`openclaw status --usage` and `openclaw models status --json` read the quota windows of the providers it uses.",
+   "maintained": "OpenClaw's docs are versioned monthly (2026.7.1 seen)."
   }
- ]
+ ],
+ "dropped": {
+  "gemini": "removed at your request",
+  "aider": "archived/inactive; also nothing of its own to read",
+  "cline": "no CLI command or API reads ClinePass usage (dashboard only)",
+  "goose": "bring your own key: no plan limits or usage of its own to read",
+  "crush": "bring your own key: nothing to read (Charm Hyper limits unpublished)",
+  "kilo": "only an undocumented balance endpoint; prepaid balances aren't shown",
+  "openhands": "its credits API is a purchasable balance (cloud only)",
+  "plandex": "cloud shut down; nothing to read",
+  "codewhale": "no usage or limits documented",
+  "reasonix": "no usage or limits documented",
+  "pi": "bring your own key: nothing of its own to read",
+  "omp": "bring your own key: nothing of its own to read",
+  "commandcode": "only a third-party tool reads its usage; no official command or API"
+ }
 }

@@ -38,7 +38,7 @@
         "type": "string",
         "label": "Tab order",
         "defaultValue": "claude,antigravity,grok,codex,copilot,cursor,opencode,kimi,kiro,devin,amp,hermes",
-        "description": "Comma-separated agent ids, in the order you want the tabs. Ids you leave out are appended in default order; no tab is ever hidden. Ids: claude, antigravity, grok, codex, copilot, cursor, opencode, kimi, kiro, devin, amp, hermes, plus the agents in agents-catalog.json (cline, goose, qwen, crush, kilo, openhands, plandex, codewhale, reasonix, aider, gemini, vibe, droid, auggie, pi, omp, dsh, mcode, commandcode, openclaw)."
+        "description": "Comma-separated agent ids, in the order you want the tabs. Ids you leave out are appended in default order; no tab is ever hidden. Ids: claude, antigravity, grok, codex, copilot, cursor, opencode, kimi, kiro, devin, amp, hermes, plus the agents in agents-catalog.json (qwen, vibe, droid, auggie, dsh, mcode, openclaw)."
       },
       {
         "key": "notifyThreshold",

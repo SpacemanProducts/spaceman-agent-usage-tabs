@@ -11,8 +11,8 @@ export function loadCatalog(file = FILE) {
   try {
     const c = JSON.parse(fs.readFileSync(file, "utf8"));
     const agents = (Array.isArray(c.agents) ? c.agents : []).filter((a) => a && a.id && a.name && Array.isArray(a.bins) && USAGE_TYPES.includes(a.usageType));
-    return { types: c.types || {}, agents };
-  } catch { return { types: {}, agents: [] }; }
+    return { types: c.types || {}, agents, dropped: c.dropped || {} };
+  } catch { return { types: {}, agents: [], dropped: {} }; }
 }
 
 // The note shown on an agent's tab: what kind of usage it has, then the specifics. An entry flagged `unsure` says so.
