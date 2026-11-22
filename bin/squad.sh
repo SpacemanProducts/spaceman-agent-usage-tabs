@@ -6,6 +6,8 @@
 # The folder: $SQUAD_DIR, else the last one used. Otherwise a picker offers recent git repos, "Create a new project"
 # (in ~/Projects, git-initialized with a first commit) and "Browse..." for anywhere else.
 HERE=$(dirname "$(readlink -f "$0")")
+# Squad windows already open when this one started (the driver closes any others that show up later).
+SQUAD_WINDOWS_BEFORE=$(hyprctl clients -j 2>/dev/null | jq -r '[.[]|select(.class=="org.omarchy.squad")|.pid]|join(",")' 2>/dev/null)
 arg=${1:?usage: squad.sh <agent-cli>... | --install}
 export PATH="$HOME/.local/bin:$PATH"
 INSTALL='curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.sh | bash'
@@ -50,13 +52,20 @@ recent_repos() {
 }
 remember() { mkdir -p "$(dirname "$recent")"; { echo "$1"; grep -vxF "$1" "$recent" 2>/dev/null; } | head -8 >"$recent.new" && mv "$recent.new" "$recent"; }
 
+# The picker always shows (SQUAD_DIR is only an override for scripts), with the last repo preselected: Enter reuses it.
+last=""; [[ -f $state ]] && last=$(<"$state")
 dir=${SQUAD_DIR:-}
-[[ -z $dir && -f $state ]] && dir=$(<"$state")
 if ! is_repo "$dir"; then
   declare -A path_of=(); labels=()
   while IFS= read -r d; do l=$(nice "$d"); path_of[$l]=$d; labels+=("$l"); done < <(recent_repos)
+  selected=()
+  if is_repo "$last"; then
+    ll=$(nice "$last")
+    [[ -n ${path_of[$ll]:-} ]] || { path_of[$ll]=$last; labels=("$ll" "${labels[@]}"); }   # never drop it from the list
+    selected=(--selected "$ll")
+  fi
   new="+ Create a new project"; browse="Browse..."
-  choice=$(printf '%s\n' "${labels[@]}" "$new" "$browse" | sed '/^$/d' | gum choose --header "Squad: pick a git repo") || exit 130
+  choice=$(printf '%s\n' "${labels[@]}" "$new" "$browse" | sed '/^$/d' | gum choose "${selected[@]}" --header "Claude Squad: which git repo? (Enter = last one)") || exit 130
   if [[ $choice == "$new" ]]; then
     name=$(gum input --header "New project name" --placeholder "my-project") || exit 130
     [[ -n $name && $name != */* && $name != .* ]] || { echo "Use a plain folder name."; pause; exit 1; }
@@ -76,12 +85,6 @@ fi
 remember "$dir"
 mkdir -p "$(dirname "$state")" && printf '%s\n' "$dir" >"$state"
 
-# Every other agent: its own terminal in the same folder (the folder is settled now, so nothing asks again).
-# They start in the background: the launcher stays attached until its window closes, and waiting for it here would
-# leave this terminal sitting empty instead of running cs.
-for extra in "${clis[@]:1}"; do
-  (SQUAD_DIR="$dir" setsid omarchy-launch-tui --app-id=org.omarchy.squad bash "$0" "$extra" >/dev/null 2>&1 &)
-done
 # Say which repo this is about to open, and name the terminal after it.
 name=$(basename "$dir")
 printf '\033]0;%s\007' "$name"
@@ -94,6 +97,11 @@ node "$HERE/squad-profiles.mjs" "$HOME/.claude-squad/config.json" "${clis[@]}" 2
 
 # ONE window: squad-drive.py starts a session per agent inside cs (cs has no command line for that) and leaves you in
 # cs. Without python3 it just opens cs on the first agent.
+# It also closes any extra Claude Squad window that appeared since this one opened (there should be none: nothing here
+# opens another terminal), so only this window remains.
 DRIVER="${SQUAD_DRIVER:-$HERE/squad-drive.py}"
-if command -v python3 >/dev/null && [[ -f $DRIVER ]]; then exec python3 "$DRIVER" "$dir" "${clis[@]}"; fi
+if command -v python3 >/dev/null && [[ -f $DRIVER ]]; then
+  export SQUAD_WINDOWS_BEFORE="$SQUAD_WINDOWS_BEFORE"
+  exec python3 "$DRIVER" "$dir" "${clis[@]}"
+fi
 cd "$dir" && exec cs -p "${clis[0]}"

@@ -38,6 +38,7 @@ Panel {
   readonly property color green: greenFor(lightPanel)
   readonly property color amber: amberFor(lightPanel)
   readonly property color red: redFor(lightPanel)
+  function soft(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
   function meterColorFor(p, light) { return p > 0.85 ? redFor(light) : (p >= 0.6 ? amberFor(light) : greenFor(light)) }
   function meterColor(p) { return meterColorFor(p, lightPanel) }
   // Celebration colors: bright and white-heavy on dark themes, deeper (no white) on light ones.
@@ -672,7 +673,7 @@ Panel {
     }
     Rectangle {
       width: parent.width
-      height: Style.space(8)
+      height: Style.space(10)
       radius: height / 2
       color: root.track
       Rectangle {
@@ -705,14 +706,14 @@ Panel {
     implicitWidth: Style.space(34)
     implicitHeight: implicitWidth
     radius: Style.cornerRadius
-    color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, hbArea.containsMouse ? 0.3 : 0.12)
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, hbArea.containsMouse ? 0.12 : 0.05)
     border.width: hbArea.containsMouse ? Math.max(1, Style.hoverBorderWidth) : 0
-    border.color: Color.accent
+    border.color: root.soft(Color.accent, 0.8)
     Text {
       anchors.centerIn: parent
       textFormat: Text.PlainText
       text: hb.glyph
-      color: Color.accent
+      color: hbArea.containsMouse ? Color.accent : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.heading
     }
@@ -845,7 +846,7 @@ Panel {
           // ---------------- Tabs: full names, wrap rather than truncate
           Flow {
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(9)
 
             Repeater {
               id: chipRepeater
@@ -865,15 +866,15 @@ Panel {
                 // Outer border = session meter, inner fill = weekly meter
                 // (an agent with one meter uses it for both). Gray = no data.
                 readonly property var meters: ChipMeters.chipMeters(modelData)
-                readonly property color gray: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
+                readonly property color gray: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
                 readonly property color sessionTint: flashing ? flashColor : (meters.session < 0 ? gray : root.meterColor(meters.session))
                 readonly property color weeklyTint: flashing ? flashColor : (meters.weekly < 0 ? gray : root.meterColor(meters.weekly))
                 width: tabLabel.implicitWidth + Style.space(22)
                 height: tabLabel.implicitHeight + Style.space(14)
                 radius: Style.cornerRadius
                 color: "transparent"
-                border.width: selected ? 2 : 1
-                border.color: sessionTint
+                border.width: 1
+                border.color: root.soft(sessionTint, selected ? 0.85 : 0.5)
 
                 // The weekly meter fills the inside. The selected chip adds a
                 // foreground ring around that fill, so selection never depends
@@ -882,9 +883,9 @@ Panel {
                   anchors.fill: parent
                   anchors.margins: Style.space(3)
                   radius: Math.max(0, chip.radius - 1)
-                  color: Qt.rgba(chip.weeklyTint.r, chip.weeklyTint.g, chip.weeklyTint.b, chip.flashing ? 0.7 : (chip.selected ? 0.55 : 0.32))
+                  color: Qt.rgba(chip.weeklyTint.r, chip.weeklyTint.g, chip.weeklyTint.b, chip.flashing ? 0.7 : (chip.selected ? 0.34 : 0.16))
                   border.width: chip.selected ? 1 : 0
-                  border.color: root.foreground
+                  border.color: root.soft(root.foreground, 0.7)
                 }
 
                 Text {
@@ -1569,9 +1570,7 @@ Panel {
         }
       }
 
-      // ---------------- Make something: mirrors the stock panel's bottom section (separator, small
-      // label, a StarterTile), with just App: one third of the width, like a stock tile. It starts the
-      // selected agent on a new Omarchy app. Hidden for an agent with no CLI.
+      // ---------------- Launch: Claude Squad (main) and App (secondary). Hidden for an agent with no CLI.
       Column {
         id: starterRow
         visible: root.appCli !== ""
@@ -1581,28 +1580,24 @@ Panel {
         spacing: Style.space(12)
 
         PanelSeparator { foreground: root.foreground }
-        // The label on the left, the App tile on the right, on one row.
+        // LAUNCH: a heading, then Claude Squad as the main action and App as a smaller, quieter one beside it.
+        PanelSectionHeader { width: parent.width; text: "LAUNCH" }
         Item {
           id: makeRow
           width: parent.width
-          height: appTile.height
-          PanelSectionHeader {
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            width: parent.width - appTile.width * 2 - Style.space(20)
-            text: "MAKE SOMETHING"
-          }
-          // Squad: opens the agent picker just below. Same tile as App, to its left.
+          height: squadTile.height
+          // Claude Squad (primary): opens the agent picker just below.
           Rectangle {
             id: squadTile
-            anchors.right: appTile.left
-            anchors.rightMargin: Style.space(10)
-            width: appTile.width
-            height: appTile.height
+            anchors.left: parent.left
+            width: parent.width - appTile.width - Style.space(10)
+            height: squadRow.implicitHeight + Style.space(20)
             radius: Style.cornerRadius
-            color: squadArea.containsMouse || root.squadOpen ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14)
-                                                              : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, squadArea.containsMouse || root.squadOpen ? 0.32 : 0.2)
+            border.width: root.squadOpen ? Math.max(1, Style.hoverBorderWidth) : 0
+            border.color: Color.accent
             Row {
+              id: squadRow
               anchors.centerIn: parent
               spacing: Style.space(8)
               Text {
@@ -1617,7 +1612,7 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
                 text: "Claude Squad"
-                color: squadArea.containsMouse || root.squadOpen ? Color.accent : root.foreground
+                color: Color.accent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 font.bold: true
@@ -1626,35 +1621,25 @@ Panel {
             MouseArea { id: squadArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleSquad() }
             PanelToolTip { visible: squadArea.containsMouse; text: "Open Claude Squad with a session per agent you pick"; fontFamily: root.fontFamily }
           }
+          // App (secondary): smaller, outlined, quieter.
           Rectangle {
             id: appTile
             anchors.right: parent.right
-            width: (makeRow.width - Style.space(10) * 2) / 3
-            height: appRow.implicitHeight + Style.space(20)
+            anchors.verticalCenter: parent.verticalCenter
+            width: appLabel.implicitWidth + Style.space(28)
+            height: appLabel.implicitHeight + Style.space(14)
             radius: Style.cornerRadius
-            color: appArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14)
-                                         : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
-            Row {
-              id: appRow
+            color: appArea.containsMouse ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08) : "transparent"
+            border.width: 1
+            border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, appArea.containsMouse ? 0.5 : 0.28)
+            Text {
+              id: appLabel
               anchors.centerIn: parent
-              spacing: Style.space(8)
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: "\u{f08c6}"
-                color: Color.accent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.heading
-              }
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: "App"
-                color: appArea.containsMouse ? Color.accent : root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                font.bold: true
-              }
+              textFormat: Text.PlainText
+              text: "App"
+              color: appArea.containsMouse ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
             }
             MouseArea {
               id: appArea

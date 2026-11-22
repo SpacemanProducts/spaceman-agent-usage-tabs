@@ -10,7 +10,7 @@ spawnSync("git", ["init", "-q", repo]);
 // A stand-in for gum, driven by env vars, so the prompts can be tested without a terminal.
 fs.writeFileSync(path.join(bin, "gum"), `#!/bin/bash
 case "$1" in
-  choose) echo "$GUM_CHOOSE" ;;
+  choose) echo "$@" > "\${GUM_LOG:-/dev/null}.args"; cat >/dev/null; echo "$GUM_CHOOSE" ;;
   input) echo "$GUM_INPUT" ;;
   file) echo "$GUM_FILE" ;;
   confirm) [[ \${GUM_CONFIRM:-yes} == yes ]] ;;
@@ -36,8 +36,11 @@ r = run(["codex"], { SQUAD_DIR: repo });
 assert.match(r.stdout, /Claude Squad: codex in repo\n/, "says which repo it is about to open");
 assert.ok(r.stdout.includes("\u001b]0;repo\u0007"), "the terminal title is the repo name");
 assert.match(r.stdout, new RegExp(`cs -p codex in ${real(repo)}\\n$`));
-r = run();
-assert.match(r.stdout, new RegExp(`in ${real(repo)}\\n$`), "remembers the last repo");
+// The picker now ALWAYS shows, with the last repo preselected (Enter = reuse it). SQUAD_DIR is only a script override.
+const g0 = path.join(tmp, "gum0.log");
+r = run(["codex"], { SQUAD_DIR: "", GUM_CHOOSE: repo, GUM_LOG: g0 });
+assert.ok(fs.readFileSync(g0 + ".args", "utf8").includes(`--selected ${repo}`), "the last repo is preselected: " + fs.readFileSync(g0 + ".args", "utf8"));
+assert.match(r.stdout, new RegExp(`in ${real(repo)}\\n$`), "choosing the preselected repo reuses it");
 fs.rmSync(path.join(home, ".local/state"), { recursive: true });
 
 // no remembered repo: a picker starts in Projects and lists only git repos, hiding backups and desktop files
@@ -47,7 +50,7 @@ mk("my-app"); mk("nested/tool"); mk("plain-folder", false);
 for (const hidden of ["my-app-backup", "old.bak-20261121", "thing-2026-11-21", "app-before-merge", "app-prepublish", ".hidden", "Liftoff.desktop"]) mk(hidden);
 fs.writeFileSync(path.join(bin, "gum"), `#!/bin/bash
 case "$1" in
-  choose) cat > "$GUM_LOG"; echo "$GUM_CHOOSE" ;;
+  choose) echo "$@" > "\${GUM_LOG}.args"; cat > "$GUM_LOG"; echo "$GUM_CHOOSE" ;;
   input) echo "$GUM_INPUT" ;;
   file) echo "$GUM_FILE" ;;
   confirm) [[ \${GUM_CONFIRM:-yes} == yes ]] ;;
@@ -81,6 +84,9 @@ r = run(["claude"], { GUM_CHOOSE: "+ Create a new project", GUM_INPUT: "../escap
 assert.notEqual(r.status, 0); assert.ok(!fs.existsSync(path.join(home, "escape")));
 
 // several agents: ONE window; the driver gets the folder and every agent, and the profiles are written as the fallback
+// Any terminal launcher call here would be an extra window: this one records its calls so the test can prove there are none.
+const launchLog = path.join(tmp, "launch.log");
+fs.writeFileSync(path.join(bin, "omarchy-launch-tui"), `#!/bin/bash\necho "$*" >> "${launchLog}"\n`, { mode: 0o755 });
 const stub = path.join(tmp, "driver.py");
 fs.writeFileSync(stub, "import sys\nprint('driver', *sys.argv[1:])\n");
 fs.rmSync(path.join(home, ".local/state"), { recursive: true, force: true });
@@ -89,5 +95,7 @@ assert.match(r.stdout, new RegExp(`driver ${real(repo)} codex grok amp\\n$`), "o
 assert.match(r.stdout, /Claude Squad: codex,grok,amp in repo/);
 const prof = JSON.parse(fs.readFileSync(path.join(home, ".claude-squad/config.json"), "utf8")).profiles;
 assert.deepEqual(prof.map((p) => p.program), ["codex", "grok", "amp"], "profiles written as the fallback");
+await new Promise((res) => setTimeout(res, 800));
+assert.ok(!fs.existsSync(launchLog), "no extra terminal windows were opened: " + (fs.existsSync(launchLog) ? fs.readFileSync(launchLog, "utf8") : ""));
 fs.rmSync(tmp, { recursive: true });
 console.log("squad: all tests passed");

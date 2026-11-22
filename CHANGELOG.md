@@ -6,6 +6,18 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.12.0 - 2026-11-22
+- A quieter, more native-feeling panel: chips get thin, softer borders and a bit more space between them, the header buttons
+  are faint theme tints, and the usage bars are slightly thicker so they stand out. Meter colors stay on the chips.
+- The bottom row is now **LAUNCH**: **Claude Squad** is the main button and **App** a smaller, outlined one beside it.
+- Fix: Claude Squad opens ONE window. A leftover loop was still opening a helper terminal per extra agent, each running its own
+  `cs` (which clobbered the saved sessions and left the Antigravity one unsaved); it is gone, a test guards it, and any
+  stray Squad window is closed once the sessions are started.
+- The Claude Squad folder picker always shows, with the last repo preselected (Enter reuses it).
+- "COULD NOT CONFIRM" is gone: a session is started once its program runs, so an agent at a trust or login prompt counts. Only a
+  session that never came up, or whose program exits at once, says `COULD NOT START`. Detaching no longer depends on the agent
+  accepting a keypress. Screenshots retaken.
+
 ## 1.11.0 - 2026-11-22
 - **Claude Squad** button next to App: checks that `cs` is installed (one-click install if not), lets you tick agents, then
   opens ONE tiled window in a git repo folder and starts a `cs` session per agent in it (the plugin types the keys, since

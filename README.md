@@ -25,7 +25,7 @@ you have installed.
 ![The panel on the Claude Code tab](docs/screenshot.png)
 
 The header has the **+** (Omarchy's add-subscription flow), **>_** (start your default agent) and gear buttons; the
-tabs sit below it, then the selected agent's limits and models, and an **App** button at the bottom.
+tabs sit below it, then the selected agent's limits and models, and a **LAUNCH** row at the bottom: **Claude Squad** as the main button and a smaller **App** beside it.
 
 ## Quick start (new to Omarchy?)
 
@@ -152,11 +152,11 @@ chip, the bar number and the alerts use the worst meter across the accounts, and
 names the account that reset. The plugin only reads Omarchy's usage records through
 `omarchy-agent-account-list`; it never reads or stores credentials, and email addresses are dropped.
 
-Under a small **MAKE SOMETHING** label at the bottom, one **App** tile (an app-window icon and the word, the stock panel's tile style, a third of the width) starts the selected agent's own CLI
-on building a new Omarchy app, the same task the stock panel's App tile gives the default agent: Claude Code opens
-`claude`, Antigravity `agy`, Grok `grok`, and so on, in a terminal, started plainly (no permission-skipping flags)
-from `~/Work` when that folder exists. An agent with no CLI has no button; Kimi can't take a starting prompt, so it
-opens with the prompt on the clipboard. The hover tooltip names the agent.
+Under the **LAUNCH** heading at the bottom, the smaller, quieter **App** button (beside the main **Claude Squad** button) starts
+the selected agent's own CLI on building a new Omarchy app, the same task the stock panel's App tile gives the default agent:
+Claude Code opens `claude`, Antigravity `agy`, Grok `grok`, and so on, in a terminal, started plainly (no
+permission-skipping flags) from `~/Work` when that folder exists. An agent with no CLI has no button; Kimi can't take a
+starting prompt, so it opens with the prompt on the clipboard. The hover tooltip names the agent.
 
 ![Two accounts on one agent (illustrative: staged data)](docs/accounts.png)
 
@@ -166,22 +166,27 @@ opens with the prompt on the clipboard. The hover tooltip names the agent.
 
 ![Choosing agents for Claude Squad](docs/squad.png)
 
-The **Claude Squad** button (next to App) opens [Claude Squad](https://github.com/smtg-ai/claude-squad) (`cs`) with a
+The **Claude Squad** button (the main button under **LAUNCH**) opens [Claude Squad](https://github.com/smtg-ai/claude-squad) (`cs`) with a
 session for each agent you choose, all in **one window**. It first checks that `cs` is installed and offers a one-click
 install (it runs the project's install script in a terminal, so you see it). Then tick the agents and press **Run**.
 
-A single terminal opens in a git repo folder, shows which repo it is about to open, takes the repo's name as its title,
-and starts one `cs` session per ticked agent. `cs` has no command line for creating sessions, so the plugin types the
-keys for you (`n`, a name, Enter, then detach), running `cs -p <agent>` for each so every session keeps its own
-program, and leaves you in the session list. It needs `python3`, `tmux` and `git`; without Python it opens `cs` on the
-first agent only. The agents are also written as profiles in `~/.claude-squad/config.json` (your own profiles and
-`default_program` are left alone) as a fallback for a `cs` version that offers a profile picker; `cs` 1.0.20 does not
-show one.
+A single terminal opens, always shows a folder picker first (the last repo you used is preselected, so Enter reuses
+it), shows which repo it is about to open, takes the repo's name as its title, and starts one `cs` session per ticked
+agent. Only this one window ever appears: no helper terminals are opened, and if an extra Squad window shows up it is
+closed once the sessions are started. `cs` has no command line for creating sessions, so the plugin types the keys for you
+(`n`, a name, Enter, then detach), running `cs -p <agent>` for each so every session keeps its own program, and leaves you
+in the session list. It needs `python3`, `tmux` and `git`; without Python it opens `cs` on the first agent only.
 
-The folder is the last one used; the first time, a small picker offers your recent git repos (the ones you picked
-before, plus the repos in `~/Projects`, with backups and desktop files hidden), then **Create a new project** (a folder
-in `~/Projects` with git set up and a first commit), then **Browse...** for anywhere else (a plain folder gets `git init`
-after you confirm). The window opens tiled, like a normal terminal.
+A session counts as **started** once the agent's program is running in its tmux session, so an agent waiting on a trust or
+login prompt (Codex asking whether to trust the folder, say) is a successful start. The window says `COULD NOT START` only if
+the session never came up or its program exited at once. The agents are also written as profiles in
+`~/.claude-squad/config.json` (your own profiles and `default_program` are left alone) as a fallback for a `cs` version that
+offers a profile picker; `cs` 1.0.20 does not show one.
+
+The folder picker offers your recent git repos (the ones you picked before, plus the repos in `~/Projects`, with backups and
+desktop files hidden), then **Create a new project** (a folder in `~/Projects` with git set up and a first commit), then
+**Browse...** for anywhere else (a plain folder gets `git init` after you confirm). The window opens tiled, like a normal
+terminal.
 
 ### Tab order and the default agent
 
@@ -196,7 +201,9 @@ the agent in a terminal.
 
 The panel follows the active Omarchy theme live (switch themes and it changes with no restart): text, background and
 borders come from the theme's popup colors and icons from its accent. The green, amber and red meter colors, and the
-celebration colors, switch to deeper variants on a light theme so they stay readable.
+celebration colors, switch to deeper variants on a light theme so they stay readable. The chrome is kept quiet so the usage bars stand
+out: chip borders are soft and thin, the buttons are faint theme-colored tints, and the chips keep their green/amber/red meter
+color (the point of a chip) at a lower volume.
 
 ## Known gap: banked limit resets can't be read
 
