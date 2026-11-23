@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.27.2 - 2026-11-23
+- Devin's tab notes that SWE-2 Flash is free until Dec 4, so its quota meters staying at 0% is expected; the note disappears on its own afterward.
+
 ## 1.27.1 - 2026-11-23
 - Align Start-picker folder cards and names, keep usage rows aligned, and show full folder paths on hover.
 

@@ -357,6 +357,9 @@
   "copilot": {
    "freeNote": "Free plan: no premium requests; chat and completions each have a monthly limit (shown above)."
   },
+  "devin": {
+   "freeNote": "SWE-2 Flash is free until Dec 4 — quota meters don't move on it."
+  },
   "opencode": {
    "freeNote": "Free models have a daily request limit that isn't published.",
    "goNote": "Go ($10 a month): 20% per 5 hours, 50% per week, 100% per month. Shown as meters only if a Go key exists and OpenCode reports usage; no local source found yet. OpenCode's docs list these as $12 / $30 / $60 of usage, and the weekly cap is missing from some doc versions - verify.",

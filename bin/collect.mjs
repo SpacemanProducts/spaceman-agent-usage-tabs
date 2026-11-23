@@ -44,6 +44,8 @@ const PATH_DIRS = [
   "/usr/local/bin", "/usr/bin",
 ].filter(Boolean);
 const ENV = { ...process.env, PATH: PATH_DIRS.join(":") };
+// SWE-2 Flash is free on self-serve Devin plans until this moment; the Devin tab says so while it lasts.
+const DEVIN_FLASH_FREE_UNTIL = Date.UTC(2026, 11, 4, 18, 0);
 
 // Display order is the order you asked for.
 const AGENTS = [
@@ -254,6 +256,7 @@ for (const a of AGENTS) {
   const live = liveModels(a.id, { env: ENV, stateDir: OUT_DIR, onUnexpected });
   const plans = modelsConfig()?.plans || {};
   if (a.id === "copilot" && out.copilotFree && plans.copilot?.freeNote) out.planNote = plans.copilot.freeNote;
+  if (a.id === "devin" && /free/i.test(String(out.plan || "")) && Date.now() < DEVIN_FLASH_FREE_UNTIL && plans.devin?.freeNote) out.planNote = plans.devin.freeNote;
   if (a.id === "kiro") {
     const k = planInfo("kiro", { env: ENV, stateDir: OUT_DIR, onUnexpected });
     out.signedIn = !!k;
