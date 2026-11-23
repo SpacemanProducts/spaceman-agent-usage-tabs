@@ -132,11 +132,11 @@ Panel {
   Timer { id: testAngryTimer; interval: 8000; onTriggered: root.testAngry = false }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
-  // Settings (the gear), + (add an account) and CS (Claude Squad) each open as their own screen: the chips and usage are
+  // Settings (the gear), + (add an account), >_ (start the default agent) and CS (Claude Squad) each open as their own screen: the chips and usage are
   // hidden and the header has a Back button. Only one is open at a time.
-  readonly property bool subView: squadOpen || addOpen || settingsOpen
-  function leaveSubView() { squadOpen = false; addOpen = false; settingsOpen = false }
-  function openSettings() { settingsOpen = true; squadOpen = false; addOpen = false }
+  readonly property bool subView: squadOpen || addOpen || settingsOpen || agentHereOpen
+  function leaveSubView() { squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false }
+  function openSettings() { settingsOpen = true; squadOpen = false; addOpen = false; agentHereOpen = false }
   readonly property bool showDetail: !!agent && !settingsOpen && !subView
   // An agent with two or more accounts lists each one instead of a single set of limits.
   readonly property bool hasAccounts: !!agent && Array.isArray(agent.accounts) && agent.accounts.length > 1
@@ -208,6 +208,7 @@ Panel {
     for (var i = 0; i < rawAgents.length; i++) if (isDefaultAgent(rawAgents[i])) return rawAgents[i]
     return agents.length > 0 ? agents[0] : null
   }
+  readonly property string defaultAgentName: barAgent && barAgent.name ? barAgent.name : "the default agent"
   readonly property real barValue: {
     if (!barAgent) return -1
     var m = ChipMeters.chipMeters(barAgent)
@@ -383,14 +384,34 @@ Panel {
   // add-account flow for it in a terminal. (It used to jump straight to the selected tab's provider.)
   property bool addOpen: false
   readonly property var addProviders: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "grok", name: "Grok" }]
-  function toggleAdd() { addOpen = !addOpen; if (addOpen) { squadOpen = false; settingsOpen = false } }
+  function toggleAdd() { addOpen = !addOpen; if (addOpen) { squadOpen = false; settingsOpen = false; agentHereOpen = false } }
   function addSubscription(provider) {
     if (!root.bar || !provider) return
     root.bar.run("omarchy-launch-floating-terminal-with-presentation bash " + pluginDir + "/bin/add-account.sh " + provider)
     close()
   }
-  function launchDefaultAgent() {
-    if (root.bar) root.bar.run("omarchy-agent --pick")
+  // The header >_ button opens its own screen: the same folder picker as CS, then Start runs the default agent in a tiled
+  // terminal there (bin/agent-here.sh, in the stock agent window class org.omarchy.agent). The bar's right-click and the
+  // keyboard shortcut are Omarchy's own and still start it at once, with no picker.
+  property bool agentHereOpen: false
+  function toggleAgentHere() {
+    agentHereOpen = !agentHereOpen
+    if (agentHereOpen) {
+      squadOpen = false; addOpen = false; settingsOpen = false
+      squadRepo = ""; squadNewName = ""
+      if (!repoLister.running) repoLister.running = true
+      if (!zenityCheck.running) zenityCheck.running = true
+    }
+  }
+  readonly property bool agentHereReady: squadRepo !== "" || squadNewName !== ""
+  function agentHereCommand() {
+    var env = squadNewName !== "" ? "AGENT_NEW=" + squadNewName : "AGENT_DIR=" + squadRepo
+    return ["omarchy-launch-tui", "--app-id=org.omarchy.agent", "env", env, "bash", pluginDir + "/bin/agent-here.sh"]
+  }
+  function launchAgentHere() {
+    if (!agentHereReady) return
+    squadLauncher.command = agentHereCommand()
+    squadLauncher.running = true
     close()
   }
 
@@ -417,7 +438,7 @@ Panel {
   Process { id: zenityCheck; command: ["bash", "-c", "command -v zenity >/dev/null"]; onExited: function(code) { root.squadZenity = code === 0 } }
   Process {
     id: folderBrowser
-    command: ["zenity", "--file-selection", "--directory", "--title=Choose a folder for Claude Squad", "--filename=" + root.home + "/Projects/"]
+    command: ["zenity", "--file-selection", "--directory", "--title=Choose a folder", "--filename=" + root.home + "/Projects/"]
     stdout: StdioCollector { onStreamFinished: { var p = String(text).trim(); if (p !== "") { root.squadRepo = p; root.squadNewName = "" } } }
   }
   Process {
@@ -438,7 +459,7 @@ Panel {
   }
   function toggleSquad() {
     squadOpen = !squadOpen
-    if (squadOpen) { addOpen = false; settingsOpen = false }
+    if (squadOpen) { addOpen = false; settingsOpen = false; agentHereOpen = false }
     if (squadOpen) {
       squadRepo = ""; squadNewName = ""
       if (!repoLister.running) repoLister.running = true
@@ -543,7 +564,7 @@ Panel {
     onTriggered: if (root.autoOpened && root.opened) root.close()
   }
 
-  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false } else {
+  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false; agentHereOpen = false } else {
     daysOpen = false
     modelsExpanded = false
     settingsOpen = false
@@ -667,8 +688,8 @@ Panel {
     function testCelebration(): string { root.fireTest("claude"); return "ok" }
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
-    // Test hook: show exactly one screen: "main", "settings", "add" or "squad" (used to retake the README screenshots).
-    function view(name: string): string { root.leaveSubView(); if (name === "settings") root.openSettings(); else if (name === "add") root.toggleAdd(); else if (name === "squad") root.toggleSquad(); return name }
+    // Test hook: show exactly one screen: "main", "settings", "add", "squad" or "agent" (used to retake the README screenshots).
+    function view(name: string): string { root.leaveSubView(); if (name === "settings") root.openSettings(); else if (name === "add") root.toggleAdd(); else if (name === "squad") root.toggleSquad(); else if (name === "agent") root.toggleAgentHere(); return name }
     function settings(): string { if (root.settingsOpen) root.settingsOpen = false; else root.openSettings(); return root.settingsOpen ? "open" : "closed" }
     // Test hook: show the picker as if cs were missing (or present) without running the check.
     function squadPreview(state: string): string { root.squadOpen = true; root.squadHasCs = state; return state }
@@ -680,6 +701,8 @@ Panel {
     function squadSetNew(n: string): string { root.squadNewName = n; root.squadRepo = ""; return root.squadNewName }
     function squadCmd(): string { return root.squadReady ? JSON.stringify(root.squadCommand()) : "not ready" }
     function squadState(): string { return JSON.stringify({ open: root.squadOpen, repos: root.squadRepos, repo: root.squadRepo, create: root.squadNewName, cs: root.squadHasCs, zenity: root.squadZenity }) }
+    // Test hook for the agent screen (the header terminal button): the command Start would run.
+    function agentCmd(): string { return root.agentHereReady ? JSON.stringify(root.agentHereCommand()) : "not ready" }
     function squad(): string { root.toggleSquad(); return root.squadOpen ? "open" : "closed" }
     function resetOrder(): string { root.resetOrder(); return "ok" }
     // Test hook: drop chip `from` as if it were dragged onto chip `to` (same hit-testing as a real drag).
@@ -856,6 +879,100 @@ Panel {
   }
 
   // The small tinted square the stock panel uses for its hero-corner buttons (34 wide).
+  // The folder step, shared by the CS screen and the agent screen (the header terminal button): recent repos (the last one
+  // used preselected), then "+ New project", then "Browse...". It sets root.squadRepo / root.squadNewName.
+  component FolderPicker: Column {
+    id: fp
+    property bool forSquad: true
+    spacing: Style.space(14)
+    PanelSectionHeader { width: parent.width; text: "FOLDER" }
+    Flow {
+      width: parent.width
+      spacing: Style.space(6)
+      Repeater {
+        model: root.squadRepos
+        Rectangle {
+          id: repoChip
+          required property string modelData
+          readonly property bool on: root.squadRepo === modelData
+          width: repoLabel.implicitWidth + Style.space(22)
+          height: repoLabel.implicitHeight + Style.space(14)
+          radius: Style.cornerRadius
+          color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
+                    : (repoArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06))
+          border.width: on ? 1 : 0
+          border.color: Color.accent
+          Text {
+            id: repoLabel
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: (repoChip.on ? "\u2713 " : "") + root.shortPath(repoChip.modelData)
+            color: repoChip.on ? Color.accent : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: repoChip.on
+          }
+          MouseArea { id: repoArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.squadRepo = repoChip.modelData; root.squadNewName = "" } }
+          PanelToolTip { visible: repoArea.containsMouse; text: repoChip.modelData; fontFamily: root.fontFamily }
+        }
+      }
+      // A new project: asks for a name in a small dialog; it is made in ~/Projects with git set up.
+      Rectangle {
+        id: newChip
+        visible: root.squadZenity
+        readonly property bool on: root.squadNewName !== ""
+        width: newLabel.implicitWidth + Style.space(22)
+        height: newLabel.implicitHeight + Style.space(14)
+        radius: Style.cornerRadius
+        color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22) : (newArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent")
+        border.width: 1
+        border.color: on ? Color.accent : root.soft(root.foreground, 0.3)
+        Text {
+          id: newLabel
+          anchors.centerIn: parent
+          textFormat: Text.PlainText
+          text: newChip.on ? "\u2713 New: " + root.squadNewName : "+ New project"
+          color: newChip.on ? Color.accent : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        MouseArea { id: newArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { if (!nameAsker.running) nameAsker.running = true } }
+        PanelToolTip { visible: newArea.containsMouse; text: "Make a new project in ~/Projects, with git set up"; fontFamily: root.fontFamily }
+      }
+      // Browse: any other folder, through a normal folder chooser.
+      Rectangle {
+        id: browseChip
+        visible: root.squadZenity
+        width: browseLabel.implicitWidth + Style.space(22)
+        height: browseLabel.implicitHeight + Style.space(14)
+        radius: Style.cornerRadius
+        color: browseArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent"
+        border.width: 1
+        border.color: root.soft(root.foreground, 0.3)
+        Text {
+          id: browseLabel
+          anchors.centerIn: parent
+          textFormat: Text.PlainText
+          text: "Browse..."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        MouseArea { id: browseArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { if (!folderBrowser.running) folderBrowser.running = true } }
+        PanelToolTip { visible: browseArea.containsMouse; text: fp.forSquad ? "Pick any other folder (a plain folder is git-initialized after you confirm)" : "Pick any other folder"; fontFamily: root.fontFamily }
+      }
+    }
+    Text {
+      visible: root.squadRepos.length === 0 && root.squadRepo === "" && root.squadNewName === ""
+      width: parent.width
+      textFormat: Text.PlainText
+      wrapMode: Text.WordWrap
+      text: "No git repos found in ~/Projects yet. Make a new project or browse to a folder."
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+  }
   component HeaderButton: Rectangle {
     id: hb
     property string glyph: ""
@@ -967,7 +1084,7 @@ Panel {
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
-                text: root.addOpen ? "Add an account" : (root.settingsOpen ? "Settings" : "Claude Squad")
+                text: root.addOpen ? "Add an account" : (root.settingsOpen ? "Settings" : (root.agentHereOpen ? "Start " + root.defaultAgentName : "Claude Squad"))
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -990,7 +1107,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(6)
               HeaderButton { glyph: "\u{f0415}"; tip: "Add a subscription"; onClicked: root.toggleAdd() }
-              HeaderButton { glyph: "\u{f07b7}"; tip: "Start the default agent"; onClicked: root.launchDefaultAgent() }
+              HeaderButton { glyph: "\u{f07b7}"; tip: "Start the default agent in a folder"; onClicked: root.toggleAgentHere() }
               HeaderButton { glyph: "CS"; tip: "Claude Squad"; onClicked: root.toggleSquad() }
               Rectangle {
               id: gearButton
@@ -1135,6 +1252,36 @@ Panel {
             }
           }
 
+          // ---------------- Agent view (the >_ header button): pick the folder, then Start runs the default agent there.
+          Column {
+            id: agentHereView
+            visible: root.agentHereOpen
+            width: parent.width
+            spacing: Style.space(14)
+            FolderPicker { width: parent.width; forSquad: false }
+            Rectangle {
+              id: startTile
+              readonly property bool ready: root.agentHereReady
+              width: startLabel.implicitWidth + Style.space(28)
+              height: startLabel.implicitHeight + Style.space(14)
+              radius: Style.cornerRadius
+              opacity: ready ? 1 : 0.4
+              color: startArea.containsMouse && ready ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
+              Text {
+                id: startLabel
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Start " + root.defaultAgentName
+                color: Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
+              MouseArea { id: startArea; anchors.fill: parent; enabled: startTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.launchAgentHere() }
+              PanelToolTip { visible: startArea.containsMouse; text: "Opens the default agent in a tiled terminal in this folder"; fontFamily: root.fontFamily }
+            }
+          }
+
           // ---------------- Claude Squad view (the CS header button): replaces the panel contents with just the Squad
           // options: pick the agents, pick the folder, Run. The Back button in the header returns to the normal view.
           Column {
@@ -1216,93 +1363,7 @@ Panel {
               }
             }
 
-              PanelSectionHeader { width: parent.width; text: "FOLDER" }
-              Flow {
-                width: parent.width
-                spacing: Style.space(6)
-                Repeater {
-                  model: root.squadRepos
-                  Rectangle {
-                    id: repoChip
-                    required property string modelData
-                    readonly property bool on: root.squadRepo === modelData
-                    width: repoLabel.implicitWidth + Style.space(22)
-                    height: repoLabel.implicitHeight + Style.space(14)
-                    radius: Style.cornerRadius
-                    color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
-                              : (repoArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06))
-                    border.width: on ? 1 : 0
-                    border.color: Color.accent
-                    Text {
-                      id: repoLabel
-                      anchors.centerIn: parent
-                      textFormat: Text.PlainText
-                      text: (repoChip.on ? "\u2713 " : "") + root.shortPath(repoChip.modelData)
-                      color: repoChip.on ? Color.accent : root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      font.bold: repoChip.on
-                    }
-                    MouseArea { id: repoArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.squadRepo = repoChip.modelData; root.squadNewName = "" } }
-                    PanelToolTip { visible: repoArea.containsMouse; text: repoChip.modelData; fontFamily: root.fontFamily }
-                  }
-                }
-                // A new project: asks for a name in a small dialog; it is made in ~/Projects with git set up.
-                Rectangle {
-                  id: newChip
-                  visible: root.squadZenity
-                  readonly property bool on: root.squadNewName !== ""
-                  width: newLabel.implicitWidth + Style.space(22)
-                  height: newLabel.implicitHeight + Style.space(14)
-                  radius: Style.cornerRadius
-                  color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22) : (newArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent")
-                  border.width: 1
-                  border.color: on ? Color.accent : root.soft(root.foreground, 0.3)
-                  Text {
-                    id: newLabel
-                    anchors.centerIn: parent
-                    textFormat: Text.PlainText
-                    text: newChip.on ? "\u2713 New: " + root.squadNewName : "+ New project"
-                    color: newChip.on ? Color.accent : root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                  MouseArea { id: newArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { if (!nameAsker.running) nameAsker.running = true } }
-                  PanelToolTip { visible: newArea.containsMouse; text: "Make a new project in ~/Projects, with git set up"; fontFamily: root.fontFamily }
-                }
-                // Browse: any other folder, through a normal folder chooser.
-                Rectangle {
-                  id: browseChip
-                  visible: root.squadZenity
-                  width: browseLabel.implicitWidth + Style.space(22)
-                  height: browseLabel.implicitHeight + Style.space(14)
-                  radius: Style.cornerRadius
-                  color: browseArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent"
-                  border.width: 1
-                  border.color: root.soft(root.foreground, 0.3)
-                  Text {
-                    id: browseLabel
-                    anchors.centerIn: parent
-                    textFormat: Text.PlainText
-                    text: "Browse..."
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                  MouseArea { id: browseArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { if (!folderBrowser.running) folderBrowser.running = true } }
-                  PanelToolTip { visible: browseArea.containsMouse; text: "Pick any other folder (a plain folder is git-initialized after you confirm)"; fontFamily: root.fontFamily }
-                }
-              }
-              Text {
-                visible: root.squadRepos.length === 0 && root.squadRepo === "" && root.squadNewName === ""
-                width: parent.width
-                textFormat: Text.PlainText
-                wrapMode: Text.WordWrap
-                text: "No git repos found in ~/Projects yet. Make a new project or browse to a folder."
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
+              FolderPicker { width: parent.width }
 
             Rectangle {
               id: runTile

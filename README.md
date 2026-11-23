@@ -25,7 +25,7 @@ you have installed.
 ![The panel on the Claude Code tab](docs/screenshot.png)
 
 The header has four square buttons, all the same style: **+** (add an account), **>_** (start your default agent), **CS** (Claude
-Squad) and the gear (settings). **+**, **CS** and the gear each open as **their own screen**: the agent chips and usage meters are
+Squad) and the gear (settings). All four open as **their own screen**: the agent chips and usage meters are
 hidden, only that screen's options are shown, and a **Back** button in the header returns to the normal view.
 
 ## Quick start (new to Omarchy?)
@@ -177,6 +177,15 @@ an account for that agent.
 ![Two accounts on one agent (illustrative: staged data)](docs/accounts.png)
 
 *Two accounts on Claude Code, with made-up labels and numbers: this machine has one account per provider, so this view is staged.*
+
+### Start the default agent in a folder
+
+The **>_** button opens a screen with the same folder picker as **CS**: your recent git repos first (the last one used is
+preselected), then **+ New project** (made in `~/Projects` with git set up), then **Browse...** (any folder; a plain folder is used as it
+is, no `git init`). **Start** opens your default agent (the first tab) in a normal tiled terminal in that folder, the same window
+Omarchy's own launcher uses. The two buttons share one list, so a repo you open from either becomes the last one in both.
+
+The robot's **right-click** on the bar and the **keyboard shortcut** are unchanged: they start the default agent at once, with no picker.
 
 ### Claude Squad
 

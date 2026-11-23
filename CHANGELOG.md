@@ -6,6 +6,12 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.20.0 - 2026-11-22
+- The header **>_** button opens its own screen with a Back button and the same folder picker as CS: recent repos first with the last
+  one preselected, then + New project, then Browse. Start opens the default agent in a tiled terminal in that folder
+  (`bin/agent-here.sh`, tested in `bin/agent-here.test.mjs`). The robot's right-click and the keyboard shortcut still start it at
+  once, with no picker. The folder list is shared with CS (`bin/folders.sh`), so the last repo used is the same in both.
+
 ## 1.19.0 - 2026-11-22
 - OpenClaw and Hermes are gone: no tab, reader, fix button or default-agent entry. Both are personal assistants with no
   limits of their own, and the provider quotas they pass on already show in those providers' own tabs. The reason is
