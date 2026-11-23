@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.26.0 - 2026-11-23
+- Restyle the Start picker as a fixed folder grid, with compact usage text, recent-activity sorting, persistent pins, and a restorable Hidden folders view.
+
 ## 1.25.1 - 2026-11-23
 - Keep Copilot's per-folder usage visible in the Start picker, and don't show usage under "No project".
 

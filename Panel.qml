@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "chip-meters.js" as ChipMeters
 import "tab-order.js" as TabOrder
@@ -16,6 +17,7 @@ Panel {
   moduleName: "spaceman.agent-usage-tabs"
   ipcTarget: "spaceman.agent-usage-tabs"
   manageIpc: false
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
   // Everything follows the active Omarchy theme live: text, background and border come from the
   // theme's popup colors, icons from its accent. Nothing here is a fixed color except the meter and
@@ -26,6 +28,10 @@ Panel {
   readonly property color dim: Qt.tint(foreground, Qt.rgba(panelBackground.r, panelBackground.g, panelBackground.b, 0.4))
   readonly property color track: Style.selectedFillFor(foreground, Color.accent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  function safeTooltipText(value) {
+    return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  }
+  function pluginText(key) { return strings.t(key) }
 
   // Meter colors: green < 60%, amber 60-85%, red > 85%.
   // Each has a bright set for dark backgrounds and a deeper set for light ones (all >= 4.8:1
@@ -396,6 +402,88 @@ Panel {
   property bool agentHereOpen: false
   property var folderUsageRecords: []
   property double folderUsageRefreshedAt: 0
+  property var folderPins: []
+  property var hiddenFolderTimes: ({})
+  property bool folderPreferencesReady: false
+  readonly property bool folderPreferenceBusy: folderPreferenceAction.running
+  property bool showHiddenFolders: false
+  function folderActivityByPath() {
+    var latest = ({})
+    var now = Date.now(), cutoff = now - 7 * 86400000
+    if (folderUsageRefreshedAt <= 0 || folderUsageRefreshedAt > now + 60000 || now - folderUsageRefreshedAt > 7 * 86400000) return latest
+    folderUsageRecords.forEach(function(record) {
+      if (!record || typeof record !== "object" || typeof record.folder !== "string") return
+      var at = Number(record.time)
+      if (!isFinite(at) || at < cutoff || at > now + 60000) return
+      latest[record.folder] = Math.max(Number(latest[record.folder]) || 0, at)
+    })
+    return latest
+  }
+  function folderIsPinned(folder) { return folderPins.indexOf(folder) >= 0 }
+  function folderIsManuallyHidden(folder, activity) {
+    var hiddenAt = Number(hiddenFolderTimes[folder])
+    return isFinite(hiddenAt) && (Number(activity[folder]) || 0) <= hiddenAt
+  }
+  function folderCandidates() {
+    var folders = squadRepos.slice()
+    Object.keys(folderActivityByPath()).concat(folderPins, Object.keys(hiddenFolderTimes)).forEach(function(folder) {
+      if (folder && folder.charAt(0) === "/" && folders.indexOf(folder) < 0) folders.push(folder)
+    })
+    return folders
+  }
+  function ensureVisibleStartFolder() {
+    if (!agentHereOpen || squadNewName !== "" || squadRepo === home) return
+    var folders = startFolderRepos()
+    if (folders.indexOf(squadRepo) < 0) squadRepo = folders.length ? folders[0] : home
+  }
+  function startFolderRepos() {
+    if (!folderPreferencesReady) return []
+    var activity = folderActivityByPath(), candidates = folderCandidates()
+    var indexes = ({})
+    candidates.forEach(function(folder, index) { indexes[folder] = index })
+    var folders = candidates.filter(function(folder) {
+      if (!folder || folderIsManuallyHidden(folder, activity)) return false
+      return folderIsPinned(folder) || Number(activity[folder]) > 0
+    })
+    folders.sort(function(a, b) {
+      var aPinned = folderIsPinned(a), bPinned = folderIsPinned(b)
+      if (aPinned !== bPinned) return aPinned ? -1 : 1
+      var recent = (Number(activity[b]) || 0) - (Number(activity[a]) || 0)
+      return recent || indexes[a] - indexes[b] || a.localeCompare(b)
+    })
+    return folders
+  }
+  function hiddenFolderRepos() {
+    if (!folderPreferencesReady) return []
+    var activity = folderActivityByPath(), candidates = folderCandidates()
+    var indexes = ({})
+    candidates.forEach(function(folder, index) { indexes[folder] = index })
+    var folders = candidates.filter(function(folder) {
+      return folderIsManuallyHidden(folder, activity) || (!folderIsPinned(folder) && !(Number(activity[folder]) > 0))
+    })
+    folders.sort(function(a, b) {
+      var recent = (Number(activity[b]) || 0) - (Number(activity[a]) || 0)
+      return recent || indexes[a] - indexes[b] || a.localeCompare(b)
+    })
+    return folders
+  }
+  function runFolderPreferenceAction(args) {
+    if (!folderPreferencesReady || folderPreferenceAction.running) return
+    folderPreferenceAction.command = ["python3", pluginDir + "/bin/folder-preferences.py"].concat(args)
+    folderPreferenceAction.running = true
+  }
+  function toggleFolderPin(folder) {
+    runFolderPreferenceAction([folderIsPinned(folder) ? "unpin" : "pin", folder])
+  }
+  function hideFolder(folder) {
+    var activity = folderActivityByPath()
+    runFolderPreferenceAction(["hide", folder, String(Number(activity[folder]) || 0)])
+  }
+  function restoreFolder(folder) {
+    var activity = folderActivityByPath()
+    var needsPin = !folderIsPinned(folder) && !(Number(activity[folder]) > 0)
+    runFolderPreferenceAction(needsPin ? ["restore", folder, "--pin"] : ["restore", folder])
+  }
   function folderUsageEntries(folder) {
     if (folderUsageRefreshedAt <= 0 || folderUsageRefreshedAt > Date.now() + 60000 || Date.now() - folderUsageRefreshedAt > 7 * 86400000) return []
     var totals = ({})
@@ -424,16 +512,19 @@ Panel {
       var amount = totals[id].amount, unit = totals[id].unit
       var name = id
       for (var i = 0; i < rawAgents.length; i++) if (rawAgents[i].id === id) { name = rawAgents[i].name || id; break }
+      var shortNames = { claude: "Claude", codex: "Codex", copilot: "Copilot", grok: "Grok", devin: "Devin", opencode: "OpenCode" }
+      if (shortNames[id]) name = shortNames[id]
       var value
       if (unit === "AIC") value = (amount < 10 ? amount.toFixed(2) : amount.toFixed(1)).replace(/\.?0+$/, "")
       else if (amount >= 1000000) value = (amount / 1000000).toFixed(1).replace(/\.0$/, "") + "M"
       else if (amount >= 1000) value = (amount / 1000).toFixed(1).replace(/\.0$/, "") + "k"
       else value = String(Math.round(amount))
-      return { id: id, text: name + " " + value + " " + unit }
+      return { id: id, text: name + " " + value + (unit === "AIC" ? " AIC" : "") }
     })
   }
   function refreshFolderUsage() {
     if (!folderUsageRefresh.running) folderUsageRefresh.running = true
+    if (!folderPreferencesRead.running) folderPreferencesRead.running = true
   }
   function toggleAgentHere() {
     agentHereOpen = !agentHereOpen
@@ -489,6 +580,7 @@ Panel {
         var list = String(text).split("\n").filter(function(l) { return l.trim() !== "" })
         root.squadRepos = list
         if (root.squadRepo === "" && root.squadNewName === "" && list.length > 0) root.squadRepo = list[0]   // the last one used
+        root.ensureVisibleStartFolder()
       }
     }
   }
@@ -498,6 +590,49 @@ Panel {
     stderr: StdioCollector { id: folderUsageRefreshErr }
     onExited: function(code) {
       if (code !== 0) console.warn("usage-tabs: folder usage refresh failed: " + String(folderUsageRefreshErr.text).trim())
+    }
+  }
+  Process {
+    id: folderPreferencesRead
+    command: ["python3", pluginDir + "/bin/folder-preferences.py", "list"]
+    stdout: StdioCollector { id: folderPreferencesOutput }
+    stderr: StdioCollector { id: folderPreferencesReadErr }
+    onExited: function(code) {
+      if (code !== 0) {
+        root.folderPreferencesReady = false
+        console.warn("usage-tabs: folder preferences couldn't be read: " + String(folderPreferencesReadErr.text).trim())
+        return
+      }
+      try {
+        var data = JSON.parse(String(folderPreferencesOutput.text || ""))
+        if (!data || !Array.isArray(data.pinned) || !data.hidden || typeof data.hidden !== "object" || Array.isArray(data.hidden))
+          throw new Error("invalid preferences")
+        if (data.pinned.some(function(folder) { return typeof folder !== "string" || folder.charAt(0) !== "/" }))
+          throw new Error("invalid pinned folder path")
+        var hidden = ({})
+        Object.keys(data.hidden).forEach(function(folder) {
+          var at = Number(data.hidden[folder])
+          if (folder.charAt(0) !== "/" || !isFinite(at) || at < 0) throw new Error("invalid hidden folder")
+          hidden[folder] = at
+        })
+        root.folderPins = data.pinned
+        root.hiddenFolderTimes = hidden
+        root.folderPreferencesReady = true
+        root.ensureVisibleStartFolder()
+      } catch (e) {
+        root.folderPreferencesReady = false
+        console.warn("usage-tabs: folder preferences couldn't be parsed: " + String(e))
+      }
+    }
+  }
+  Process {
+    id: folderPreferenceAction
+    command: []
+    running: false
+    stderr: StdioCollector { id: folderPreferenceActionErr }
+    onExited: function(code) {
+      if (code !== 0) console.warn("usage-tabs: folder preference update failed: " + String(folderPreferenceActionErr.text).trim())
+      else if (!folderPreferencesRead.running) folderPreferencesRead.running = true
     }
   }
   FileView {
@@ -510,9 +645,11 @@ Panel {
         var data = JSON.parse(String(text() || ""))
         root.folderUsageRecords = Array.isArray(data.records) ? data.records : []
         root.folderUsageRefreshedAt = Number(data.refreshedAt) || 0
+        root.ensureVisibleStartFolder()
       } catch (e) {
         root.folderUsageRecords = []
         root.folderUsageRefreshedAt = 0
+        root.ensureVisibleStartFolder()
       }
     }
     onLoadFailed: { root.folderUsageRecords = []; root.folderUsageRefreshedAt = 0 }
@@ -981,98 +1118,127 @@ Panel {
   // The small tinted square the stock panel uses for its hero-corner buttons (34 wide).
   // The folder step, shared by the CS screen and the agent screen (the header terminal button): recent repos (the last one
   // used preselected), then "+ New project", then "Browse...". It sets root.squadRepo / root.squadNewName.
-  component FolderUsageLine: Row {
+  component FolderUsageLine: Column {
     id: usageLine
     property var entries: []
     property bool active: true
     visible: active && entries.length > 0
-    spacing: Style.space(4)
+    spacing: Style.space(2)
     Text {
-      id: primaryUsage
-      width: Math.min(implicitWidth, usageLine.entries.length > 1 ? usageLine.width * 0.52 : usageLine.width)
+      width: usageLine.width
       textFormat: Text.PlainText
       text: usageLine.entries.length ? usageLine.entries[0].text : ""
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
+      font.bold: true
       elide: Text.ElideRight
       maximumLineCount: 1
     }
     Text {
-      width: Math.max(0, usageLine.width - primaryUsage.width - usageLine.spacing)
+      width: usageLine.width
       visible: usageLine.entries.length > 1
       textFormat: Text.PlainText
       text: usageLine.entries.slice(1).map(function(item) { return item.text }).join(" · ")
       color: root.dim
       font.family: root.fontFamily
-      font.pixelSize: Style.font.caption * 0.9
-      elide: Text.ElideRight
+      font.pixelSize: Style.font.caption * 0.85
+      fontSizeMode: Text.HorizontalFit
+      minimumPixelSize: Style.font.caption * 0.65
+      wrapMode: Text.NoWrap
       maximumLineCount: 1
+      elide: Text.ElideNone
     }
+  }
+  component FolderActionButton: Rectangle {
+    id: folderAction
+    property string glyph: ""
+    property string tip: ""
+    property bool emphasized: false
+    property bool available: true
+    readonly property bool hovered: folderActionArea.containsMouse
+    signal triggered()
+    width: Style.space(18)
+    height: width
+    radius: Style.cornerRadius
+    color: hovered ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.16) : "transparent"
+    Text {
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: folderAction.glyph
+      color: folderAction.emphasized ? Color.accent : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+    MouseArea {
+      id: folderActionArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: folderAction.available ? Qt.PointingHandCursor : Qt.ArrowCursor
+      onClicked: if (folderAction.available) folderAction.triggered()
+    }
+    PanelToolTip { visible: folderAction.hovered; text: folderAction.tip; fontFamily: root.fontFamily }
   }
   component FolderPicker: Column {
     id: fp
     property bool forSquad: true
+    readonly property real folderGridSpacing: Style.space(8)
+    readonly property real folderChipWidth: Math.max(0, Math.floor((width - folderGridSpacing) / 2))
+    readonly property real folderNameRowHeight: Style.font.bodySmall * 1.25 + Style.space(12)
+    readonly property real folderChipHeight: Style.font.bodySmall * 1.25 + Style.font.caption * 2.4 + Style.space(14)
     spacing: Style.space(14)
     PanelSectionHeader { width: parent.width; text: "FOLDER" }
     Flow {
       width: parent.width
-      spacing: Style.space(6)
+      spacing: fp.forSquad ? Style.space(6) : fp.folderGridSpacing
       Rectangle {
         id: homeChip
         visible: !fp.forSquad
         readonly property bool on: root.squadRepo === root.home && root.squadNewName === ""
-        width: homeLabel.implicitWidth + Style.space(22)
-        height: homeLabel.implicitHeight + Style.space(14)
+        width: fp.folderChipWidth
+        height: fp.folderNameRowHeight
         radius: Style.cornerRadius
         color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
                   : (homeArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent")
         border.width: 1
         border.color: on ? Color.accent : root.soft(root.foreground, 0.3)
-        Column {
-          id: homeContent
+        Text {
+          id: homeLabel
           anchors.centerIn: parent
-          width: parent.width - Style.space(12)
-          spacing: Style.space(2)
-          Text {
-            id: homeLabel
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            textFormat: Text.PlainText
-            text: (homeChip.on ? "\u2713 " : "") + "No project"
-            color: homeChip.on ? Color.accent : root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            font.bold: homeChip.on
-            elide: Text.ElideRight
-          }
-          FolderUsageLine { width: parent.width; entries: homeChip.usageItems; active: !fp.forSquad }
+          textFormat: Text.PlainText
+          text: (homeChip.on ? "\u2713 " : "") + "No project"
+          color: homeChip.on ? Color.accent : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: homeChip.on
         }
         MouseArea { id: homeArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.squadRepo = root.home; root.squadNewName = "" } }
         PanelToolTip { visible: homeArea.containsMouse; text: "Start in your home folder (~), without a project folder"; fontFamily: root.fontFamily }
       }
       Repeater {
-        model: root.squadRepos
+        model: fp.forSquad ? root.squadRepos : root.startFolderRepos()
         Rectangle {
           id: repoChip
           required property string modelData
           readonly property var usageItems: root.folderUsageEntries(modelData)
           readonly property bool on: root.squadRepo === modelData
-          width: usageItems.length && !fp.forSquad ? Math.min(fp.width, Style.space(240)) : repoLabel.implicitWidth + Style.space(22)
-          height: repoContent.implicitHeight + Style.space(14)
+          readonly property bool pinned: root.folderIsPinned(modelData)
+          width: fp.forSquad ? repoLabel.implicitWidth + Style.space(22) : fp.folderChipWidth
+          height: fp.forSquad ? repoContent.implicitHeight + Style.space(14) : fp.folderChipHeight
           radius: Style.cornerRadius
           color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
+                    : pinned ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.12)
                     : (repoArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06))
-          border.width: on ? 1 : 0
-          border.color: Color.accent
+          border.width: pinned ? 2 : (on ? 1 : 0)
+          border.color: on || pinned ? Color.accent : root.soft(root.foreground, 0.3)
           Column {
             id: repoContent
             anchors.centerIn: parent
             width: parent.width - Style.space(12)
-            spacing: Style.space(2)
+            spacing: Style.space(4)
             Text {
               id: repoLabel
-              width: parent.width
+              width: parent.width - (!fp.forSquad && repoHover.hovered ? Style.space(40) : (!fp.forSquad && repoChip.pinned ? Style.space(22) : 0))
               horizontalAlignment: Text.AlignHCenter
               textFormat: Text.PlainText
               text: (repoChip.on ? "\u2713 " : "") + root.shortPath(repoChip.modelData)
@@ -1084,8 +1250,37 @@ Panel {
             }
             FolderUsageLine { width: parent.width; entries: repoChip.usageItems; active: !fp.forSquad }
           }
+          HoverHandler { id: repoHover }
           MouseArea { id: repoArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.squadRepo = repoChip.modelData; root.squadNewName = "" } }
-          PanelToolTip { visible: repoArea.containsMouse; text: repoChip.modelData; fontFamily: root.fontFamily }
+          Row {
+            id: repoControls
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: Style.space(4)
+            spacing: Style.space(2)
+            visible: !fp.forSquad && (repoHover.hovered || repoChip.pinned)
+            FolderActionButton {
+              id: repoPinAction
+              glyph: repoChip.pinned ? "󰐃" : "󰤱"
+              tip: repoChip.pinned ? root.pluginText("picker.unpin") : root.pluginText("picker.pin")
+              emphasized: repoChip.pinned
+              available: root.folderPreferencesReady && !root.folderPreferenceBusy
+              onTriggered: root.toggleFolderPin(repoChip.modelData)
+            }
+            FolderActionButton {
+              id: repoHideAction
+              glyph: "󰛑"
+              tip: root.pluginText("picker.hide")
+              available: root.folderPreferencesReady && !root.folderPreferenceBusy
+              onTriggered: root.hideFolder(repoChip.modelData)
+              visible: repoHover.hovered
+            }
+          }
+          PanelToolTip {
+            visible: repoHover.hovered && !repoPinAction.hovered && !repoHideAction.hovered
+            text: root.safeTooltipText(repoChip.modelData)
+            fontFamily: root.fontFamily
+          }
         }
       }
       // A new project: asks for a name in a small dialog; it is made in ~/Projects with git set up.
@@ -1143,6 +1338,107 @@ Panel {
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
+    }
+    Rectangle {
+      id: hiddenFoldersToggle
+      visible: !fp.forSquad && root.hiddenFolderRepos().length > 0
+      width: parent.width
+      height: Style.space(32)
+      radius: Style.cornerRadius
+      color: root.showHiddenFolders ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent"
+      border.width: 1
+      border.color: root.soft(root.foreground, 0.3)
+      Text {
+        anchors.centerIn: parent
+        textFormat: Text.PlainText
+        text: (root.showHiddenFolders ? "\u2304 " : "\u203a ") + root.pluginText("picker.hiddenFolders").arg(root.hiddenFolderRepos().length)
+        color: root.showHiddenFolders ? Color.accent : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+      MouseArea {
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.showHiddenFolders = !root.showHiddenFolders
+      }
+    }
+    Flow {
+      width: parent.width
+      visible: !fp.forSquad && root.showHiddenFolders
+      spacing: fp.folderGridSpacing
+      Repeater {
+        model: root.hiddenFolderRepos()
+        Rectangle {
+          id: hiddenRepoChip
+          required property string modelData
+          readonly property var usageItems: root.folderUsageEntries(modelData)
+          readonly property bool on: root.squadRepo === modelData
+          readonly property bool pinned: root.folderIsPinned(modelData)
+          width: fp.folderChipWidth
+          height: fp.folderChipHeight
+          radius: Style.cornerRadius
+          color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.16)
+                    : pinned ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1)
+                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+          border.width: pinned ? 2 : 1
+          border.color: pinned ? Color.accent : root.soft(root.foreground, 0.3)
+          Column {
+            anchors.centerIn: parent
+            width: parent.width - Style.space(12)
+            spacing: Style.space(4)
+            Text {
+              width: parent.width - (hiddenRepoHover.hovered ? Style.space(40) : (hiddenRepoChip.pinned ? Style.space(22) : 0))
+              horizontalAlignment: Text.AlignHCenter
+              textFormat: Text.PlainText
+              text: (hiddenRepoChip.on ? "\u2713 " : "") + root.shortPath(hiddenRepoChip.modelData)
+              color: hiddenRepoChip.on ? Color.accent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: hiddenRepoChip.on || hiddenRepoChip.pinned
+              elide: Text.ElideRight
+            }
+            FolderUsageLine { width: parent.width; entries: hiddenRepoChip.usageItems; active: true }
+          }
+          HoverHandler { id: hiddenRepoHover }
+          MouseArea {
+            id: hiddenRepoChipMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: { root.squadRepo = hiddenRepoChip.modelData; root.squadNewName = "" }
+          }
+          Row {
+            id: hiddenRepoControls
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: Style.space(4)
+            spacing: Style.space(2)
+            visible: hiddenRepoHover.hovered || hiddenRepoChip.pinned
+            FolderActionButton {
+              id: hiddenRepoPinAction
+              glyph: hiddenRepoChip.pinned ? "󰐃" : "󰤱"
+              tip: hiddenRepoChip.pinned ? root.pluginText("picker.unpin") : root.pluginText("picker.pin")
+              emphasized: hiddenRepoChip.pinned
+              available: root.folderPreferencesReady && !root.folderPreferenceBusy
+              onTriggered: root.toggleFolderPin(hiddenRepoChip.modelData)
+            }
+            FolderActionButton {
+              id: hiddenRepoRestoreAction
+              glyph: "󰦛"
+              tip: root.pluginText("picker.restore")
+              available: root.folderPreferencesReady && !root.folderPreferenceBusy
+              onTriggered: root.restoreFolder(hiddenRepoChip.modelData)
+              visible: hiddenRepoHover.hovered
+            }
+          }
+          PanelToolTip {
+            visible: !hiddenRepoPinAction.hovered && !hiddenRepoRestoreAction.hovered && hiddenRepoHover.hovered
+            text: root.safeTooltipText(hiddenRepoChip.modelData)
+            fontFamily: root.fontFamily
+          }
+        }
+      }
     }
   }
   component HeaderButton: Rectangle {
