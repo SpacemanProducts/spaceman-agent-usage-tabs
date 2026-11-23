@@ -86,7 +86,7 @@ keeps the developer in flow:
   so the default is "Antigravity just reset early, go cook."; "Google just reset everyone" is allowed
   only when `bin/agy-resets.mjs` finds a matching agyresets.com announcement (credit the source).
 - **Versioning:** bump `manifest.json` (patch = fix, minor = feature), add a line to
-  `CHANGELOG.md`, and commit. The plugin folder is a local git repo with no remote.
+  `CHANGELOG.md`, and commit. The plugin folder is a git repo that pushes to `origin` (GitHub, see below).
 - **QML pitfalls that already broke the plugin:** never put non-Item children (e.g.
   `HoverHandler`) directly inside `KeyboardPanel`; after every QML edit restart the
   shell and check `qs log` for `agent-usage` errors. A refactor once deleted the
