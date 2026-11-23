@@ -72,6 +72,7 @@ Panel {
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string dataPath: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agent-usage-tabs/data.json"
+  readonly property string antigravitySurprisePath: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agent-usage-tabs/antigravity-surprise.json"
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
 
   property var rawAgents: []
@@ -90,6 +91,9 @@ Panel {
   property bool autoOpened: false
   property var lastResetSeen: ({})
   property bool resetsPrimed: false
+  property var antigravitySurpriseState: null
+  property double detectedSurpriseAt: 0
+  property bool detectedSurpriseWhileOpen: false
   // Opens the panel on this agent's tab for a reset, without stealing focus.
   // If the user already has the panel open, it only switches to that tab.
   function autoCelebrate(id) {
@@ -266,6 +270,40 @@ Panel {
     var t = testKinds[a.id]
     if (t && t.at >= Number(a.resetAt || 0)) return t.magnitude
     return Number(a.resetMagnitude || 1)
+  }
+  function checkAntigravitySurprise() {
+    var s = antigravitySurpriseState
+    if (!s || Number(s.at) <= 0 || Number(s.playedAt) === Number(s.at)) return
+    if (Number(s.clickedAt) === Number(s.at)) {
+      playAntigravitySurprise(Number(s.at), true)
+      return
+    }
+    if (detectedSurpriseAt === Number(s.at) && detectedSurpriseWhileOpen)
+      playAntigravitySurprise(Number(s.at), false)
+  }
+  function playAntigravitySurprise(at, fromClick) {
+    var s = antigravitySurpriseState
+    if (!s || Number(s.at) !== at || Number(s.playedAt) === at) return
+    if (!fromClick && (!opened || detectedSurpriseAt !== at || !detectedSurpriseWhileOpen)) return
+    selectedId = "antigravity"
+    daysOpen = false; modelsExpanded = false; settingsOpen = false
+    if (fromClick && !opened) {
+      autoOpened = true
+      open()
+      autoCloseTimer.restart()
+    }
+    var agent = null
+    for (var i = 0; i < rawAgents.length; i++) if (rawAgents[i].id === "antigravity") agent = rawAgents[i]
+    var now = Date.now()
+    flashNow = now
+    var times = Object.assign({}, testResets); times.antigravity = now; testResets = times
+    var kinds = Object.assign({}, testKinds)
+    kinds.antigravity = { at: now, kind: "surprise", magnitude: Number(agent && agent.resetMagnitude) || 1 }
+    testKinds = kinds
+    var updated = Object.assign({}, s); updated.playedAt = at; antigravitySurpriseState = updated
+    surpriseStateWriter.command = ["node", pluginDir + "/bin/antigravity-surprise.mjs", "played", String(at)]
+    surpriseStateWriter.running = true
+    if (resetSound) playTest("jackpot.wav")
   }
   // A Test reset button: back to the main view first (the celebration plays on the chips), then
   // fire it on the next frame so the whole animation is visible.
@@ -904,16 +942,37 @@ Panel {
         // A reset the collector flagged since the last load -> celebrate. The first
         // load only records what is already there (no pop-up when the shell starts).
         var seen = root.lastResetSeen, fresh = []
+        var firstOrdinaryReset = ""
         root.rawAgents.forEach(function(a) {
           var t = Number(a.resetAt || 0)
-          if (root.resetsPrimed && t > Number(seen[a.id] || 0) && Date.now() - t < 8000) fresh.push(a.id)
+          if (root.resetsPrimed && t > Number(seen[a.id] || 0) && Date.now() - t < 8000) {
+            fresh.push(a.id)
+            if (a.id === "antigravity" && a.resetKind === "surprise") {
+              root.detectedSurpriseAt = t
+              root.detectedSurpriseWhileOpen = root.opened
+            } else if (firstOrdinaryReset === "") firstOrdinaryReset = a.id
+          }
           if (t > Number(seen[a.id] || 0)) seen[a.id] = t
         })
         root.resetsPrimed = true
-        if (fresh.length > 0) Qt.callLater(function() { root.autoCelebrate(fresh[0]) })
+        if (root.detectedSurpriseAt > 0 && root.detectedSurpriseWhileOpen) Qt.callLater(root.checkAntigravitySurprise)
+        if (firstOrdinaryReset !== "") Qt.callLater(function() { root.autoCelebrate(firstOrdinaryReset) })
       } catch (e) { root.rawAgents = [] }
     }
     onLoadFailed: root.rawAgents = []
+  }
+
+  FileView {
+    path: root.antigravitySurprisePath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try { root.antigravitySurpriseState = JSON.parse(String(text() || "")) }
+      catch (e) { root.antigravitySurpriseState = null }
+      Qt.callLater(root.checkAntigravitySurprise)
+    }
+    onLoadFailed: root.antigravitySurpriseState = null
   }
 
   FileView {
@@ -937,6 +996,11 @@ Panel {
   Process {
     id: soundTester
     running: false
+  }
+  Process {
+    id: surpriseStateWriter
+    running: false
+    onExited: function(code) { if (code !== 0) console.warn("usage-tabs: couldn't mark Antigravity's surprise celebration as played") }
   }
   Process {
     id: testNotifier

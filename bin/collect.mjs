@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cursorWall } from "./cursor-wall.mjs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { parseClaudeLimits, parseClaudeResets } from "./claude-limits.mjs";
 import { applyResets, resetNotice, resetNotifyArgs, resetAssets } from "./reset-celebration.mjs";
 import { fetchResets, corroborate } from "./agy-resets.mjs";
@@ -31,6 +31,7 @@ import { loadCatalog, tabNote } from "./catalog.mjs";
 import { readAmpUsage } from "./amp-usage.mjs";
 import { maybeWriteHandoff } from "./handoff.mjs";
 import { createDiagnostics, checkAgentData } from "./diagnostics.mjs";
+import { immediateResetKind, surpriseStateFile, writeSurpriseState } from "./antigravity-surprise.mjs";
 
 const HOME = os.homedir();
 const STATE = path.join(process.env.XDG_STATE_HOME || path.join(HOME, ".local/state"), "omarchy");
@@ -403,11 +404,9 @@ const resetFired = readJson(RESET_FIRED) || {};
 applyResets(agents, prev?.agents, (a, windows, info) => pendingResets.push({ a, windows, info }), Date.now(), resetFired);
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(RESET_FIRED, JSON.stringify(resetFired) + "\n", { mode: 0o600 });
-let resetHappened = false, surpriseHappened = false, announcements = null;
+let announcements = null;
 for (const { a, windows, info } of pendingResets) {
-  resetHappened = true;
   if (info.kind === "surprise") {
-    surpriseHappened = true;
     // Ask agyresets.com (once per run, only now) whether the Antigravity team announced it.
     if (a.id === "antigravity") {
       announcements ??= await fetchResets({ now: Date.now() });
@@ -417,9 +416,20 @@ for (const { a, windows, info } of pendingResets) {
   }
   const assets = resetAssets(info.kind);               // surprise resets get their own picture and sound
   const n = resetNotice(a, windows, info);
+  if (a.id === "antigravity" && info.kind === "surprise") {
+    try { writeSurpriseState(surpriseStateFile(OUT_DIR), "record", Number(a.resetAt)); }
+    catch (e) { diag.add("antigravity", "couldn't save surprise notification state", { error: String(e.message || e) }); }
+    const notice = spawn(process.execPath, [path.join(HERE, "antigravity-surprise.mjs"), "notify", String(a.resetAt), n.title, n.body], {
+      env: ENV, detached: true, stdio: "ignore",
+    });
+    notice.on("error", (e) => diag.add("antigravity", "couldn't launch surprise notification", { error: String(e.message || e) }));
+    notice.unref();
+    continue;
+  }
   spawnSync("notify-send", resetNotifyArgs(n, path.join(HERE, "..", "notify", assets.image)), { env: ENV, timeout: 5000 });
 }
-if (resetHappened && SOUND_VOLUME > 0) playSound(SOUND_VOLUME, path.join(HERE, "..", "sounds", resetAssets(surpriseHappened ? "surprise" : "scheduled").sound));
+const immediateKind = immediateResetKind(pendingResets);
+if (immediateKind && SOUND_VOLUME > 0) playSound(SOUND_VOLUME, path.join(HERE, "..", "sounds", resetAssets(immediateKind).sound));
 
 notifyHighUsage(agents);
 handoffCheck(agents);
