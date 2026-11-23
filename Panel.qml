@@ -394,6 +394,44 @@ Panel {
   // terminal there (bin/agent-here.sh, in the stock agent window class org.omarchy.agent). The bar's right-click and the
   // keyboard shortcut are Omarchy's own and still start it at once, with no picker.
   property bool agentHereOpen: false
+  property var folderUsageRecords: []
+  property double folderUsageRefreshedAt: 0
+  function folderUsageEntries(folder) {
+    if (folderUsageRefreshedAt <= 0 || folderUsageRefreshedAt > Date.now() + 60000 || Date.now() - folderUsageRefreshedAt > 7 * 86400000) return []
+    var totals = ({})
+    folderUsageRecords.forEach(function(record) {
+      if (!record || typeof record !== "object") return
+      if (record.folder !== folder) return
+      var id = String(record.agent || "")
+      var amount = Number(record.amount), unit = id === "copilot" ? "AIC" : "tokens"
+      if (!rawAgents.some(function(a) { return a.id === id }) || !isFinite(amount) || amount <= 0 || record.unit !== unit) return
+      if (!totals[id]) totals[id] = { amount: 0, unit: unit }
+      totals[id].amount += amount
+    })
+    var order = rawAgents.map(function(a) { return a.id })
+    var ids = Object.keys(totals)
+    var first = barAgent ? barAgent.id : ""
+    ids.sort(function(a, b) {
+      if (a === first) return -1
+      if (b === first) return 1
+      var ai = order.indexOf(a), bi = order.indexOf(b)
+      return (ai < 0 ? order.length : ai) - (bi < 0 ? order.length : bi) || a.localeCompare(b)
+    })
+    return ids.map(function(id) {
+      var amount = totals[id].amount, unit = totals[id].unit
+      var name = id
+      for (var i = 0; i < rawAgents.length; i++) if (rawAgents[i].id === id) { name = rawAgents[i].name || id; break }
+      var value
+      if (unit === "AIC") value = (amount < 10 ? amount.toFixed(2) : amount.toFixed(1)).replace(/\.?0+$/, "")
+      else if (amount >= 1000000) value = (amount / 1000000).toFixed(1).replace(/\.0$/, "") + "M"
+      else if (amount >= 1000) value = (amount / 1000).toFixed(1).replace(/\.0$/, "") + "k"
+      else value = String(Math.round(amount))
+      return { id: id, text: name + " " + value + " " + unit }
+    })
+  }
+  function refreshFolderUsage() {
+    if (!folderUsageRefresh.running) folderUsageRefresh.running = true
+  }
   function toggleAgentHere() {
     agentHereOpen = !agentHereOpen
     if (agentHereOpen) {
@@ -401,6 +439,7 @@ Panel {
       squadRepo = ""; squadNewName = ""
       if (!repoLister.running) repoLister.running = true
       if (!zenityCheck.running) zenityCheck.running = true
+      refreshFolderUsage()
     }
   }
   readonly property bool agentHereReady: squadRepo !== "" || squadNewName !== "" || agentHereOpen
@@ -449,6 +488,31 @@ Panel {
         if (root.squadRepo === "" && root.squadNewName === "" && list.length > 0) root.squadRepo = list[0]   // the last one used
       }
     }
+  }
+  Process {
+    id: folderUsageRefresh
+    command: ["python3", pluginDir + "/bin/folder-usage.py"]
+    stderr: StdioCollector { id: folderUsageRefreshErr }
+    onExited: function(code) {
+      if (code !== 0) console.warn("usage-tabs: folder usage refresh failed: " + String(folderUsageRefreshErr.text).trim())
+    }
+  }
+  FileView {
+    path: (Quickshell.env("XDG_STATE_HOME") || root.home + "/.local/state") + "/omarchy/agent-usage-tabs/folder-usage.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try {
+        var data = JSON.parse(String(text() || ""))
+        root.folderUsageRecords = Array.isArray(data.records) ? data.records : []
+        root.folderUsageRefreshedAt = Number(data.refreshedAt) || 0
+      } catch (e) {
+        root.folderUsageRecords = []
+        root.folderUsageRefreshedAt = 0
+      }
+    }
+    onLoadFailed: { root.folderUsageRecords = []; root.folderUsageRefreshedAt = 0 }
   }
   Process { id: zenityCheck; command: ["bash", "-c", "command -v zenity >/dev/null"]; onExited: function(code) { root.squadZenity = code === 0 } }
   Process {
@@ -914,6 +978,35 @@ Panel {
   // The small tinted square the stock panel uses for its hero-corner buttons (34 wide).
   // The folder step, shared by the CS screen and the agent screen (the header terminal button): recent repos (the last one
   // used preselected), then "+ New project", then "Browse...". It sets root.squadRepo / root.squadNewName.
+  component FolderUsageLine: Row {
+    id: usageLine
+    property var entries: []
+    property bool active: true
+    visible: active && entries.length > 0
+    spacing: Style.space(4)
+    Text {
+      id: primaryUsage
+      width: Math.min(implicitWidth, usageLine.entries.length > 1 ? usageLine.width * 0.52 : usageLine.width)
+      textFormat: Text.PlainText
+      text: usageLine.entries.length ? usageLine.entries[0].text : ""
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      elide: Text.ElideRight
+      maximumLineCount: 1
+    }
+    Text {
+      width: Math.max(0, usageLine.width - primaryUsage.width - usageLine.spacing)
+      visible: usageLine.entries.length > 1
+      textFormat: Text.PlainText
+      text: usageLine.entries.slice(1).map(function(item) { return item.text }).join(" · ")
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption * 0.9
+      elide: Text.ElideRight
+      maximumLineCount: 1
+    }
+  }
   component FolderPicker: Column {
     id: fp
     property bool forSquad: true
@@ -925,23 +1018,33 @@ Panel {
       Rectangle {
         id: homeChip
         visible: !fp.forSquad
+        readonly property var usageItems: root.folderUsageEntries(root.home)
         readonly property bool on: root.squadRepo === root.home && root.squadNewName === ""
-        width: homeLabel.implicitWidth + Style.space(22)
-        height: homeLabel.implicitHeight + Style.space(14)
+        width: usageItems.length ? Math.min(fp.width, Style.space(240)) : homeLabel.implicitWidth + Style.space(22)
+        height: homeContent.implicitHeight + Style.space(14)
         radius: Style.cornerRadius
         color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
                   : (homeArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent")
         border.width: 1
         border.color: on ? Color.accent : root.soft(root.foreground, 0.3)
-        Text {
-          id: homeLabel
+        Column {
+          id: homeContent
           anchors.centerIn: parent
-          textFormat: Text.PlainText
-          text: (homeChip.on ? "\u2713 " : "") + "No project"
-          color: homeChip.on ? Color.accent : root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          font.bold: homeChip.on
+          width: parent.width - Style.space(12)
+          spacing: Style.space(2)
+          Text {
+            id: homeLabel
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
+            text: (homeChip.on ? "\u2713 " : "") + "No project"
+            color: homeChip.on ? Color.accent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: homeChip.on
+            elide: Text.ElideRight
+          }
+          FolderUsageLine { width: parent.width; entries: homeChip.usageItems; active: !fp.forSquad }
         }
         MouseArea { id: homeArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.squadRepo = root.home; root.squadNewName = "" } }
         PanelToolTip { visible: homeArea.containsMouse; text: "Start in your home folder (~), without a project folder"; fontFamily: root.fontFamily }
@@ -951,23 +1054,33 @@ Panel {
         Rectangle {
           id: repoChip
           required property string modelData
+          readonly property var usageItems: root.folderUsageEntries(modelData)
           readonly property bool on: root.squadRepo === modelData
-          width: repoLabel.implicitWidth + Style.space(22)
-          height: repoLabel.implicitHeight + Style.space(14)
+          width: usageItems.length && !fp.forSquad ? Math.min(fp.width, Style.space(240)) : repoLabel.implicitWidth + Style.space(22)
+          height: repoContent.implicitHeight + Style.space(14)
           radius: Style.cornerRadius
           color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
                     : (repoArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06))
           border.width: on ? 1 : 0
           border.color: Color.accent
-          Text {
-            id: repoLabel
+          Column {
+            id: repoContent
             anchors.centerIn: parent
-            textFormat: Text.PlainText
-            text: (repoChip.on ? "\u2713 " : "") + root.shortPath(repoChip.modelData)
-            color: repoChip.on ? Color.accent : root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            font.bold: repoChip.on
+            width: parent.width - Style.space(12)
+            spacing: Style.space(2)
+            Text {
+              id: repoLabel
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              textFormat: Text.PlainText
+              text: (repoChip.on ? "\u2713 " : "") + root.shortPath(repoChip.modelData)
+              color: repoChip.on ? Color.accent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: repoChip.on
+              elide: Text.ElideRight
+            }
+            FolderUsageLine { width: parent.width; entries: repoChip.usageItems; active: !fp.forSquad }
           }
           MouseArea { id: repoArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.squadRepo = repoChip.modelData; root.squadNewName = "" } }
           PanelToolTip { visible: repoArea.containsMouse; text: repoChip.modelData; fontFamily: root.fontFamily }

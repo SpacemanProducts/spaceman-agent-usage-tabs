@@ -3,6 +3,10 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.25.0 - 2026-11-23
+- The Start-agent picker shows each folder's usage over the last seven days for Claude Code, Codex, Copilot, Grok, Devin and OpenCode.
+  Copilot stays in AIC and the others in tokens; agents without a confirmed session-to-folder mapping are omitted.
+
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
