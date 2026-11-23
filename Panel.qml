@@ -412,8 +412,11 @@ Panel {
     var ids = Object.keys(totals)
     var first = barAgent ? barAgent.id : ""
     ids.sort(function(a, b) {
+      if (a === b) return 0
       if (a === first) return -1
       if (b === first) return 1
+      if (a === "copilot") return -1
+      if (b === "copilot") return 1
       var ai = order.indexOf(a), bi = order.indexOf(b)
       return (ai < 0 ? order.length : ai) - (bi < 0 ? order.length : bi) || a.localeCompare(b)
     })
@@ -1018,10 +1021,9 @@ Panel {
       Rectangle {
         id: homeChip
         visible: !fp.forSquad
-        readonly property var usageItems: root.folderUsageEntries(root.home)
         readonly property bool on: root.squadRepo === root.home && root.squadNewName === ""
-        width: usageItems.length ? Math.min(fp.width, Style.space(240)) : homeLabel.implicitWidth + Style.space(22)
-        height: homeContent.implicitHeight + Style.space(14)
+        width: homeLabel.implicitWidth + Style.space(22)
+        height: homeLabel.implicitHeight + Style.space(14)
         radius: Style.cornerRadius
         color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
                   : (homeArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent")

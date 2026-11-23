@@ -130,7 +130,11 @@ assert.equal(fs.statSync(path.join(state, "folder-usage.json")).mtimeMs, snapsho
 const qml = fs.readFileSync(path.join(here, "..", "Panel.qml"), "utf8");
 assert.match(qml, /function folderUsageEntries\(folder\)/);
 assert.match(qml, /if \(a === first\) return -1/, "the agent being started is listed first");
+assert.match(qml, /if \(a === "copilot"\) return -1\n\s*if \(b === "copilot"\) return 1/, "Copilot is next so its usage remains visible");
 assert.match(qml, /FolderUsageLine \{ width: parent\.width; entries: repoChip\.usageItems; active: !fp\.forSquad \}/, "only the Start picker shows folder usage");
+const homeChip = qml.match(/id: homeChip([\s\S]*?)\n\s*Repeater \{/)?.[1];
+assert.ok(homeChip, "the No project option exists");
+assert.doesNotMatch(homeChip, /folderUsageEntries|FolderUsageLine/, "the No project option never shows usage");
 assert.match(qml, /folderUsageRefresh\.running = true/, "usage refresh starts asynchronously when Start opens");
 
 fs.rmSync(tmp, { recursive: true });
