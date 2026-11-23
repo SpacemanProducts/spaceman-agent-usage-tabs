@@ -41,6 +41,17 @@ Panel {
   function soft(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
   function meterColorFor(p, light) { return p > 0.85 ? redFor(light) : (p >= 0.6 ? amberFor(light) : greenFor(light)) }
   function meterColor(p) { return meterColorFor(p, lightPanel) }
+  // A reading the collector couldn't confirm is current and complete never shows green: it shows gray
+  // ("unsure"). Amber and red still show, since a high reading is a real warning either way.
+  readonly property color unsureColor: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.45)
+  function tintFor(p, unsure) { return unsure && p < 0.6 ? unsureColor : meterColor(p) }
+  // The whole file is unsure when the collector hasn't written it for three refreshes.
+  property double dataGeneratedAt: 0
+  readonly property bool dataStale: dataGeneratedAt > 0 && nowMs - dataGeneratedAt > 3 * Math.max(60, Number(setting("refreshIntervalSec", 300))) * 1000
+  function unsureReason(a) {
+    if (dataStale) return "Not updated since " + Qt.formatDateTime(new Date(dataGeneratedAt), "h:mm AP") + "; readings may be out of date."
+    return a && a.unsure ? String(a.unsure) : ""
+  }
   // Celebration colors: bright and white-heavy on dark themes, deeper (no white) on light ones.
   readonly property color gold: lightPanel ? "#b8860b" : "#ffd700"
   readonly property var surpriseConfetti: lightPanel
@@ -271,7 +282,7 @@ Panel {
       var accts = agents[i].accounts || []
       for (var k = 0; k < accts.length; k++) ls = ls.concat(accts[k].limits || [])
       for (var j = 0; j < ls.length; j++)
-        if (/session/i.test(String(ls[j].title)) && ls[j].percent > top) top = ls[j].percent
+        if ((ls[j].hitAt || /session/i.test(String(ls[j].title))) && ls[j].percent > top) top = ls[j].percent
     }
     return top
   }
@@ -503,6 +514,7 @@ Panel {
         root.flashNow = Date.now()
         root.pluginVersion = d && d.version ? String(d.version) : ""
         root.rawAgents = d && Array.isArray(d.agents) ? d.agents : []
+        root.dataGeneratedAt = d && Number(d.generatedAt) > 0 ? Number(d.generatedAt) : 0
         // A reset the collector flagged since the last load -> celebrate. The first
         // load only records what is already there (no pop-up when the shell starts).
         var seen = root.lastResetSeen, fresh = []
@@ -739,8 +751,8 @@ Panel {
         id: pctText
         anchors.right: parent.right
         textFormat: Text.PlainText
-        text: Math.round(limit.percent * 100) + "% used"
-        color: root.meterColor(limit.percent)
+        text: Math.round(limit.percent * 100) + "% used" + (limit.unsure || root.dataStale ? " · unsure" : "")
+        color: root.tintFor(limit.percent, !!limit.unsure || root.dataStale)
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
         font.bold: true
@@ -755,7 +767,7 @@ Panel {
         width: Math.max(limit.percent > 0 ? height : 0, parent.width * root.clamp(limit.percent, 0, 1))
         height: parent.height
         radius: height / 2
-        color: root.meterColor(limit.percent)
+        color: root.tintFor(limit.percent, !!limit.unsure || root.dataStale)
       }
     }
     Text {
@@ -1277,8 +1289,9 @@ Panel {
                 // (an agent with one meter uses it for both). Gray = no data.
                 readonly property var meters: ChipMeters.chipMeters(modelData)
                 readonly property color gray: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-                readonly property color sessionTint: flashing ? flashColor : (meters.session < 0 ? gray : root.meterColor(meters.session))
-                readonly property color weeklyTint: flashing ? flashColor : (meters.weekly < 0 ? gray : root.meterColor(meters.weekly))
+                readonly property bool unsure: root.unsureReason(modelData) !== ""
+                readonly property color sessionTint: flashing ? flashColor : (meters.session < 0 ? gray : root.tintFor(meters.session, unsure))
+                readonly property color weeklyTint: flashing ? flashColor : (meters.weekly < 0 ? gray : root.tintFor(meters.weekly, unsure))
                 width: tabLabel.implicitWidth + Style.space(22)
                 height: tabLabel.implicitHeight + Style.space(14)
                 radius: Style.cornerRadius
@@ -1672,6 +1685,18 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
+          }
+
+          // An unsure tab says why it isn't green.
+          Text {
+            visible: root.showDetail && root.unsureReason(root.agent) !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "Unsure: " + root.unsureReason(root.agent)
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
 
           // A gray tab says why it has no data.

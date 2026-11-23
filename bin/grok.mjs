@@ -6,11 +6,25 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { resolveLogin } from "./agy-login.mjs";
+import { grokWall } from "./grok-wall.mjs";
 
 const home = process.env.GROK_HOME || path.join(os.homedir(), ".grok");
 const BASE = "https://cli-chat-proxy.grok.com/v1/billing";
 const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
-const out = (o) => { process.stdout.write(JSON.stringify({ limits: [], plan: "", status: "", ...o }) + "\n"); process.exit(0); };
+// The free per-model cap only shows up in Grok's log (see grok-wall.mjs); it leads the meters.
+function readLogTail(p, max = 4 << 20) {
+  try { const fd = fs.openSync(p, "r"), size = fs.fstatSync(fd).size, len = Math.min(size, max), b = Buffer.alloc(len);
+    fs.readSync(fd, b, 0, len, size - len); fs.closeSync(fd); return b.toString("utf8"); } catch { return ""; }
+}
+const wall = grokWall(readLogTail(path.join(home, "logs", "unified.jsonl")));
+const out = (o) => {
+  const r = { limits: [], plan: "", status: "", ...o };
+  if (wall) { r.limits = [wall, ...r.limits]; if (r.status === "Grok reported no limit windows.") r.status = ""; }
+  // Can't confirm the reading is complete -> say so, so the panel shows it unsure instead of green.
+  else if (r.limits.length && /free/i.test(r.plan)) r.unsure ||= "Grok doesn't report its free per-model limits until one is hit, so this may be incomplete.";
+  if (!r.unsure && r.limits.some((l) => l.unsure)) r.unsure = r.limits.find((l) => l.unsure).unsure;
+  process.stdout.write(JSON.stringify(r) + "\n"); process.exit(0);
+};
 const num = (v) => { if (v && typeof v === "object") v = v.val || 0; v = Number(v); if (!Number.isFinite(v)) throw new Error("nan"); return v; };
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
@@ -57,10 +71,9 @@ try {
   const c = (await get(`${BASE}?format=credits`)).config;
   const period = c.currentPeriod, ends = Date.parse(period.end);
   const unified = c.isUnifiedBillingUser === true;
-  let used = c.creditUsagePercent;
-  if (used === undefined) { if (ends <= Date.now()) throw new Error("ended period"); used = 0; }
-  if (used !== undefined)
-    limits.push({ title: String(period.type || "").includes("WEEK") ? "Weekly" : "Monthly", percent: clamp01(num(used) / 100), resetsAt: new Date(ends).toISOString() });
+  let used = c.creditUsagePercent, unsure = "";
+  if (used === undefined) { if (ends <= Date.now()) throw new Error("ended period"); used = 0; unsure = "Grok sent no usage figure for this window; 0% is assumed."; }
+  limits.push({ title: String(period.type || "").includes("WEEK") ? "Weekly" : "Monthly", percent: clamp01(num(used) / 100), resetsAt: new Date(ends).toISOString(), ...(unsure && { unsure }) });
   if (unified) {
     try {
       const m = (await get(BASE)).config, quota = num(m.monthlyLimit);

@@ -309,7 +309,7 @@ panel only reads it.
 | Agent | Source |
 |---|---|
 | Claude Code | Anthropic's OAuth usage endpoint with your Claude Code login, plus tokens from your local transcripts (last 7 days). Cached 5 minutes because the endpoint rate-limits. |
-| Grok | Grok's billing endpoints, with the Grok CLI login. |
+| Grok | Grok's billing endpoints, with the Grok CLI login, plus the free per-model cap Grok logs when a turn hits it (`~/.grok/logs/unified.jsonl`). |
 | Antigravity | Google's quota endpoint, with the local `agy` login. |
 | Copilot | GitHub's Copilot quota endpoint, with the token `gh auth token` prints. |
 | Kiro | `kiro-cli chat --no-interactive "/usage"`. |

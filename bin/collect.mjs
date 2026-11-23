@@ -218,6 +218,9 @@ for (const a of AGENTS) {
     const lim = await claudeLimits(prevAgent("claude"));
     Object.assign(out, { plan: lim.plan || "", limits: lim.limits || [], status: lim.status || "", models: modelRows(byModel), modelScope: "last 7 days", days: daysFrom(byDay), limitsFetchedAt: lim.fetchedAt || 0, resets: lim.resets || null,
       signedIn: fs.existsSync(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), ".credentials.json")) });
+    // Showing last-known limits that couldn't be refreshed: not current, so not green.
+    if (out.limits.length && !(lim.fetchedAt > Date.now() - 15 * 60 * 1000))
+      out.unsure = lim.fetchedAt ? `Last reading from ${new Date(lim.fetchedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}; couldn't refresh.` : "Couldn't confirm this reading is current.";
   } else if (a.catalog && !a.builtin) {
     // No Omarchy usage record: say how this agent reports usage (from the catalog) instead of showing meters.
     Object.assign(out, { usageType: a.catalog.usageType, planNote: tabNote(a.catalog, CATALOG.types), signedIn: null, catalog: true });
@@ -238,7 +241,7 @@ for (const a of AGENTS) {
       out.signedIn = !!cp.plan;
     } else if (a.id === "grok" || a.id === "antigravity") {
       const sq = ownScript(a.id === "grok" ? "grok" : "agy", a.id);
-      out.limits = sq.limits || []; if (sq.plan) out.plan = sq.plan; out.status = sq.status || "";
+      out.limits = sq.limits || []; if (sq.plan) out.plan = sq.plan; out.status = sq.status || ""; if (sq.unsure) out.unsure = sq.unsure;
       out.signedIn = !String(sq.status || "").startsWith("Not signed in");
       // Quota failed but local stats exist: the one-line status still says why.
     } else if (!local) {

@@ -20,3 +20,6 @@ assert.deepEqual(cm([L("Session", "x"), L("Weekly", null)]), { session: -1, week
 assert.deepEqual(JSON.parse(JSON.stringify(ctx.chipMeters(null))), { session: -1, weekly: -1 });
 assert.deepEqual(JSON.parse(JSON.stringify(ctx.chipMeters({ limits: [L("Session", 0.2), L("Weekly", 0.2)], accounts: [{ limits: [L("Session", 0.9), L("Weekly", 0.1)] }, { limits: [L("Session", 0.3), L("Weekly", 0.7)] }] }))), { session: 0.9, weekly: 0.7 }, "worst meter across accounts");
 console.log("chip-meters: all tests passed");
+// A limit Grok reported hitting turns the chip red even beside a 0% Weekly.
+assert.deepEqual(cm([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "2026-11-23T01:18:32Z" }, L("Weekly", 0)]), { session: 1, weekly: 1 }, "hit limit colors both");
+assert.deepEqual(cm([L("Session", 0.2), L("Weekly", 0.1), L("Monthly", 1)]), { session: 1, weekly: 1 }, "any full limit colors both");

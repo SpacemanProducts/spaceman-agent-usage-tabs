@@ -6,6 +6,15 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.15.0 - 2026-11-22
+- Grok's free per-model cap (e.g. 600K tokens per rolling 24 h for grok-4.7) now shows as a meter once Grok reports hitting it, read
+  from Grok's own log (`~/.grok/logs/unified.jsonl`); it turns the chip red and clears after a later turn succeeds or 24 h pass.
+  Grok's billing endpoints don't report this cap, which is why the tab stayed green while Grok was out.
+- Any limit at 100% turns the whole chip red, whatever its title.
+- **Unsure instead of green:** a reading the plugin can't confirm is current and complete shows gray with "· unsure" and an
+  "Unsure: …" line saying why: Grok's Weekly when Grok sends no usage figure, a Grok Free plan with no cap hit yet, Claude limits that
+  couldn't be refreshed for 15 minutes, and every tab when the collector hasn't written for three refreshes. Amber and red still show.
+
 ## 1.14.0 - 2026-11-22
 - The gear, **+** and **CS** each open as their own screen: the chips and usage meters are hidden, only that screen is shown, and a
   Back button in the header returns. Claude Squad's screen has the agent picker and a folder step (recent repos, new project, browse).
