@@ -107,6 +107,12 @@ assert.ok(!fs.existsSync(launchLog), "no extra terminal windows were opened: " +
   const listed = run(["--repos"], P).stdout.trim().split("\n");
   assert.equal(listed[0], path.join(projR, "beta"), "the last repo used comes first");
   assert.deepEqual(listed.slice().sort(), [path.join(projR, "alpha"), path.join(projR, "beta")], "recent repos only: no backups or date-stamped copies");
+  // a repo outside Projects under a dot-folder (this plugin lives in ~/.config), once opened, is listed; backups in Projects still are not
+  const dotRepo = path.join(home, ".config", "omarchy", "plugins", "my.plugin"); fs.mkdirSync(dotRepo, { recursive: true }); spawnSync("git", ["init", "-q", dotRepo]);
+  fs.writeFileSync(path.join(home, ".local/state/omarchy/agent-usage-tabs/squad-recent"), dotRepo + "\n" + path.join(projR, "alpha-backup") + "\n");
+  const listed2 = run(["--repos"], P).stdout.trim().split("\n");
+  assert.ok(listed2.includes(dotRepo), "a repo picked with Browse, under a dot-folder, is listed: " + listed2.join(","));
+  assert.ok(!listed2.includes(path.join(projR, "alpha-backup")), "backups inside Projects stay hidden even if remembered");
   const made2 = run(["codex"], { ...P, SQUAD_NEW: "panel-made", GUM_CHOOSE: "x" });
   assert.ok(made2.stdout.trim().endsWith(`cs -p codex in ${real(path.join(projR, "panel-made"))}`), made2.stdout);
   assert.ok(spawnSync("git", ["-C", path.join(projR, "panel-made"), "log", "--oneline"], { encoding: "utf8" }).stdout.includes("Initial commit"), "a first commit, so Squad can branch");

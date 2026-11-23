@@ -20,13 +20,18 @@ const planOf = (payload) => {
 
 // A monthly meter for the chat or completions allowance (what the Free plan limits). Skipped when the plan has no limit on
 // it (unlimited, no quota, zero entitlement). Uses the most precise figure the snapshot has.
+// On token-based billing the entitlement is in AI credits (AIC, what Copilot's own status bar counts: 1 AIC = 1e9 nano-AIU
+// in the session logs), so the note says how many of them are gone. GitHub's counters trail a finished session by a short while.
+const credits = (n) => (Math.round(n * 10) / 10).toString();
 function allowanceMeter(snap, title, note, resetsAt) {
   if (!snap || typeof snap !== "object" || snap.unlimited === true || snap.has_quota === false) return null;
   const ent = num(snap.entitlement);
   if (ent === null || ent <= 0) return null;
   const pctLeft = num(snap.percent_remaining), left = num(snap.quota_remaining) ?? num(snap.remaining), spent = num(snap.credits_used);
   const used = pctLeft !== null ? 1 - pctLeft / 100 : left !== null ? (ent - left) / ent : spent !== null ? spent / ent : null;
-  return used === null ? null : { title, note, window: "monthly", percent: clamp01(used), resetsAt };
+  if (used === null) return null;
+  if (snap.token_based_billing === true && title === "Chat and agent requests") note = `${credits(left !== null ? ent - left : used * ent)} of ${credits(ent)} AI credits used. Shared plan quota`;
+  return { title, note, window: "monthly", percent: clamp01(used), resetsAt };
 }
 
 export function parseCopilotQuota(payload) {

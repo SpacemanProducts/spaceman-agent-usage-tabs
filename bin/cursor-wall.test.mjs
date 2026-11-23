@@ -1,0 +1,27 @@
+import assert from "node:assert/strict";
+import fs from "node:fs"; import os from "node:os"; import path from "node:path";
+import { cursorWall } from "./cursor-wall.mjs";
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-wall-"));
+const mk = (proj, id, lines, ageMs) => {
+  const d = path.join(tmp, proj, "agent-transcripts", id); fs.mkdirSync(d, { recursive: true });
+  const f = path.join(d, id + ".jsonl"); fs.writeFileSync(f, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const t = new Date(Date.now() - ageMs); fs.utimesSync(f, t, t);
+};
+const ERR = { type: "turn_ended", status: "error", error: "You've hit your usage limit Get Cursor Pro for more Agent usage, unlimited Tab, and more." };
+const OK = { type: "turn_ended", status: "completed" };
+const reset = new Date(Date.now() + 20 * 864e5).toISOString();
+assert.equal(cursorWall(path.join(tmp, "nope")), null, "no Cursor folder: nothing");
+assert.equal(cursorWall(tmp), null, "no transcripts: nothing");
+mk("a", "s1", [{ role: "user" }, ERR], 60e3);
+const w = cursorWall(tmp, Date.now(), { resetsAt: reset });
+assert.equal(w.percent, 1); assert.equal(w.cap, true); assert.match(w.note, /usage limit/); assert.ok(!/Get Cursor Pro/.test(w.note));
+assert.equal(w.resetsAt, reset);
+assert.equal(cursorWall(tmp, Date.parse(reset) + 1, { resetsAt: reset }), null, "meters reset: wall gone");
+mk("b", "s2", [{ role: "user" }, OK], 10e3);
+assert.equal(cursorWall(tmp, Date.now(), { resetsAt: reset }), null, "a later turn went through: lifted");
+mk("a", "s1", [ERR], 5e3);
+assert.ok(cursorWall(tmp, Date.now(), { resetsAt: reset }), "a newer hit stands again");
+mk("c", "s3", [{ type: "turn_ended", status: "error", error: "network down" }], 1e3);
+assert.ok(cursorWall(tmp), "an unrelated error neither raises nor lifts it");
+fs.rmSync(tmp, { recursive: true, force: true });
+console.log("cursor-wall: all tests passed");

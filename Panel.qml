@@ -439,7 +439,10 @@ Panel {
   Process {
     id: folderBrowser
     command: ["zenity", "--file-selection", "--directory", "--title=Choose a folder", "--filename=" + root.home + "/Projects/"]
-    stdout: StdioCollector { onStreamFinished: { var p = String(text).trim(); if (p !== "") { root.squadRepo = p; root.squadNewName = "" } } }
+    // A folder picked here joins the list (selected, with its check mark), so the pick is visible and Start/Run are ready.
+    stdout: StdioCollector { onStreamFinished: { var p = String(text).trim(); if (p !== "") {
+      if (root.squadRepos.indexOf(p) < 0) root.squadRepos = [p].concat(root.squadRepos)
+      root.squadRepo = p; root.squadNewName = "" } } }
   }
   Process {
     id: nameAsker
@@ -2076,7 +2079,7 @@ Panel {
           // ---------------- Tokens by day: collapsible, closed by default,
           // today's total stays visible in the header either way.
           Column {
-            visible: root.showDetail
+            visible: root.showDetail && root.agent.hasTokens !== false
             width: parent.width
             spacing: Style.space(6)
 

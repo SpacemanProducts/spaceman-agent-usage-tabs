@@ -44,5 +44,8 @@ assert.equal(repos()[0], path.join(proj, "fresh"), "the last repo is kept");
 // a folder that doesn't exist: says so, starts nothing
 r = run({ AGENT_DIR: path.join(tmp, "gone") });
 assert.notEqual(r.status, 0); assert.match(r.stdout, /No such folder/);
+// the panel adds a Browse pick to the list, selected, so the pick is visible
+const qml = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
+assert.match(qml, /squadRepos\.indexOf\(p\) < 0\) root\.squadRepos = \[p\]\.concat\(root\.squadRepos\)/, "a folder picked with Browse joins the list");
 fs.rmSync(tmp, { recursive: true });
 console.log("agent-here: all tests passed");

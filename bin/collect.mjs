@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { cursorWall } from "./cursor-wall.mjs";
 import { spawnSync } from "node:child_process";
 import { parseClaudeLimits, parseClaudeResets } from "./claude-limits.mjs";
 import { applyResets, resetNotice, resetNotifyArgs, resetAssets } from "./reset-celebration.mjs";
@@ -274,6 +275,13 @@ for (const a of AGENTS) {
   if (cant && !(out.limits || []).length && !(a.id === "kimi" && out.signedIn !== false)) out.cantRead = cant;
   if (a.catalog && a.builtin) Object.assign(out, { usageType: a.catalog.usageType, planNote: tabNote(a.catalog, CATALOG.types), catalog: true });
 
+  // Cursor: its dashboard can say 0% after the CLI was stopped by the limit. The CLI's own transcript is the
+  // only sign, so a standing hit replaces the 0% meters, which are known not to count it.
+  if (a.id === "cursor") {
+    const w = cursorWall(path.join(HOME, ".cursor", "projects"), Date.now(), { resetsAt: (out.limits || []).find((l) => l.resetsAt)?.resetsAt || "" });
+    if (w) out.limits = [w];
+  }
+
   // Plan limits, usage and resets only: never spend, overage or top-up meters.
   out.limits = expireResets(planLimitsOnly(out.limits));
 
@@ -291,6 +299,7 @@ for (const a of AGENTS) {
   for (const m of checkAgentData({ ...out, installed: true })) diag.add(a.id, m);
   out.dataWarning = diag.summary(a.id);
   out.today = out.days.length ? out.days[out.days.length - 1].tokens : 0;
+  out.hasTokens = a.id === "cursor" ? out.days.some((d) => d.tokens > 0) : out.days.length > 0;   // Cursor keeps no token counts of its own, so a week of zeros is "no source", not "0 used"
   delete out.note;
   agents.push(out);
 }

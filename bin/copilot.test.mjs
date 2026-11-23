@@ -33,4 +33,12 @@ assert.equal(parseCopilotQuota({ copilot_plan: "free", quota_snapshots: { chat: 
 // a paid plan whose chat and completions are unlimited gets no extra meters, only its premium meter
 const paid = parseCopilotQuota({ copilot_plan: "individual", quota_reset_date_utc: "2026-12-01T00:00:00.000Z", quota_snapshots: { chat: { unlimited: true, entitlement: -1 }, completions: { unlimited: true }, premium_interactions: { entitlement: 300, credits_used: 30, unlimited: false } } });
 assert.equal(paid.plan, "Pro"); assert.deepEqual(paid.limits.map((l) => l.title), ["Monthly"]);
+// ---- token-based billing: the allowance is in AI credits, and the note counts them (real payload 2026-11-23: 194.9 of 200 left)
+{
+  const r = parseCopilotQuota({ copilot_plan: "individual", access_type_sku: "free_limited_copilot", quota_reset_date_utc: "2026-12-01T00:00:00.000Z", quota_snapshots: {
+    chat: { entitlement: 200, remaining: 194, quota_remaining: 194.9, percent_remaining: 97.4, unlimited: false, has_quota: true, credits_used: 5, token_based_billing: true },
+    premium_interactions: { entitlement: 0, has_quota: false } } });
+  assert.equal(r.limits[0].note, "5.1 of 200 AI credits used. Shared plan quota");
+  assert.ok(Math.abs(r.limits[0].percent - 0.026) < 1e-9);
+}
 console.log("copilot: all tests passed");

@@ -6,6 +6,16 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.21.0 - 2026-11-23
+- **Cursor:** its dashboard can say 0% after the CLI was stopped by "You've hit your usage limit" (checked on a Free account). The CLI records
+  that in its transcripts, so a standing hit now shows a red "Cursor limit" row (`bin/cursor-wall.mjs`) until a later turn succeeds or the
+  meters reset. The "Auto · 44.7%" in Cursor's status bar is the context-window fill, not usage, and is not shown. Cursor has no token source,
+  so its tab no longer says "Today 0".
+- **Copilot:** the Free chat allowance is in AI credits (AIC, the unit in Copilot's status bar); the meter says how many of the 200 are used.
+  GitHub's counters trail a finished session by a short while, so the meter can lag it.
+- **Start-agent Browse:** the folder you pick now appears in the list, selected, and a repo under a dot-folder (like this plugin in
+  `~/.config`) is no longer hidden from the recent list.
+
 ## 1.20.0 - 2026-11-22
 - The header **>_** button opens its own screen with a Back button and the same folder picker as CS: recent repos first with the last
   one preselected, then + New project, then Browse. Start opens the default agent in a tiled terminal in that folder

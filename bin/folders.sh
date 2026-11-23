@@ -17,7 +17,11 @@ recent_repos() {
   { [[ -f $recent ]] && cat "$recent"
     find "$PROJECTS" -maxdepth 3 -name .git -prune -printf '%T@ %h\n' 2>/dev/null | sort -nr | cut -d' ' -f2-
   } | awk 'NF && !seen[$0]++' | while IFS= read -r d; do
-    is_repo "$d" && ! is_hidden "$(nice "$d")" && echo "$d"
+    # The hiding rules are for the clutter inside Projects. A repo somewhere else (picked with Browse, e.g. a plugin under
+    # ~/.config) was chosen on purpose, so a dot-folder in its path must not hide it.
+    is_repo "$d" || continue
+    [[ $d == "$PROJECTS"/* ]] && is_hidden "$(nice "$d")" && continue
+    echo "$d"
   done | head -8
 }
 remember() { mkdir -p "$(dirname "$recent")"; { echo "$1"; grep -vxF "$1" "$recent" 2>/dev/null; } | head -8 >"$recent.new" && mv "$recent.new" "$recent"; }
