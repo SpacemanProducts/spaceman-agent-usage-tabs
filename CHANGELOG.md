@@ -6,6 +6,10 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.23.0 - 2026-11-23
+- **Start agent in home:** the Start picker has a "No project" choice, and Start defaults to `~` when no folder is selected.
+  Existing folder choices are unchanged; the default agent picker still supports every installed agent.
+
 ## 1.22.0 - 2026-11-23
 - **Surprise reset for Claude:** a Claude meter that drops before its scheduled reset (a banked reset spent, or Anthropic resetting)
   plays the surprise celebration. The wording stays honest ("Claude weekly reset came early, go cook.").

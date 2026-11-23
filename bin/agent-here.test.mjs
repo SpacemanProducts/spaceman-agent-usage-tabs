@@ -41,11 +41,19 @@ assert.equal(r.stdout.trim(), `agent --inline --pick in ${real(plain)}`);
 assert.ok(!fs.existsSync(path.join(plain, ".git")), "a plain folder is left as it is");
 assert.equal(repos()[0], path.join(proj, "fresh"), "the last repo is kept");
 
+// The Start picker's "No project" option starts in home without changing the last repo
+r = run({ AGENT_DIR: home });
+assert.equal(r.stdout.trim(), `agent --inline --pick in ${real(home)}`);
+assert.equal(repos()[0], path.join(proj, "fresh"), "home is not added to the recent repo list");
+
 // a folder that doesn't exist: says so, starts nothing
 r = run({ AGENT_DIR: path.join(tmp, "gone") });
 assert.notEqual(r.status, 0); assert.match(r.stdout, /No such folder/);
 // the panel adds a Browse pick to the list, selected, so the pick is visible
 const qml = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
 assert.match(qml, /squadRepos\.indexOf\(p\) < 0\) root\.squadRepos = \[p\]\.concat\(root\.squadRepos\)/, "a folder picked with Browse joins the list");
+assert.match(qml, /visible: !fp\.forSquad[\s\S]*?text: \(homeChip\.on \? "\\u2713 " : ""\) \+ "No project"[\s\S]*?root\.squadRepo = root\.home/, "the Start picker offers home without changing Squad's folder choices");
+assert.match(qml, /agentHereReady: squadRepo !== "" \|\| squadNewName !== "" \|\| agentHereOpen/, "Start is ready with no folder selected");
+assert.match(qml, /"AGENT_DIR=" \+ \(squadRepo !== "" \? squadRepo : root\.home\)/, "no folder selection starts in home");
 fs.rmSync(tmp, { recursive: true });
 console.log("agent-here: all tests passed");

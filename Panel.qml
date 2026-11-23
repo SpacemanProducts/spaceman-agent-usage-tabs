@@ -403,9 +403,9 @@ Panel {
       if (!zenityCheck.running) zenityCheck.running = true
     }
   }
-  readonly property bool agentHereReady: squadRepo !== "" || squadNewName !== ""
+  readonly property bool agentHereReady: squadRepo !== "" || squadNewName !== "" || agentHereOpen
   function agentHereCommand() {
-    var env = squadNewName !== "" ? "AGENT_NEW=" + squadNewName : "AGENT_DIR=" + squadRepo
+    var env = squadNewName !== "" ? "AGENT_NEW=" + squadNewName : "AGENT_DIR=" + (squadRepo !== "" ? squadRepo : root.home)
     return ["omarchy-launch-tui", "--app-id=org.omarchy.agent", "env", env, "bash", pluginDir + "/bin/agent-here.sh"]
   }
   // Start runs the launcher through bin/launch-wait.sh, which confirms a window of the agent app-id really appeared (on any
@@ -922,6 +922,30 @@ Panel {
     Flow {
       width: parent.width
       spacing: Style.space(6)
+      Rectangle {
+        id: homeChip
+        visible: !fp.forSquad
+        readonly property bool on: root.squadRepo === root.home && root.squadNewName === ""
+        width: homeLabel.implicitWidth + Style.space(22)
+        height: homeLabel.implicitHeight + Style.space(14)
+        radius: Style.cornerRadius
+        color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
+                  : (homeArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent")
+        border.width: 1
+        border.color: on ? Color.accent : root.soft(root.foreground, 0.3)
+        Text {
+          id: homeLabel
+          anchors.centerIn: parent
+          textFormat: Text.PlainText
+          text: (homeChip.on ? "\u2713 " : "") + "No project"
+          color: homeChip.on ? Color.accent : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: homeChip.on
+        }
+        MouseArea { id: homeArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.squadRepo = root.home; root.squadNewName = "" } }
+        PanelToolTip { visible: homeArea.containsMouse; text: "Start in your home folder (~), without a project folder"; fontFamily: root.fontFamily }
+      }
       Repeater {
         model: root.squadRepos
         Rectangle {
