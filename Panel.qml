@@ -123,6 +123,12 @@ Panel {
     handoffAnswerer.running = true
     handoffPending = null
   }
+  // The bar robot looks angry (theme red) while the default agent is at 100%.
+  readonly property bool angryRobot: userSettings.angryRobot !== undefined
+    ? userSettings.angryRobot !== false : root.setting("angryRobot", true) !== false
+  property bool testAngry: false   // set for 8 s by the testAngry IPC hook, to check the look in the real bar
+  readonly property bool robotAngry: angryRobot && (barValue >= 1 || testAngry)
+  Timer { id: testAngryTimer; interval: 8000; onTriggered: root.testAngry = false }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
   // Settings (the gear), + (add an account) and CS (Claude Squad) each open as their own screen: the chips and usage are
@@ -195,6 +201,17 @@ Panel {
     qwen: "qwen", dsh: "dsh", mcode: "mcode", openclaw: "openclaw" })
   property string currentDefault: ""
   function isDefaultAgent(a) { return !!a && currentDefault !== "" && defaultNames[a.id] === currentDefault }
+  // The bar number follows only the default agent (the first tab until Omarchy's default is known):
+  // its session usage, or its weekly when that is higher. -1 when it reports neither.
+  readonly property var barAgent: {
+    for (var i = 0; i < rawAgents.length; i++) if (isDefaultAgent(rawAgents[i])) return rawAgents[i]
+    return agents.length > 0 ? agents[0] : null
+  }
+  readonly property real barValue: {
+    if (!barAgent) return -1
+    var m = ChipMeters.chipMeters(barAgent)
+    return Math.max(m.session, m.weekly)
+  }
   onFirstIdChanged: applyDefault()
   onFirstInstalledChanged: applyDefault()
   function applyDefault() {
@@ -242,6 +259,17 @@ Panel {
     if (t && t.at >= Number(a.resetAt || 0)) return t.magnitude
     return Number(a.resetMagnitude || 1)
   }
+  // A Test reset button: back to the main view first (the celebration plays on the chips), then
+  // fire it on the next frame so the whole animation is visible.
+  readonly property var testButtons: [
+    { text: "\u25b6  Test session reset", id: "claude", kind: "scheduled", win: "session" },
+    { text: "\u25b6  Test weekly reset", id: "claude", kind: "scheduled", win: "weekly" },
+    { text: "\u26a1  Test surprise reset", id: "antigravity", kind: "surprise", win: "weekly" }
+  ]
+  function pressTest(t) {
+    leaveSubView()
+    Qt.callLater(function() { root.fireTest(t.id, t.kind, t.win) })
+  }
   function fireTest(id, kind, win) {
     var surprise = kind === "surprise"
     var window = win || "session"
@@ -258,7 +286,7 @@ Panel {
     testKinds = kinds
     testResets = next
     if (resetSound) playTest(surprise ? "jackpot.wav" : "")
-    testNotifier.command = ["notify-send", "-a", "Cook Meter", "-u", "normal", "-i", "emblem-ok-symbolic",
+    testNotifier.command = ["notify-send", "-a", "Cook Meter", "-t", "8000", "-u", "normal", "-i", "emblem-ok-symbolic",
       "-h", "boolean:suppress-sound:true", "-h", "string:category:presence",
       "-h", "string:image-path:" + root.pluginDir + (surprise ? "/notify/surprise-burst.svg" : "/notify/cash-burst.svg"),
       surprise ? "Antigravity " + window + " reset came early, go cook." : name + " " + window + " reset, go cook.",
@@ -274,18 +302,6 @@ Panel {
     return 0
   }
   readonly property var agent: agents.length > 0 ? agents[selectedIndex] : null
-  // Highest session-window usage across every agent that reports one (-1: none).
-  readonly property real topSession: {
-    var top = -1
-    for (var i = 0; i < agents.length; i++) {
-      var ls = (agents[i].limits || []).slice()
-      var accts = agents[i].accounts || []
-      for (var k = 0; k < accts.length; k++) ls = ls.concat(accts[k].limits || [])
-      for (var j = 0; j < ls.length; j++)
-        if ((ls[j].hitAt || /session/i.test(String(ls[j].title))) && ls[j].percent > top) top = ls[j].percent
-    }
-    return top
-  }
 
   // Models section rows. The collector builds the full list (live data first,
   // then models.json): state is "used", "zero" (usable, unused) or
@@ -322,12 +338,15 @@ Panel {
 
   // Why a tab is gray (it has no meter at all): not installed, not signed in, or no usage source.
   // An agent's own status line, when it has one, already says more and wins.
+  // Every gray tab gets exactly one short line saying why: these cover every case the lines above don't.
   function grayReason(a) {
     if (!a || ChipMeters.chipMeters(a).session >= 0) return ""
-    if (String(a.status || "") !== "") return ""
-    if (a.usageType) return ""               // a catalog agent: its tab note already says how it reports usage
+    if (String(a.status || "") !== "" || String(a.cantRead || "") !== "") return ""
+    if (a.usageType && String(a.planNote || "") !== "") return ""   // a catalog agent: its tab note already says how it reports usage
     if (a.installed === false) return "Not installed."
     if (a.signedIn === false) return "Not signed in. Sign in with " + (a.cli || a.name) + " to see limits."
+    if (a.id === "claude") return "Claude Code didn't report limits this time; retrying on the next refresh."
+    if (a.usageType) return a.name + " doesn't report plan limits."
     return "No usage source: " + a.name + " doesn't report limits here."
   }
 
@@ -451,6 +470,27 @@ Panel {
   }
 
   function refreshNow() { if (!collector.running) collector.running = true }
+  // A window whose reset time has passed is reset: 0%, no hit, no red, until fresh data arrives
+  // (bin/expire-resets.mjs does the same in the collector). Then fetch that fresh data.
+  function expireResets() {
+    var now = Date.now(), changed = false
+    function fix(ls) {
+      return (ls || []).map(function(l) {
+        var t = new Date(String((l && l.resetsAt) || "")).getTime()
+        if (!isFinite(t) || t > now || !(Number(l.percent) > 0)) return l
+        changed = true
+        var c = Object.assign({}, l); delete c.hitAt
+        c.percent = 0; c.resetsAt = ""; c.note = "Reset, waiting for fresh data."
+        return c
+      })
+    }
+    var next = rawAgents.map(function(a) {
+      var b = Object.assign({}, a); b.limits = fix(a.limits)
+      if (a.accounts) b.accounts = a.accounts.map(function(x) { var y = Object.assign({}, x); y.limits = fix(x.limits); return y })
+      return b
+    })
+    if (changed) { rawAgents = next; refreshNow() }
+  }
 
   function fmtTokens(n) {
     n = Number(n) || 0
@@ -515,6 +555,7 @@ Panel {
         root.pluginVersion = d && d.version ? String(d.version) : ""
         root.rawAgents = d && Array.isArray(d.agents) ? d.agents : []
         root.dataGeneratedAt = d && Number(d.generatedAt) > 0 ? Number(d.generatedAt) : 0
+        root.expireResets()
         // A reset the collector flagged since the last load -> celebrate. The first
         // load only records what is already there (no pop-up when the shell starts).
         var seen = root.lastResetSeen, fresh = []
@@ -589,7 +630,15 @@ Panel {
     interval: 30000
     running: root.opened
     repeat: true
-    onTriggered: root.nowMs = Date.now()
+    onTriggered: { root.nowMs = Date.now(); root.expireResets() }
+  }
+
+  // The bar number and chips clear right at a reset even while the panel is closed.
+  Timer {
+    interval: 30000
+    running: true
+    repeat: true
+    onTriggered: root.expireResets()
   }
 
   IpcHandler {
@@ -601,6 +650,10 @@ Panel {
     function testAutoOpen(): string { root.autoCelebrate("claude"); root.fireTest("claude"); return "ok" }
     function testSurprise(): string { root.fireTest("antigravity", "surprise"); return "ok" }
     function testSurpriseAutoOpen(): string { root.autoCelebrate("antigravity"); root.fireTest("antigravity", "surprise"); return "ok" }
+    // Test hook: press Settings' Test reset button `i` (0 session, 1 weekly, 2 surprise), same path as a click.
+    function pressTest(i: string): string { var t = root.testButtons[Number(i)]; if (!t) return "no such button"; root.pressTest(t); return t.win }
+    // Test hook: show the angry robot for 8 seconds (only if the gear switch is on).
+    function testAngry(): string { root.testAngry = true; testAngryTimer.restart(); return root.robotAngry ? "angry" : "switched off" }
     function testCelebration(): string { root.fireTest("claude"); return "ok" }
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
@@ -826,12 +879,13 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󱚣"
-    // Like the battery: a number beside the icon, amber from 60%, red above 85%.
-    labelText: root.topSession >= 0 ? Math.round(root.topSession * 100) + "%" : ""
-    slotSize: Style.bar.iconSlot * (root.topSession >= 0 ? 2 : 1)
-    active: root.topSession >= 0.6
-    activeColor: root.meterColorFor(root.topSession, root.lightBar)
+    // Angry robot (angry eyes, the theme's red) while the default agent is at 100%; back by itself at the reset.
+    text: root.robotAngry ? "\u{f169d}" : "\u{f16a3}"
+    // The default agent's number beside the icon, colored like its chip (green, amber from 60%, red above 85%).
+    labelText: root.barValue >= 0 ? Math.round(root.barValue * 100) + "%" : ""
+    slotSize: Style.bar.iconSlot * (root.barValue >= 0 ? 2 : 1)
+    active: root.barValue >= 0
+    activeColor: root.robotAngry ? Color.urgent : root.meterColorFor(root.barValue, root.lightBar)
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) root.selectIndex(root.selectedIndex + 1)
       else root.toggle()
@@ -1514,6 +1568,12 @@ Panel {
               checked: root.handoffNote
               onToggled: root.writeSetting(["handoffNote", String(!root.handoffNote)])
             }
+            SettingSwitch {
+              width: parent.width
+              label: "Angry robot when the default agent is out"
+              checked: root.angryRobot
+              onToggled: root.writeSetting(["angryRobot", String(!root.angryRobot)])
+            }
 
             PanelSectionHeader { width: parent.width; text: "RESET CELEBRATION" }
             SettingSwitch {
@@ -1546,11 +1606,7 @@ Panel {
               width: parent.width
               spacing: Style.space(8)
               Repeater {
-                model: [
-                  { text: "\u25b6  Test session reset", id: "claude", kind: "scheduled", win: "session" },
-                  { text: "\u25b6  Test weekly reset", id: "claude", kind: "scheduled", win: "weekly" },
-                  { text: "\u26a1  Test surprise reset", id: "antigravity", kind: "surprise", win: "weekly" }
-                ]
+                model: root.testButtons
                 Rectangle {
                   required property var modelData
                   width: testLabel.implicitWidth + Style.space(24)
@@ -1573,7 +1629,7 @@ Panel {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.fireTest(modelData.id, modelData.kind, modelData.win)
+                    onClicked: root.pressTest(modelData)
                   }
                 }
               }
@@ -1898,9 +1954,9 @@ Panel {
                 }
                 MouseArea { id: modelHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                 PanelToolTip {
-                  visible: modelHover.containsMouse && modelData.state === "used"
+                  visible: modelHover.containsMouse && (modelData.state === "used" || !!modelData.tip)
                   fontFamily: root.fontFamily
-                  text: "In " + root.fmtTokens(modelData.input) + " · out " + root.fmtTokens(modelData.output) + " · cache read " + root.fmtTokens(modelData.cacheRead) + " · cache write " + root.fmtTokens(modelData.cacheWrite)
+                  text: (modelData.tip ? modelData.tip + (modelData.state === "used" ? "\n" : "") : "") + (modelData.state !== "used" ? "" : "In " + root.fmtTokens(modelData.input) + " · out " + root.fmtTokens(modelData.output) + " · cache read " + root.fmtTokens(modelData.cacheRead) + " · cache write " + root.fmtTokens(modelData.cacheWrite))
                 }
               }
             }

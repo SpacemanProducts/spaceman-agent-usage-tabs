@@ -43,7 +43,8 @@ From a local copy of the repo instead: `omarchy plugin add /path/to/spaceman-age
 
 **2. Click the robot icon in the bar.** Each tool you have installed gets a tab. Tools you
 haven't installed are hidden, and a new one shows up on its own the next time the panel
-refreshes (every 5 minutes).
+refreshes (every 5 minutes). The number beside the icon is your default agent's (the first tab):
+its session usage, or its weekly when that is higher, colored like its chip.
 
 **3. Sign in to the tools you want to see.** A tab for a tool you aren't signed in to says
 so in one line. These need a login first:
@@ -80,14 +81,19 @@ local until you sign in).
 - Tabs for agents that aren't installed are hidden; they appear automatically once you
   install the tool, with a one-time notification. You can also hide any installed tab on
   purpose (in the gear settings), and it stays hidden until you turn it back on.
-- A **gray** tab has no meter at all, and says why: *Not installed*, *Not signed in*, or *No usage source* (the agent
-  doesn't report limits here). A monthly or credit-style meter still colors the chip.
+- A **gray** tab always says why in one short line: its own status (for example *Limits unavailable* or, for Claude Code used
+  without a plan login, *In use, but no Claude plan login found*), *Not installed*, *Not signed in*, or *No usage source* (the agent
+  doesn't report limits here). A monthly or credit-style meter still colors the chip. Gray with "unsure" means the reading is out of date.
+- **A window is reset the moment its reset time passes:** the chip, the bar number and the tab drop to 0% ("Reset, waiting for
+  fresh data") right away, with no stale red left, and fresh data is fetched.
 - When a hidden agent signs in for the first time, you get a one-time "now available" notice.
 
 **Inside a tab**
 - **Limits:** session, weekly and monthly meters, each with a reset countdown and the exact
   local reset time (`resets in 3d 2h · Tue Nov 24, 3:12 AM`).
-- **Models:** every model the agent can use. Models in use come first; unused ones are
+- **Models:** every model the agent can use, over the last 7 days for Claude Code and Antigravity. Raw ids get readable names;
+  Antigravity's background worker models (like `gemini-flash-worker-agy`) are grouped as **Background workers**, and tokens
+  Antigravity didn't name a model for show as **Unlabeled usage** (hover for why). Models in use come first; unused ones are
   dimmed with a 0; models your plan can't use say *unavailable* (never 0); models with an
   announced removal carry an amber *removing Dec 14* badge. Long lists show 8 rows with a
   "N more models" toggle.
@@ -105,7 +111,7 @@ local until you sign in).
 | Agent | What it shows |
 |---|---|
 | Copilot | The plan name (a Free account is told apart by GitHub's `access_type_sku`, not `copilot_plan`, which says "individual" for it too). Meters for what the plan limits: **Chat and agent requests** (shared plan quota) and **Editor autocomplete** (not used by the CLI), plus premium requests when the plan includes them. A plan with nothing limited shows its reset date. |
-| Antigravity | One bar per pool and window that Google reports (Gemini and Claude/GPT, each with a session and a weekly bucket). A Free plan reports only the Claude/GPT weekly bucket, so that is the only bar. |
+| Antigravity | One bar per pool and window that Google reports (Gemini and Claude/GPT), a 5-hour **Session** bar beside the weekly one whenever Google sends one. A Free plan reports only the Claude/GPT weekly bucket. **Verified on a real Ultra account:** the Claude/GPT weekly pool and "no Gemini limit on Ultra" read correctly. A 5-hour bucket on Pro or Ultra hasn't been seen yet; it shows if Google reports one. |
 | OpenCode | A note that free models have an unpublished daily limit. |
 | Kimi | Whichever windows your login reports; nothing without a login. |
 | Kiro | A credits meter (used of the monthly total) with its reset date. |
@@ -116,7 +122,9 @@ local until you sign in).
 - **Each alert fires once per usage window, per agent:** one notification when a session or weekly limit first passes the threshold
   (95% by default, adjustable), one when the limit is hit (100%), and one celebration per reset. What already fired is remembered
   across restarts and forgotten only when that window resets, so a meter that stays high, flickers or briefly fails to load
-  never repeats an alert.
+  never repeats an alert. Every notification (alerts, resets, notices) closes by itself after about 8 seconds.
+- **Angry robot:** while your default agent is at 100%, the bar robot gets angry eyes in the theme's red. It goes back to normal
+  by itself when the limit resets or frees up. Switch it off under **Alerts** in the gear settings.
 - When a session or weekly meter drops by more than 50 points, that's a reset, and you
   get a short celebration: the panel opens on that agent's tab (**without taking keyboard
   focus**), confetti bursts over its chip while the chip flashes green, a short cha-ching
@@ -140,7 +148,7 @@ local until you sign in).
   you spending a banked reset yourself).
 
 **The gear icon** in the panel header opens a short settings view (shown below), grouped under four headings:
-**Display** (hide uninstalled agents, show unused models), **Alerts** (write a handoff note near the limit),
+**Display** (hide uninstalled agents, show unused models), **Alerts** (write a handoff note near the limit, angry robot when the default agent is out),
 **Reset celebration** (the animation, opening the panel on
 reset, the sound and its volume, and **Test session reset**, **Test weekly reset** and **Test surprise reset** buttons
 that replay each celebration any time) and **Tabs** (a switch per agent, plus **Reset order**).
@@ -154,7 +162,7 @@ on-demand spend and top-ups are deliberately never displayed.
 
 If an agent has more than one signed-in account in Omarchy's own account list (`omarchy agent account`),
 its tab lists each account: label, plan, an ACTIVE mark, and its own session and weekly meters. The tab
-chip, the bar number and the alerts use the worst meter across the accounts, and a reset celebration
+chip, the bar number (for the default agent) and the alerts use the worst meter across the accounts, and a reset celebration
 names the account that reset. The plugin only reads Omarchy's usage records through
 `omarchy-agent-account-list`; it never reads or stores credentials, and email addresses are dropped.
 
@@ -294,7 +302,7 @@ three are set only in the plugin's entry in `~/.config/omarchy/shell.json`:
 
 Gear settings, all on by default: `hideUninstalledAgents`, `showUnusedModels`,
 `resetAnimation`, `resetSound` (with `resetVolume`, 0-100, default 60), `autoOpenOnReset`,
-`handoffNote`, and `hiddenAgents` (the tabs you hid), plus `tabOrder` (your saved order, set by dragging). They also work as keys in `shell.json`.
+`handoffNote`, `angryRobot`, and `hiddenAgents` (the tabs you hid), plus `tabOrder` (your saved order, set by dragging). They also work as keys in `shell.json`.
 
 Agent ids: `claude`, `antigravity`, `grok`, `codex`, `copilot`, `cursor`, `opencode`,
 `kimi`, `kiro`, `devin`, `amp`, `hermes`, plus the catalog agents (`qwen`, `vibe`, `droid`, `auggie`, `dsh`,
@@ -309,7 +317,7 @@ panel only reads it.
 | Agent | Source |
 |---|---|
 | Claude Code | Anthropic's OAuth usage endpoint with your Claude Code login, plus tokens from your local transcripts (last 7 days). Cached 5 minutes because the endpoint rate-limits. |
-| Grok | Grok's billing endpoints, with the Grok CLI login, plus the free per-model cap Grok logs when a turn hits it (`~/.grok/logs/unified.jsonl`). |
+| Grok | Grok's billing endpoints, with the Grok CLI login, plus the free per-model cap from Grok's log (`~/.grok/logs/unified.jsonl`): red at 100% when Grok reports the hit, otherwise estimated from the tokens it logs per call. |
 | Antigravity | Google's quota endpoint, with the local `agy` login. |
 | Copilot | GitHub's Copilot quota endpoint, with the token `gh auth token` prints. |
 | Kiro | `kiro-cli chat --no-interactive "/usage"`. |
@@ -325,7 +333,7 @@ or refreshes a token itself.
 
 Each tab's Models list is built live-data-first:
 
-1. models the agent reported using (last 7 days for Claude, all time for the others),
+1. models the agent reported using (last 7 days for Claude and Antigravity, read from their own transcripts; all time for the others),
 2. models the agent's own CLI says it can use, refreshed every 6 hours (`agy models`,
    `grok models`, `opencode models`, `devin models`, `kiro-cli chat --list-models`,
    `codex debug models`),

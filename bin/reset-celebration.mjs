@@ -54,7 +54,7 @@ export function resetAssets(kind) {
 // (the renderer shows a sender image in full colour), silent from the daemon's
 // side because the cha-ching is played separately, in sync, by us.
 export function resetNotifyArgs(notice, imagePath) {
-  const args = ["-a", "Cook Meter", "-u", "normal", "-i", "emblem-ok-symbolic",
+  const args = ["-a", "Cook Meter", "-t", "8000", "-u", "normal", "-i", "emblem-ok-symbolic",
     "-h", "boolean:suppress-sound:true", "-h", "string:category:presence"];
   if (imagePath) args.push("-h", `string:image-path:${imagePath}`);
   return [...args, notice.title, notice.body];

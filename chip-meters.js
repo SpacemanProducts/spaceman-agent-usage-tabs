@@ -14,8 +14,9 @@ function chipMeters(agent) {
     var p = limits[i] ? limits[i].percent : NaN
     if (typeof p !== "number" || !isFinite(p) || p < 0) continue
     var t = String(limits[i].title || "")
-    // A limit that is full (100%), or one the agent reported hitting, is a wall now: it colors both.
-    if (p >= 1 || limits[i].hitAt) { if (p > session) session = p; if (p > weekly) weekly = p }
+    // A full limit (100%), one the agent reported hitting, or a cap that walls the agent off (Grok's free
+    // per-model cap) colors both.
+    if (p >= 1 || limits[i].hitAt || limits[i].cap) { if (p > session) session = p; if (p > weekly) weekly = p }
     else if (/session/i.test(t)) { if (p > session) session = p }
     else if (/weekly/i.test(t)) { if (p > weekly) weekly = p }
     else if (p > other) other = p

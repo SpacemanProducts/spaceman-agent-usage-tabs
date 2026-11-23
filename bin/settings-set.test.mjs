@@ -58,3 +58,4 @@ assert.deepEqual(applyHidden({}, "openclaw", "true"), { hiddenAgents: ["openclaw
 assert.deepEqual(applyOrder({}, "qwen,claude").tabOrder, ["qwen", "claude"]);
 assert.equal(DEFAULT_ORDER.indexOf("claude"), 0); assert.ok(DEFAULT_ORDER.indexOf("openclaw") > DEFAULT_ORDER.indexOf("hermes"), "catalog agents come after the core twelve");
 console.log("settings-set: catalog ids ok");
+assert.deepEqual(applySetting({}, "angryRobot", "false"), { angryRobot: false }, "angry robot switch");

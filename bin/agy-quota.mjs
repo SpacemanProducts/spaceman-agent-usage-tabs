@@ -21,16 +21,25 @@ export function quotaGroups(q) {
   return groups;
 }
 
+// What real accounts report (checked 2026-11-22):
+//  - Free: only the Claude/GPT weekly bucket ("3p-weekly"); no Gemini limit.
+//  - Ultra (a real paid account): the Claude/GPT weekly pool and no Gemini limit, both read correctly (verified).
+//  - A 5-hour bucket on Pro or Ultra: NOT confirmed. None has been seen yet. If Google sends one, it is shown as
+//    its own "<pool> Session" bar right before that pool's weekly bar; nothing here assumes it exists.
 export function parseQuota(q) {
   const limits = [];
   for (const g of quotaGroups(q)) {
     const label = poolLabel(g.displayName);
+    const rows = [];
     for (const b of Array.isArray(g.buckets) ? g.buckets : []) {
       const u = used(b); if (u === null) continue;
-      // Non-Gemini pools are scoped allowances: shown once touched.
-      if (label !== "Gemini" && u === 0) continue;
-      limits.push({ title: `${label} ${isWeekly(b) ? "Weekly" : "Session"}`, percent: u, resetsAt: resetOf(b) });
+      rows.push({ title: `${label} ${isWeekly(b) ? "Weekly" : "Session"}`, percent: u, resetsAt: resetOf(b) });
     }
+    // Non-Gemini pools are scoped allowances: shown once any of their windows is touched, then all of them
+    // (a fresh 5-hour window still shows beside a used weekly one).
+    if (label !== "Gemini" && !rows.some((r) => r.percent > 0)) continue;
+    rows.sort((a, b) => a.title.endsWith("Weekly") - b.title.endsWith("Weekly"));   // Session, then Weekly
+    limits.push(...rows);
   }
   return limits;
 }

@@ -20,3 +20,11 @@ assert.deepEqual(parseQuota({ buckets: [{ window: "weekly", remainingFraction: 0
 assert.deepEqual(parseQuota(null), []); assert.deepEqual(parseQuota({}), []);
 assert.equal(poolLabel("Gemini 4 models"), "Gemini"); assert.equal(poolLabel("Claude and GPT models"), "Claude/GPT"); assert.equal(poolLabel(""), "Other");
 console.log("agy-quota: all tests passed");
+// A Pro/Ultra-style pool with an untouched 5-hour window beside a used weekly one: both show, Session first.
+assert.deepEqual(parseQuota({ groups: [{ displayName: "Claude and GPT models", buckets: [
+  { bucketId: "3p-weekly", window: "weekly", remainingFraction: 0.6, resetTime: R },
+  { bucketId: "3p-session", window: "5-hour", remainingFraction: 1, resetTime: R }] }] }).map((l) => [l.title, l.percent]),
+  [["Claude/GPT Session", 0], ["Claude/GPT Weekly", 0.4]]);
+// Ultra as reported by a real account: the Claude/GPT weekly pool only, no Gemini bucket.
+assert.deepEqual(parseQuota({ groups: [{ displayName: "Claude and GPT models", buckets: [{ bucketId: "3p-weekly", window: "weekly", remainingFraction: 0.25, resetTime: R }] }] })
+  .map((l) => l.title), ["Claude/GPT Weekly"]);

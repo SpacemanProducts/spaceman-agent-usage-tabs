@@ -1,0 +1,11 @@
+import assert from "node:assert/strict";
+import { friendlyModels, prettyId } from "./model-names.mjs";
+const row = (name, total, state = "used") => ({ name, id: name, input: total, output: 0, cacheRead: 0, cacheWrite: 0, total, state, removing: "" });
+assert.equal(prettyId("claude-sonnet-4-6"), "Claude Sonnet 4.6");
+assert.equal(prettyId("gemini-3.8-flash-high"), "Gemini 3.8 Flash High");
+const out = friendlyModels([row("Gemini 3.8 Flash", 500), row("gemini-flash-worker-agy", 30), row("gemini-pro-worker-agy", 20), row("unknown", 10), row("claude-opus-9-1", 5)], "Antigravity");
+assert.deepEqual(out.map((r) => r.name), ["Gemini 3.8 Flash", "Background workers", "Unlabeled usage", "Claude Opus 9.1"]);
+assert.equal(out[1].total, 50); assert.match(out[1].tip, /gemini-flash-worker-agy, gemini-pro-worker-agy/);
+assert.equal(out[2].tip, "Antigravity didn't name the model for these tokens.");
+assert.equal(out[0].tip, undefined, "named rows untouched");
+console.log("model-names ok");

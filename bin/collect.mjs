@@ -18,6 +18,9 @@ import { planLimitsOnly } from "./plan-limits.mjs";
 import { codexResets } from "./codex-resets.mjs";
 import { planAlerts, markFired, alertText, planHandoffTriggers, markHandoffFired } from "./alert-state.mjs";
 import { buildModels } from "./models.mjs";
+import { expireResets, anyPassed } from "./expire-resets.mjs";
+import { agyLastDays } from "./agy-days.mjs";
+import { friendlyModels } from "./model-names.mjs";
 import { liveModels } from "./live-models.mjs";
 import { planInfo } from "./plan-info.mjs";
 import { makeInstalledCheck, agentCli } from "./installed.mjs";
@@ -134,7 +137,8 @@ function claudeTranscripts() {
 const CLAUDE_MIN_INTERVAL_MS = 5 * 60 * 1000;
 async function claudeLimits(previous) {
   // Anthropic rate-limits this endpoint; panel opens must not each hit it.
-  if (previous?.limitsFetchedAt && Date.now() - previous.limitsFetchedAt < CLAUDE_MIN_INTERVAL_MS && (previous.limits || []).length)
+  // (A cached window whose reset time has passed is stale: fetch again.)
+  if (previous?.limitsFetchedAt && Date.now() - previous.limitsFetchedAt < CLAUDE_MIN_INTERVAL_MS && (previous.limits || []).length && !anyPassed(previous.limits))
     return { limits: previous.limits, plan: previous.plan || "", resets: previous.resets || null, status: "", fetchedAt: previous.limitsFetchedAt };
   const creds = readJson(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), ".credentials.json"))?.claudeAiOauth;
   if (!creds?.accessToken) return { status: "Not signed in — run `claude` to log in." };
@@ -218,6 +222,9 @@ for (const a of AGENTS) {
     const lim = await claudeLimits(prevAgent("claude"));
     Object.assign(out, { plan: lim.plan || "", limits: lim.limits || [], status: lim.status || "", models: modelRows(byModel), modelScope: "last 7 days", days: daysFrom(byDay), limitsFetchedAt: lim.fetchedAt || 0, resets: lim.resets || null,
       signedIn: fs.existsSync(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), ".credentials.json")) });
+    // Used here but no plan login we can read (an API-key login, or credentials kept elsewhere): say that, not "not signed in".
+    if (!out.limits.length && /^Not signed in/.test(out.status) && Object.keys(byModel).length)
+      out.status = "In use, but no Claude plan login found to read limits (API-key logins have none).";
     // Showing last-known limits that couldn't be refreshed: not current, so not green.
     if (out.limits.length && !(lim.fetchedAt > Date.now() - 15 * 60 * 1000))
       out.unsure = lim.fetchedAt ? `Last reading from ${new Date(lim.fetchedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}; couldn't refresh.` : "Couldn't confirm this reading is current.";
@@ -281,14 +288,19 @@ for (const a of AGENTS) {
   if (a.catalog && a.builtin) Object.assign(out, { usageType: a.catalog.usageType, planNote: tabNote(a.catalog, CATALOG.types), catalog: true });
 
   // Plan limits, usage and resets only: never spend, overage or top-up meters.
-  out.limits = planLimitsOnly(out.limits);
+  out.limits = expireResets(planLimitsOnly(out.limits));
 
-  // Models section: live data first, then the editable models.json entries.
-  out.models = buildModels({
+  // Antigravity: the last 7 days from agy's own transcripts, like Claude (Omarchy's record is all time).
+  if (a.id === "antigravity") {
+    const week = agyLastDays(process.env.AGY_DIR || path.join(HOME, ".gemini", "antigravity-cli"));
+    if (week) { out.models = modelRows(week); out.modelScope = "last 7 days"; }
+  }
+  // Models section: live data first, then the editable models.json entries; raw ids get friendly names.
+  out.models = friendlyModels(buildModels({
     plan: out.plan, used: out.models,
     live,
     config: modelsConfig()?.agents?.[a.id]?.models || [],
-  });
+  }), a.name);
   for (const m of checkAgentData({ ...out, installed: true })) diag.add(a.id, m);
   out.dataWarning = diag.summary(a.id);
   out.today = out.days.length ? out.days[out.days.length - 1].tokens : 0;
@@ -304,7 +316,7 @@ for (const a of AGENTS) {
   const r = spawnSync("omarchy-agent-account-list", ["--json"], { encoding: "utf8", env: ENV, timeout: 20000 });
   let list = null; try { list = JSON.parse(r.stdout || "null"); } catch {}
   const byProvider = buildAccounts(list);
-  for (const a of agents) if (byProvider[a.id]) a.accounts = byProvider[a.id].map((x) => ({ ...x, limits: planLimitsOnly(x.limits) }));
+  for (const a of agents) if (byProvider[a.id]) a.accounts = byProvider[a.id].map((x) => ({ ...x, limits: expireResets(planLimitsOnly(x.limits)) }));
 }
 
 // ------------------------------------------------- "now available" login notice
@@ -319,14 +331,14 @@ for (const a of AGENTS) {
   const INSTALLS = path.join(OUT_DIR, "agent-installs.json");
   const inst = planInstallNotices(prev?.agents, agents, settings, readJson(INSTALLS));
   for (const a of inst.notify) {
-    spawnSync("notify-send", ["-a", "Cook Meter", "-u", "normal", "-i", "emblem-ok-symbolic", "-h", "boolean:suppress-sound:true",
+    spawnSync("notify-send", ["-a", "Cook Meter", "-t", "8000", "-u", "normal", "-i", "emblem-ok-symbolic", "-h", "boolean:suppress-sound:true",
       `${a.name} is now available`, "It's installed - its tab has been added."], { env: ENV, timeout: 5000 });
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(INSTALLS, JSON.stringify(inst.notified) + "\n", { mode: 0o600 });
   const { notify, seen } = planLoginNotices(agents, settings, readJson(LOGINS));
   for (const a of notify) {
-    spawnSync("notify-send", ["-a", "Cook Meter", "-u", "normal", "-i", "emblem-ok-symbolic", "-h", "boolean:suppress-sound:true",
+    spawnSync("notify-send", ["-a", "Cook Meter", "-t", "8000", "-u", "normal", "-i", "emblem-ok-symbolic", "-h", "boolean:suppress-sound:true",
       `${a.name} is now available`, "You're signed in. Its tab is hidden - turn it on in the gear settings."], { env: ENV, timeout: 5000 });
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -361,7 +373,7 @@ function handoffCheck(list) {
         pendingFile: path.join(OUT_DIR, "handoff-pending.json") });
       if (r) for (const item of toFire) markHandoffFired(memory, item);   // asked, waiting or written: never again this window
       if (r === "asked")   // the first time only: nothing was written; the panel asks
-        spawnSync("notify-send", ["-a", "Cook Meter", "-u", "normal", "-i", "dialog-question", "-h", "boolean:suppress-sound:true",
+        spawnSync("notify-send", ["-a", "Cook Meter", "-t", "8000", "-u", "normal", "-i", "dialog-question", "-h", "boolean:suppress-sound:true",
           "Handoff note waiting for your OK", "A session is at 90% or more. Open Cook Meter to allow, skip or turn off handoff notes."], { env: ENV, timeout: 5000 });
     }
     fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -373,7 +385,7 @@ function notifyHighUsage(list) {
   const { toSend, memory } = planAlerts(list, readJson(NOTIFIED) || {}, THRESHOLD);
   for (const item of toSend) {
     const { title, body } = alertText(item, untilReset(item.limit.resetsAt));
-    const r = spawnSync("notify-send", ["-a", "Cook Meter", "-u", "critical", "-i", "dialog-warning", "-h", "boolean:suppress-sound:true", title, body], { env: ENV, timeout: 5000 });
+    const r = spawnSync("notify-send", ["-a", "Cook Meter", "-t", "8000", "-u", "normal", "-i", "dialog-warning", "-h", "boolean:suppress-sound:true", title, body], { env: ENV, timeout: 5000 });
     if (r.status === 0) {
       markFired(memory, item); // a failed send is not remembered, so it retries; a sent one never repeats this window
     }

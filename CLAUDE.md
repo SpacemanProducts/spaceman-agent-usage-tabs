@@ -116,5 +116,8 @@ keeps the developer in flow:
 - **Grok's free per-model cap is only in Grok's log (checked 2026-11-22).** Neither billing endpoint
   (`/v1/billing`, `?format=credits`) carries it; a turn that hits it logs a 429
   `subscription:free-usage-exhausted ... tokens (actual/limit): N/M` in `~/.grok/logs/unified.jsonl`.
-  `bin/grok-wall.mjs` reads that. Readings the plugin can't confirm are current and complete carry
-  `unsure` and show gray, never green (user rule, 2026-11-22).
+  `bin/grok-wall.mjs` reads that, and between hits estimates the 24 h total from each call's tokens
+  (prompt - 0.75*cached + completion: 647K vs Grok's 674K on the 2026-11-23 hit), scaled by the latest
+  hit. Red 100% only on a reported hit; an estimate never shows full.
+- **Gray "unsure" is only for out-of-date readings** (user rule, 2026-11-22). A bar Grok doesn't send a
+  number for (Weekly on Free) is hidden, not shown as 0% or unsure.

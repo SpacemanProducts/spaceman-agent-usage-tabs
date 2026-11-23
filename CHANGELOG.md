@@ -6,6 +6,32 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.17.0 - 2026-11-22
+- Every notification (limit alerts, resets, notices) closes by itself after about 8 seconds; the 100% alert was "critical" and
+  stayed until dismissed. Still once per window.
+- A window whose reset time has passed counts as reset right away: 0% ("Reset, waiting for fresh data"), no hit and no red on the
+  chip, the bar number or the tab, then fresh data is fetched. The collector does the same and skips Claude's 5-minute cache then.
+- Angry robot: while the default agent is at 100%, the bar robot gets angry eyes in the theme's red, and goes back by itself when
+  the limit resets or frees up. Gear switch under Alerts, on by default.
+- Antigravity models cover the last 7 days (from agy's own transcripts), like Claude. Raw model ids get readable names, background
+  worker models are grouped as "Background workers", and the "unknown" row is "Unlabeled usage" with a tooltip saying Antigravity
+  didn't name the model.
+- Antigravity: the Claude/GPT weekly pool and "no Gemini limit on Ultra" are verified on a real Ultra account. A 5-hour bucket on
+  Pro/Ultra hasn't been seen; if Google sends one it shows as its own Session bar before the weekly (an untouched one included).
+- A gray tab always says why in one line; Claude Code used without a plan login says so instead of "Not signed in".
+
+## 1.16.0 - 2026-11-22
+- Grok's free per-model cap is always shown on a Free plan. Until it's hit, the bar is estimated from the tokens Grok's log records for
+  each call in the last 24 h (uncached input + a quarter of cached input + output; within 4% of Grok's own count, and corrected by the
+  latest hit), never shown full. When Grok reports the hit, it's red at 100%. Both say "Grok doesn't report how much is left." The cap
+  colors the chip like any other wall.
+- Grok's Weekly bar shows only when Grok sends a weekly number (paid plans); the Free plan doesn't, so it's hidden.
+- The bar number follows only the default agent (the first tab): its session usage, or its weekly when higher, and it's always
+  colored like that agent's chip (green, amber, red). It used to show the highest session usage of any agent.
+- The Test reset buttons in Settings switch back to the main view first, then play the celebration, so you can see it.
+- Gray "unsure" is only for readings that are out of date (Claude limits not refreshed for 15 minutes, a collector that hasn't written
+  for three refreshes). Grok no longer marks readings unsure.
+
 ## 1.15.0 - 2026-11-22
 - Grok's free per-model cap (e.g. 600K tokens per rolling 24 h for grok-4.7) now shows as a meter once Grok reports hitting it, read
   from Grok's own log (`~/.grok/logs/unified.jsonl`); it turns the chip red and clears after a later turn succeeds or 24 h pass.

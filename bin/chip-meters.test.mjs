@@ -23,3 +23,4 @@ console.log("chip-meters: all tests passed");
 // A limit Grok reported hitting turns the chip red even beside a 0% Weekly.
 assert.deepEqual(cm([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "2026-11-23T01:18:32Z" }, L("Weekly", 0)]), { session: 1, weekly: 1 }, "hit limit colors both");
 assert.deepEqual(cm([L("Session", 0.2), L("Weekly", 0.1), L("Monthly", 1)]), { session: 1, weekly: 1 }, "any full limit colors both");
+assert.deepEqual(cm([{ title: "Free grok-4.7 (24 h)", percent: 0.7, cap: true }, L("Weekly", 0.1)]), { session: 0.7, weekly: 0.7 }, "a cap colors both");

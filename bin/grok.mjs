@@ -16,13 +16,10 @@ function readLogTail(p, max = 4 << 20) {
   try { const fd = fs.openSync(p, "r"), size = fs.fstatSync(fd).size, len = Math.min(size, max), b = Buffer.alloc(len);
     fs.readSync(fd, b, 0, len, size - len); fs.closeSync(fd); return b.toString("utf8"); } catch { return ""; }
 }
-const wall = grokWall(readLogTail(path.join(home, "logs", "unified.jsonl")));
 const out = (o) => {
   const r = { limits: [], plan: "", status: "", ...o };
+  const wall = grokWall(readLogTail(path.join(home, "logs", "unified.jsonl")), Date.now(), { free: /free/i.test(r.plan) });
   if (wall) { r.limits = [wall, ...r.limits]; if (r.status === "Grok reported no limit windows.") r.status = ""; }
-  // Can't confirm the reading is complete -> say so, so the panel shows it unsure instead of green.
-  else if (r.limits.length && /free/i.test(r.plan)) r.unsure ||= "Grok doesn't report its free per-model limits until one is hit, so this may be incomplete.";
-  if (!r.unsure && r.limits.some((l) => l.unsure)) r.unsure = r.limits.find((l) => l.unsure).unsure;
   process.stdout.write(JSON.stringify(r) + "\n"); process.exit(0);
 };
 const num = (v) => { if (v && typeof v === "object") v = v.val || 0; v = Number(v); if (!Number.isFinite(v)) throw new Error("nan"); return v; };
@@ -71,9 +68,10 @@ try {
   const c = (await get(`${BASE}?format=credits`)).config;
   const period = c.currentPeriod, ends = Date.parse(period.end);
   const unified = c.isUnifiedBillingUser === true;
-  let used = c.creditUsagePercent, unsure = "";
-  if (used === undefined) { if (ends <= Date.now()) throw new Error("ended period"); used = 0; unsure = "Grok sent no usage figure for this window; 0% is assumed."; }
-  limits.push({ title: String(period.type || "").includes("WEEK") ? "Weekly" : "Monthly", percent: clamp01(num(used) / 100), resetsAt: new Date(ends).toISOString(), ...(unsure && { unsure }) });
+  // A window bar only when Grok sends its number (paid plans do; the Free plan doesn't).
+  const used = c.creditUsagePercent;
+  if (used !== undefined)
+    limits.push({ title: String(period.type || "").includes("WEEK") ? "Weekly" : "Monthly", percent: clamp01(num(used) / 100), resetsAt: new Date(ends).toISOString() });
   if (unified) {
     try {
       const m = (await get(BASE)).config, quota = num(m.monthlyLimit);
