@@ -408,11 +408,26 @@ Panel {
     var env = squadNewName !== "" ? "AGENT_NEW=" + squadNewName : "AGENT_DIR=" + squadRepo
     return ["omarchy-launch-tui", "--app-id=org.omarchy.agent", "env", env, "bash", pluginDir + "/bin/agent-here.sh"]
   }
+  // Start runs the launcher through bin/launch-wait.sh, which confirms a window of the agent app-id really appeared (on any
+  // workspace). The panel closes only then; if it fails, the reason shows in the panel instead of nothing happening.
+  property string agentHereError: ""
+  property bool agentHereStarting: false
   function launchAgentHere() {
-    if (!agentHereReady) return
-    squadLauncher.command = agentHereCommand()
-    squadLauncher.running = true
-    close()
+    if (!agentHereReady || agentLauncher.running) return
+    agentHereError = ""
+    agentHereStarting = true
+    agentLauncher.command = ["bash", pluginDir + "/bin/launch-wait.sh", "org.omarchy.agent", "12"].concat(agentHereCommand())
+    agentLauncher.running = true
+  }
+  Process {
+    id: agentLauncher
+    running: false
+    stderr: StdioCollector { id: agentLauncherErr }
+    onExited: function(code) {
+      root.agentHereStarting = false
+      if (code === 0) root.close()
+      else root.agentHereError = String(agentLauncherErr.text).trim() || ("The terminal didn't open (exit " + code + ").")
+    }
   }
 
   // Squad: pick an installed agent, then Claude Squad (`cs -p <agent>`) opens in a terminal in a git repo
@@ -705,6 +720,8 @@ Panel {
     function squadCmd(): string { return root.squadReady ? JSON.stringify(root.squadCommand()) : "not ready" }
     function squadState(): string { return JSON.stringify({ open: root.squadOpen, repos: root.squadRepos, repo: root.squadRepo, create: root.squadNewName, cs: root.squadHasCs, zenity: root.squadZenity }) }
     // Test hook for the agent screen (the header terminal button): the command Start would run.
+    // Test hook: pick a folder and press Start, through the same function the button calls.
+    function agentStart(p: string): string { root.agentHereOpen = true; root.squadRepo = p; root.squadNewName = ""; root.launchAgentHere(); return "started" }
     function agentCmd(): string { return root.agentHereReady ? JSON.stringify(root.agentHereCommand()) : "not ready" }
     function squad(): string { root.toggleSquad(); return root.squadOpen ? "open" : "closed" }
     function resetOrder(): string { root.resetOrder(); return "ok" }
@@ -1274,7 +1291,7 @@ Panel {
                 id: startLabel
                 anchors.centerIn: parent
                 textFormat: Text.PlainText
-                text: "Start " + root.defaultAgentName
+                text: (root.agentHereStarting ? "Starting " : "Start ") + root.defaultAgentName
                 color: Color.accent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -1282,6 +1299,16 @@ Panel {
               }
               MouseArea { id: startArea; anchors.fill: parent; enabled: startTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.launchAgentHere() }
               PanelToolTip { visible: startArea.containsMouse; text: "Opens the default agent in a tiled terminal in this folder"; fontFamily: root.fontFamily }
+            }
+            Text {
+              visible: root.agentHereStarting || root.agentHereError !== ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: root.agentHereStarting ? "Opening the terminal..." : root.agentHereError
+              color: root.agentHereStarting ? root.dim : root.red
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
           }
 

@@ -6,6 +6,13 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.22.0 - 2026-11-23
+- **Surprise reset for Claude:** a Claude meter that drops before its scheduled reset (a banked reset spent, or Anthropic resetting)
+  plays the surprise celebration. The wording stays honest ("Claude weekly reset came early, go cook.").
+- **Start button always opens a terminal or says why:** it used to close the panel right after starting the launcher, and the terminal
+  sometimes never appeared. Start now runs through `bin/launch-wait.sh`, which confirms a new window really opened (any workspace) and
+  closes the panel only then; otherwise the panel shows the error. Tested with Copilot and Claude Code on a real repo, four launches in a row.
+
 ## 1.21.0 - 2026-11-23
 - **Cursor:** its dashboard can say 0% after the CLI was stopped by "You've hit your usage limit" (checked on a Free account). The CLI records
   that in its transcripts, so a standing hit now shows a red "Cursor limit" row (`bin/cursor-wall.mjs`) until a later turn succeeds or the

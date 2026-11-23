@@ -69,10 +69,19 @@ events = []; ag = [G("antigravity", "Gemini Session", 0, future(5 * 3600e3))];
 applyResets(ag, [G("antigravity", "Gemini Session", 0.95, future(-60e3))], (a, w, info) => events.push(info.kind), NOW2);
 assert.deepEqual(events, ["scheduled"]); assert.equal(ag[0].resetKind, "scheduled");
 assert.equal(resetNotice({ id: "antigravity", name: "Antigravity" }, ["Gemini Session"], { kind: "scheduled", details: [] }).title, "Antigravity session reset, go cook.");
-// Another agent's early drop (e.g. you spent a banked reset yourself) is NOT a surprise
+// Claude's early drop (a banked reset spent, or Anthropic resetting) IS a surprise, with the honest wording only
 events = []; const cl = [G("claude", "Session", 0, future(5 * 3600e3))];
 applyResets(cl, [G("claude", "Session", 0.9, future(2 * 3600e3))], (a, w, info) => events.push(info.kind), NOW2);
-assert.deepEqual(events, ["scheduled"], "only Antigravity has the surprise celebration");
+assert.deepEqual(events, ["surprise"], "a Claude meter dropping before its due time is a surprise reset");
+assert.equal(cl[0].resetKind, "surprise");
+{
+  const n = resetNotice({ id: "claude", name: "Claude Code" }, ["Session"], { kind: "surprise", details: cl[0].resetDetails, confirmed: { source: { author: "x" } } });
+  assert.equal(n.title, "Claude session reset came early, go cook.", "never claims everyone was reset");
+  assert.ok(!/agyresets|Announced/.test(n.body));
+}
+// ...but a Claude reset on schedule stays a normal celebration
+events = []; applyResets([G("claude", "Session", 0, future(5 * 3600e3))], [G("claude", "Session", 0.9, future(-60e3))], (a, w, info) => events.push(info.kind), NOW2);
+assert.deepEqual(events, ["scheduled"]);
 // A scheduled and a surprise reset in one refresh: the agent counts as a surprise, the details keep both
 ag = [{ id: "antigravity", name: "Antigravity", limits: [{ title: "Gemini Session", percent: 0, resetsAt: future(5 * 3600e3) }, { title: "Gemini Weekly", percent: 0, resetsAt: future(7 * 86400e3) }] }];
 applyResets(ag, [{ id: "antigravity", limits: [{ title: "Gemini Session", percent: 0.9, resetsAt: future(-1000) }, { title: "Gemini Weekly", percent: 0.9, resetsAt: future(86400e3) }] }], () => {}, NOW2);
@@ -82,7 +91,7 @@ const kept = [{ id: "antigravity", name: "Antigravity", limits: [] }]; applyRese
 assert.equal(kept[0].resetKind, "surprise");
 // each kind has its own picture and sound
 assert.deepEqual(resetAssets("surprise"), { image: "surprise-burst.svg", sound: "jackpot.wav" }); assert.deepEqual(resetAssets("scheduled"), { image: "cash-burst.svg", sound: "cha-ching.wav" }); assert.deepEqual(resetAssets(undefined), resetAssets("scheduled"));
-assert.deepEqual(Object.keys(SURPRISE_AGENTS), ["antigravity"]);
+assert.deepEqual(Object.keys(SURPRISE_AGENTS).sort(), ["antigravity", "claude"]);
 for (const f of ["notify/surprise-burst.svg", "notify/cash-burst.svg", "sounds/jackpot.wav", "sounds/cha-ching.wav"]) assert.ok(fs.existsSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", f)), `${f} is bundled`);
 
 // WIRING GUARD: the collector must actually call the features it advertises.

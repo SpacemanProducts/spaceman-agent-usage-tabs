@@ -13,7 +13,13 @@ const FIRED_KEEP_MS = 3 * 24 * 3600 * 1000;
 // so it is celebrated separately. The WORDING is honest: we can see our own meter
 // drop early, not what happened to everyone. Only when agyresets.com has a matching
 // announcement (info.confirmed) may the message say everyone was reset.
+// Claude joined on 2026-11-23 at the owner's request: a Claude meter that drops before its due time is a banked reset
+// being spent (or Anthropic resetting), and is celebrated the same way. No announcement source exists for it, so the
+// wording is always the honest one.
 export const SURPRISE_AGENTS = {
+  claude: {
+    honest: (phrase) => `Claude ${phrase} reset came early, go cook.`,
+  },
   antigravity: {
     honest: (phrase) => `Antigravity ${phrase} reset came early, go cook.`,
     confirmed: (phrase) => `Google just reset everyone's ${phrase} limit${phrase.includes(" and ") ? "s" : ""}, go cook.`,
@@ -29,7 +35,7 @@ export function resetNotice(agent, windows, info) {
     const early = (info.details || []).filter((d) => d.surprise);
     const titles = early.map((d) => d.title).join(" and ");
     const due = early.map((d) => Date.parse(d.dueAt)).filter(Number.isFinite).sort((a, b) => a - b)[0];
-    if (info.confirmed) {
+    if (info.confirmed && copy.confirmed) {   // only agents with an announcement source (Antigravity)
       const by = info.confirmed.source?.author ? ` by @${info.confirmed.source.author}` : "";
       return { title: copy.confirmed(windowPhrase(early.map((d) => d.title))), body: `\u26A1 ${titles} reset early. Announced${by} (via agyresets.com)` };
     }

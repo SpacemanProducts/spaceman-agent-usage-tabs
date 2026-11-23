@@ -78,7 +78,7 @@ keeps the developer in flow:
   with a "Reset ready" badge was built, then reverted at the user's request (panel
   restored byte-for-byte from a backup). Only the desktop notification got the
   cash-burst picture. Don't re-add held celebrations or chip badges unasked.
-- **Surprise resets are Antigravity-only** (`SURPRISE_AGENTS` in `bin/reset-celebration.mjs`): a
+- **Surprise resets are Antigravity and Claude only** (`SURPRISE_AGENTS` in `bin/reset-celebration.mjs`; Claude added 2026-11-23 at the owner's request: spending a banked reset drops a Claude meter before its due time, e.g. Weekly 100% -> low, and that is celebrated as a surprise. Claude's wording is always the honest one, with no announcement lookup): a
   meter that drops more than 50 points while its previous `resetsAt` is more than 5 minutes in
   the future. No readable previous reset time means a normal reset, never a surprise. Normal and
   surprise celebrations have separate pictures, sounds, colors and copy (`resetAssets`); the normal

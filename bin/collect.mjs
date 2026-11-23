@@ -406,8 +406,10 @@ for (const { a, windows, info } of pendingResets) {
   if (info.kind === "surprise") {
     surpriseHappened = true;
     // Ask agyresets.com (once per run, only now) whether the Antigravity team announced it.
-    announcements ??= await fetchResets({ now: Date.now() });
-    info.confirmed = corroborate(announcements, info.details, Date.now(), a.plan);
+    if (a.id === "antigravity") {
+      announcements ??= await fetchResets({ now: Date.now() });
+      info.confirmed = corroborate(announcements, info.details, Date.now(), a.plan);
+    }
     a.resetConfirmed = !!info.confirmed;
   }
   const assets = resetAssets(info.kind);               // surprise resets get their own picture and sound
