@@ -27,7 +27,6 @@ import { makeInstalledCheck, agentCli } from "./installed.mjs";
 import { planLoginNotices, planInstallNotices } from "./login-watch.mjs";
 import { buildAccounts } from "./accounts.mjs";
 import { loadCatalog, tabNote } from "./catalog.mjs";
-import { readOpenclawUsage } from "./openclaw-usage.mjs";
 import { readAmpUsage } from "./amp-usage.mjs";
 import { maybeWriteHandoff } from "./handoff.mjs";
 import { createDiagnostics, checkAgentData } from "./diagnostics.mjs";
@@ -58,7 +57,6 @@ const AGENTS = [
   { id: "kiro", name: "Kiro", bins: ["kiro-cli"] },
   { id: "devin", name: "Devin", bins: ["devin"], builtin: "devin" },
   { id: "amp", name: "Amp", bins: ["amp"] },
-  { id: "hermes", name: "Hermes", bins: ["hermes"], builtin: "hermes" },
 ];
 
 // The catalog agents (agents-catalog.json) get a tab too, found by their binaries, with a note for how they report usage.
@@ -231,11 +229,6 @@ for (const a of AGENTS) {
   } else if (a.catalog && !a.builtin) {
     // No Omarchy usage record: say how this agent reports usage (from the catalog) instead of showing meters.
     Object.assign(out, { usageType: a.catalog.usageType, planNote: tabNote(a.catalog, CATALOG.types), signedIn: null, catalog: true });
-    if (a.id === "openclaw") {
-      const u = readOpenclawUsage({ env: ENV }); out.limits = u.limits; out.status = u.status;
-      // Only a provider that really failed gets a can't-read line (named, no repair hints).
-      if (!u.limits.length && u.failed?.length) out.cantRead = `Can't read ${u.failed.join(", ")} usage: the provider reported an error.`;
-    }   // its own documented status command
   } else {
     const local = a.builtin ? fromBuiltin(a.builtin, a.id) : null;
     if (local) Object.assign(out, local, { status: "" });
@@ -272,12 +265,6 @@ for (const a of AGENTS) {
     const m = planInfo("amp", { env: ENV, stateDir: OUT_DIR, onUnexpected });
     out.signedIn = !!m;
     if (m) { if (m.note) out.planNote = m.note; out.status = ""; const u = readAmpUsage({ env: ENV }); if (u.status) out.status = u.status; }   // `amp usage --details`: the token total only
-  }
-  if (a.id === "hermes") {
-    const h = planInfo("hermes", { env: ENV, stateDir: OUT_DIR, onUnexpected });
-    out.signedIn = !!(h && h.loggedIn);
-    if (h && !h.loggedIn) out.planNote = plans.hermes?.localNote || "";
-    else if (h && h.freeTier) { out.plan = "Free"; out.planNote = plans.hermes?.freeNote || ""; }
   }
   if (a.id === "opencode") out.signedIn = null; // free models need no login
   if (a.id === "opencode" && (live || []).some((m) => /free/i.test(m.id)) && plans.opencode?.freeNote) out.planNote = plans.opencode.freeNote;

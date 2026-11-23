@@ -6,6 +6,12 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.19.0 - 2026-11-22
+- OpenClaw and Hermes are gone: no tab, reader, fix button or default-agent entry. Both are personal assistants with no
+  limits of their own, and the provider quotas they pass on already show in those providers' own tabs. The reason is
+  recorded under `dropped` in `agents-catalog.json`. The bar now has eleven core agents plus the catalog (Qwen Code,
+  Mistral Vibe, DeepSeek Harness, MiniMax Code). A saved tab order or hidden list that still names them just skips them.
+
 ## 1.18.0 - 2026-11-22
 - A gray tab has one small button under its reason line that goes straight to the fix: Install (a terminal running the agent's
   official install command), Sign in (a terminal running its login command) or Add key (the agent's official API-key page).

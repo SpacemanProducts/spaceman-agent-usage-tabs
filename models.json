@@ -5,7 +5,7 @@
   "Each entry: name (shown), match (optional extra id prefixes; dots and dashes are equivalent), unavailableOn (plan labels, e.g. Free), removing (YYYY-MM-DD or YYYY-MM when a removal is announced), note (free text, not shown).",
   "State rules: used = recent tokens; zero = usable but unused (dimmed, 0); unavailable = the plan can't use it (dimmed, 'unavailable'). If an agent's CLI lists its models, any known model missing from that list is unavailable.",
   "Updated 2026-11-21.",
-  "The 'plans' section holds plan and free-tier notes (changeable; edit freely). A note is shown only when the agent's own tool reports a source (a login, a usage command, a models list); notes never invent numbers. freeNote shows when the tool reports a free plan (or, for OpenCode, lists free models); localNote shows for Hermes when there is no Nous login."
+  "The 'plans' section holds plan and free-tier notes (changeable; edit freely). A note is shown only when the agent's own tool reports a source (a login, a usage command, a models list); notes never invent numbers. freeNote shows when the tool reports a free plan (or, for OpenCode, lists free models);"
  ],
  "agents": {
   "claude": {
@@ -351,22 +351,6 @@
    "removed": [
     "smart, deep, rush, large modes (deprecated Jul 8 2026)"
    ]
-  },
-  "hermes": {
-   "models": [
-    {
-     "name": "Hermes 4 70B",
-     "note": "Single secondary source; Hermes Agent is model-agnostic, so this is the Nous model family, not an enforced list."
-    },
-    {
-     "name": "Hermes 4 405B",
-     "note": "Same single source."
-    },
-    {
-     "name": "Hermes 4.3 36B",
-     "note": "Same single source (long-context pick)."
-    }
-   ]
   }
  },
  "plans": {
@@ -388,11 +372,6 @@
   "amp": {
    "freeNote": "The free tier is in flux: the ad-supported tier was reported paused, and a $10 daily allowance remains for some users. A daily allowance is shown only if Amp reports one.",
    "cantRead": "Can't read: a usage limit or remaining allowance. `amp usage` reports a credit balance and dollar costs, which this panel never shows; only its token total is used."
-  },
-  "hermes": {
-   "freeNote": "Nous Portal free tier: free models only. Paid plans are $20, $100 and $200.",
-   "localNote": "Free and local: Hermes the software is free.",
-   "cantRead": "Can't read: any limit. Hermes has none of its own and Nous Portal's free tier publishes none. Shown: tokens from your local sessions."
   }
  }
 }

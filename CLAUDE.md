@@ -61,7 +61,7 @@ keeps the developer in flow:
   Availability rules: a known model missing from an agent's own live list is
   *unavailable*, never zero. Drop a model only when a retirement date has passed
   AND it is absent from the live list; if the live list still shows it, keep it
-  and flag `removing`. Sources for Copilot/Cursor/Kimi/Amp/Hermes lists are
+  and flag `removing`. Sources for Copilot/Cursor/Kimi/Amp lists are
   mostly third-party; entries carry `note` saying which are unverified.
   2026-11-21: dropped Gemini 3.6 Flash from Antigravity (API retirement
   2026-11-19, absent from agy's list); kept Claude Sonnet/Opus 4.6 and

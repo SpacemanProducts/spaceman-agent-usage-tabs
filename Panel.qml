@@ -151,7 +151,7 @@ Panel {
     settingsWriter.command = ["node", root.pluginDir + "/bin/settings-set.mjs"].concat(args)
     settingsWriter.running = true
   }
-  readonly property var defaultOrder: ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"]
+  readonly property var defaultOrder: ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp"]
   // The tab order: the one you saved (drag a chip), else `tabOrder` from
   // shell.json, else the default. Agents that are in none of those (new ones) go at the end.
   // A reorder shows at once (pendingOrder) and is dropped when the saved settings.json is read back.
@@ -198,8 +198,8 @@ Panel {
   readonly property string firstId: agents.length > 0 ? agents[0].id : ""
   readonly property bool firstInstalled: agents.length > 0 && !!agents[0].cli
   readonly property var defaultNames: ({ claude: "claude", antigravity: "agy", grok: "grok", codex: "codex", copilot: "copilot", cursor: "cursor-agent",
-    opencode: "opencode", kimi: "kimi", kiro: "kiro-cli", devin: "devin", amp: "amp", hermes: "hermes",
-    qwen: "qwen", dsh: "dsh", mcode: "mcode", openclaw: "openclaw" })
+    opencode: "opencode", kimi: "kimi", kiro: "kiro-cli", devin: "devin", amp: "amp",
+    qwen: "qwen", dsh: "dsh", mcode: "mcode" })
   property string currentDefault: ""
   function isDefaultAgent(a) { return !!a && currentDefault !== "" && defaultNames[a.id] === currentDefault }
   // The bar number follows only the default agent (the first tab until Omarchy's default is known):

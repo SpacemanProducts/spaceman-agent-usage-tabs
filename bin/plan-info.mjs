@@ -34,18 +34,9 @@ export function parseAmpUsage(out) {
   return { signedIn: true, note: daily ? `Daily allowance $${daily[1]}` : "" };
 }
 
-// Hermes: `hermes status`. Returns {loggedIn, freeTier} for Nous Portal.
-export function parseHermesStatus(out) {
-  const text = String(out);
-  const nous = text.match(/Nous Portal\s+(✓ logged in|✗ not logged in)/);
-  if (!nous) return null;
-  return { loggedIn: nous[1].startsWith("✓"), freeTier: /no usable paid credits/i.test(text) };
-}
-
 const RUNNERS = {
   kiro: { cmd: ["kiro-cli", "chat", "--no-interactive", "/usage"], parse: parseKiroUsage },
   amp: { cmd: ["amp", "usage"], parse: parseAmpUsage },
-  hermes: { cmd: ["hermes", "status"], parse: parseHermesStatus },
 };
 const TTL_MS = 30 * 60 * 1000;
 

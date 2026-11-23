@@ -8,10 +8,13 @@ const { types, agents, dropped } = loadCatalog();
 const ids = agents.map((a) => a.id);
 
 // ---- the rules for being in the catalog: still maintained AND a working way to read usage or plan limits
-assert.deepEqual(ids, ["qwen", "vibe", "dsh", "mcode", "openclaw"]);
-for (const gone of ["gemini", "aider", "roo", "cline", "goose", "crush", "kilo", "openhands", "plandex", "codewhale", "reasonix", "pi", "omp", "commandcode", "droid", "auggie"])
+assert.deepEqual(ids, ["qwen", "vibe", "dsh", "mcode"]);
+for (const gone of ["gemini", "aider", "roo", "cline", "goose", "crush", "kilo", "openhands", "plandex", "codewhale", "reasonix", "pi", "omp", "commandcode", "droid", "auggie", "openclaw", "hermes"])
   assert.ok(!ids.includes(gone), `${gone} is not in the catalog`);
 assert.ok(dropped.gemini && dropped.aider, "removed agents are listed with their reason");
+assert.match(dropped.openclaw, /personal assistant/, "OpenClaw is dropped with its reason: a personal assistant whose provider quotas show in their own tabs");
+assert.match(dropped.openclaw, /providers' own tabs/);
+assert.match(dropped.hermes, /personal assistant/, "Hermes is dropped for the same reason");
 for (const [id, why] of Object.entries(dropped)) assert.ok(String(why).length > 10, `${id}: dropped for a stated reason`);
 for (const a of agents) {
   assert.ok(String(a.maintained || "").length > 20, `${a.id}: says why it counts as maintained`);
@@ -19,8 +22,8 @@ for (const a of agents) {
 }
 
 // ---- entry shape
-const CORE = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"];
-const CORE_BINS = ["claude", "agy", "antigravity", "grok", "codex", "copilot", "cursor-agent", "opencode", "kimi", "kiro-cli", "devin", "amp", "hermes"];
+const CORE = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp"];
+const CORE_BINS = ["claude", "agy", "antigravity", "grok", "codex", "copilot", "cursor-agent", "opencode", "kimi", "kiro-cli", "devin", "amp"];
 assert.equal(new Set(ids).size, ids.length, "unique ids");
 for (const a of agents) {
   assert.ok(!CORE.includes(a.id), `${a.id} must not clash with a core agent`);
@@ -35,9 +38,7 @@ for (const a of agents) {
 }
 for (const t of ["session_weekly", "monthly_credits", "request_count", "byok_no_limits", "free_no_limits", "no_usage_data"]) assert.ok(types[t], `type ${t} defined`);
 // An unsure entry says so on its tab; a sure one doesn't.
-const openclaw = agents.find((a) => a.id === "openclaw"), mcode = agents.find((a) => a.id === "mcode");
-assert.equal(tabNote(openclaw, types), "Bring your own key, no limits of its own.\nUsage depends on your model provider.", "OpenClaw: two plain lines");
-assert.doesNotMatch(tabNote(openclaw, types), /verified|doctor/i, "no verification note or repair hint on its tab");
+const mcode = agents.find((a) => a.id === "mcode");
 assert.match(tabNote(agents.find((a) => a.id === "dsh"), types), /Not fully verified/, "other unsure entries still say so");
 assert.doesNotMatch(tabNote(mcode, types), /Not fully verified/);
 assert.deepEqual(catalogIds(), ids);

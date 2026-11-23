@@ -15,9 +15,9 @@ import { fileURLToPath } from "node:url";
 // tab id -> the name `omarchy default agent` accepts (from omarchy-default-agent's own case list).
 export const DEFAULT_NAMES = {
   claude: "claude", antigravity: "agy", grok: "grok", codex: "codex", copilot: "copilot", cursor: "cursor-agent",
-  opencode: "opencode", kimi: "kimi", kiro: "kiro-cli", devin: "devin", amp: "amp", hermes: "hermes",
+  opencode: "opencode", kimi: "kimi", kiro: "kiro-cli", devin: "devin", amp: "amp",
   // catalog agents that `omarchy default agent` also supports
-  qwen: "qwen", dsh: "dsh", mcode: "mcode", openclaw: "openclaw",
+  qwen: "qwen", dsh: "dsh", mcode: "mcode",
 };
 
 // What to do for a first tab: { name } to set, { skip: reason } to leave the default alone.

@@ -1,4 +1,4 @@
-// The built-in catalog of CLI coding agents beyond the twelve this plugin reads directly (agents-catalog.json).
+// The built-in catalog of CLI coding agents beyond the eleven this plugin reads directly (agents-catalog.json).
 // Each entry says how the agent reports usage, which drives the note on its tab; `bins` drives install detection.
 import fs from "node:fs";
 import path from "node:path";
@@ -24,5 +24,5 @@ export function tabNote(entry, types) {
   return [head, entry.note].filter(Boolean).join(" ") + tail;
 }
 
-// Ids of every catalog agent, in catalog order (they go after the twelve core agents in the default tab order).
+// Ids of every catalog agent, in catalog order (they go after the eleven core agents in the default tab order).
 export const catalogIds = () => loadCatalog().agents.map((a) => a.id);

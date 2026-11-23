@@ -61,10 +61,8 @@ so in one line. These need a login first:
 | Kiro | `kiro-cli login` |
 | Devin | `devin auth login` |
 | Amp | `amp login` |
-| Hermes | optional: sign in to Nous Portal with `hermes model` |
 
-**No login needed:** OpenCode (its free models just work) and Hermes (it shows as free and
-local until you sign in).
+**No login needed:** OpenCode (its free models just work).
 
 ## What it does
 
@@ -121,7 +119,6 @@ local until you sign in).
 | Kimi | Whichever windows your login reports; nothing without a login. |
 | Kiro | A credits meter (used of the monthly total) with its reset date. |
 | Amp | Its 7-day token total from `amp usage --details`. The credit balance and dollar costs it also prints are never shown. |
-| Hermes | "Free and local", or the Nous Portal free-tier note once you're signed in. |
 
 **Alerts and the reset celebration**
 - **Each alert fires once per usage window, per agent:** one notification when a session or weekly limit first passes the threshold
@@ -209,21 +206,20 @@ sessions. The lock goes away when the window closes, even if it crashed.
 
 ### The agent catalog
 
-Beyond the twelve agents it reads directly, the plugin has a built-in catalog (`agents-catalog.json`) of CLI agents. An agent is
+Beyond the eleven agents it reads directly, the plugin has a built-in catalog (`agents-catalog.json`) of CLI agents. An agent is
 listed only if it is still maintained **and** has a working way to read usage or plan limits (an Omarchy usage record, or a
 documented command or API); each entry says which (`maintained` and `reads`). Today that is Qwen Code, Mistral Vibe, DeepSeek
-Harness and MiniMax Code (through Omarchy's usage records) and OpenClaw (through `openclaw status --usage --json`). Each records how
+Harness and MiniMax Code (through Omarchy's usage records). Each records how
 it reports usage (session and weekly, monthly credits, request count, bring your own key, free, or no usage data), which sets the note
 on its tab, and its binaries, which is how an install is detected. Agents you don't have stay off the bar through **Hide agents that
 aren't installed**, like every other tab. Entries that could not be fully verified are flagged `unsure` with the reason. Agents that
 were researched and left out are listed with the reason under `dropped`: Gemini CLI (removed at your request), Aider (inactive),
-Factory Droid (its analytics endpoint is Enterprise-only and reports consumption, never limits), Augment (documents no command or API
+OpenClaw and Hermes (personal assistants with no limits of their own: the provider quotas they pass on already show in those
+providers' own tabs), Factory Droid (its analytics endpoint is Enterprise-only and reports consumption, never limits), Augment (documents no command or API
 for remaining credits), and agents with nothing of their own to read (Goose, Crush, Pi, Oh My Pi, Plandex and others).
 
-**What each tab can't read is said plainly.** OpenCode (no published limit for its free models), Kimi (not signed in), Amp (its
-`amp usage` gives a credit balance and dollar costs, which this panel never shows; only its 7-day token total is used), Hermes (no
-limit of its own) and OpenClaw (only when a provider really failed) show a short "Can't read: ..." line while they have no meters.
-The OpenClaw tab itself is two lines: bring your own key, no limits of its own; usage depends on your model provider.
+**What each tab can't read is said plainly.** OpenCode (no published limit for its free models), Kimi (not signed in) and Amp (its
+`amp usage` gives a credit balance and dollar costs, which this panel never shows; only its 7-day token total is used) show a short "Can't read: ..." line while they have no meters.
 
 ### The handoff note
 
@@ -272,7 +268,7 @@ no reset button.
 - `secret-tool` (libsecret), only for Antigravity if its login is in the keyring
 - `gh` (GitHub CLI), only for Copilot's usage numbers
 - Omarchy's own `omarchy-agent-usage-*` collectors, used for Codex, Cursor, OpenCode, Kimi,
-  Devin and Hermes token history
+  and Devin token history
 
 ## Install by hand
 
@@ -301,7 +297,7 @@ three are set only in the plugin's entry in `~/.config/omarchy/shell.json`:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `tabOrder` | all 12, as listed | Comma-separated agent ids, in tab order. Ids you leave out are appended in default order. |
+| `tabOrder` | all 11, as listed | Comma-separated agent ids, in tab order. Ids you leave out are appended in default order. |
 | `refreshIntervalSec` | 300 | How often data refreshes. Minimum 60. |
 | `notifyThreshold` | 95 | Notify when a session or weekly limit passes this percent (once per window, and once more if the limit is hit). |
 
@@ -310,8 +306,8 @@ Gear settings, all on by default: `hideUninstalledAgents`, `showUnusedModels`,
 `handoffNote`, `angryRobot`, and `hiddenAgents` (the tabs you hid), plus `tabOrder` (your saved order, set by dragging). They also work as keys in `shell.json`.
 
 Agent ids: `claude`, `antigravity`, `grok`, `codex`, `copilot`, `cursor`, `opencode`,
-`kimi`, `kiro`, `devin`, `amp`, `hermes`, plus the catalog agents (`qwen`, `vibe`, `droid`, `auggie`, `dsh`,
-`mcode`, `openclaw`). Back up `shell.json` before editing it, and restart
+`kimi`, `kiro`, `devin`, `amp`, plus the catalog agents (`qwen`, `vibe`, `dsh`,
+`mcode`). Back up `shell.json` before editing it, and restart
 the shell after changing a setting there.
 
 ## Where the data comes from
@@ -326,7 +322,7 @@ panel only reads it.
 | Antigravity | Google's quota endpoint, with the local `agy` login. |
 | Copilot | GitHub's Copilot quota endpoint, with the token `gh auth token` prints. |
 | Kiro | `kiro-cli chat --no-interactive "/usage"`. |
-| Amp, Hermes | `amp usage` and `hermes status`, for sign-in state and the plan notes above. |
+| Amp | `amp usage`, for sign-in state and the plan notes above. |
 | Codex, Cursor, OpenCode, Kimi, Devin | Omarchy's `omarchy-agent-usage-<agent>` records. |
 
 **Expired logins refresh themselves.** Grok's and Antigravity's tokens last hours. When one has
@@ -346,7 +342,7 @@ Each tab's Models list is built live-data-first:
    free-tier notes, and announced removals.
 
 If a CLI lists its models, any `models.json` entry missing from that list shows as
-*unavailable*. Without a CLI list (Cursor, Copilot, Kimi, Amp, Hermes, Claude), an entry is
+*unavailable*. Without a CLI list (Cursor, Copilot, Kimi, Amp, Claude), an entry is
 unavailable only if you list the plan in its `unavailableOn`. Put `"removing": "2026-12-14"`
 (or `"2026-12"`) on a model with an announced removal; it shows *removing Dec 14* until that day. Once the date has passed
 while the model is still listed, no warning is shown: removal dates keep moving (Antigravity's went Nov 2, Nov 18, Nov 30), so the

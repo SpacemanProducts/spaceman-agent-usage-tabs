@@ -1,6 +1,6 @@
 {
  "schemaVersion": 1,
- "about": "Agents beyond the twelve this plugin reads directly. An agent is listed only if it is still maintained AND has a working way to read usage or plan limits (an Omarchy usage record, or a documented CLI command or API): see each entry's `maintained` and `reads`. usageType says how it reports usage; `unsure` flags a claim that could not be fully verified. Researched 2026-11-22.",
+ "about": "Agents beyond the eleven this plugin reads directly. An agent is listed only if it is still maintained AND has a working way to read usage or plan limits (an Omarchy usage record, or a documented CLI command or API): see each entry's `maintained` and `reads`. usageType says how it reports usage; `unsure` flags a claim that could not be fully verified. Researched 2026-11-22.",
  "types": {
   "session_weekly": {
    "label": "Session and weekly limits",
@@ -94,23 +94,6 @@
    "builtin": "minimax",
    "reads": "Omarchy's minimax usage record: the 5-hour and weekly windows (also `/status` in mcode and `mmx quota`).",
    "maintained": "MiniMax's M Plan docs describe MiniMax Code with current usage rules (2026)."
-  },
-  {
-   "id": "openclaw",
-   "name": "OpenClaw",
-   "bins": [
-    "openclaw"
-   ],
-   "usageType": "byok_no_limits",
-   "note": "A gateway agent that reuses your provider keys or subscriptions (Codex, Claude CLI, Coding Plans); it has no limits of its own. `openclaw status --usage` shows your providers' quota windows.",
-   "sources": [
-    "https://docs.openclaw.ai/reference/api-usage-costs",
-    "https://docs.openclaw.ai/concepts/usage-tracking/index.html"
-   ],
-   "unsure": "The field names inside a usage window are not documented and no populated sample was available (the provider here reported an error), so the reader accepts several spellings and shows a bar only when a percent is really present. Reusing a Claude subscription is described as unsettled; check Anthropic's terms.",
-   "reads": "`openclaw status --usage --json` (documented): usage.providers[].windows[] for the providers it is signed in to. Read by bin/openclaw-usage.mjs.",
-   "maintained": "OpenClaw's docs are versioned monthly (2026.7.1 seen).",
-   "tabText": "Bring your own key, no limits of its own.\nUsage depends on your model provider."
   }
  ],
  "dropped": {
@@ -128,6 +111,8 @@
   "omp": "bring your own key: nothing of its own to read",
   "commandcode": "only a third-party tool reads its usage; no official command or API",
   "droid": "Factory's analytics endpoint (/cost/me/query) needs an Enterprise org (403 enterprise_required otherwise) and returns credits consumed only, never remaining allowance or window limits; /limits works only inside Droid.",
-  "auggie": "Augment documents no command or API that returns remaining credits (only per-run --show-cost and an Enterprise dashboard); auggie account status and its web endpoints are third-party, unverified."
+  "auggie": "Augment documents no command or API that returns remaining credits (only per-run --show-cost and an Enterprise dashboard); auggie account status and its web endpoints are third-party, unverified.",
+  "openclaw": "a personal assistant, not a coding agent with a plan of its own: it has no limits of its own, and the provider quotas it passes on (Codex, Claude and others) already show in those providers' own tabs, so its tab only repeated them (removed 2026-11-22).",
+  "hermes": "a personal assistant, not a coding agent with a plan of its own: it has no limits of its own, and the model provider quotas it passes on (Nous Portal and others) belong to those providers, so its tab had nothing of its own to show (removed from the core agents 2026-11-22)."
  }
 }

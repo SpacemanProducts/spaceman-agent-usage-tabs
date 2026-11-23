@@ -50,10 +50,6 @@ var FIXES = {
     install: { cmd: "curl -fsSL https://ampcode.com/install.sh | bash", src: "https://ampcode.com/docs/cli" },
     login: { cmd: "amp login", src: "https://ampcode.com/docs/cli" }
   },
-  hermes: {
-    install: { cmd: "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash", src: "https://hermes-agent.nousresearch.com/docs/getting-started/installation" },
-    login: { cmd: "hermes setup --portal", src: "https://hermes-agent.nousresearch.com/docs/getting-started/installation" }
-  },
   qwen: {
     install: { cmd: "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash", src: "https://github.com/QwenLM/qwen-code" },
     key: { url: "https://docs.qwencloud.com/developer-guides/administration/api-keys", src: "https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/" }
@@ -70,10 +66,6 @@ var FIXES = {
   mcode: {
     install: { cmd: "curl -fsSL https://filecdn.minimax.chat/public/install.sh | bash", src: "https://platform.minimax.io/docs/m-plan/minimax-code" },
     login: { cmd: "mcode login --region global", src: "https://platform.minimax.io/docs/m-plan/minimax-code" }
-  },
-  openclaw: {
-    install: { cmd: "curl -fsSL https://openclaw.ai/install.sh | bash", src: "https://docs.openclaw.ai/install" },
-    key: { url: "https://docs.openclaw.ai/concepts/model-providers/control-ui-and-keys", src: "https://docs.openclaw.ai/concepts/model-providers" }
   }
 }
 

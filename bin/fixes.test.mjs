@@ -18,8 +18,9 @@ assert.deepEqual(fix({ id: "kiro", name: "Kiro", installed: true, signedIn: fals
 assert.equal(fix({ id: "kimi", name: "Kimi", installed: true, signedIn: false }).tip, "Opens a terminal and runs kimi, then type /login", "in-session sign-in says what to type");
 assert.deepEqual(fix({ id: "kiro", name: "Kiro", installed: false }),
   { kind: "install", label: "Install", url: "https://kiro.dev/docs/getting-started/installation/", tip: "Opens Kiro's official install page" }, "no Linux command in the docs -> link");
-assert.deepEqual(fix({ id: "openclaw", name: "OpenClaw", installed: true, signedIn: null, usageType: "byok_no_limits" }),
-  { kind: "key", label: "Add key", url: "https://docs.openclaw.ai/concepts/model-providers/control-ui-and-keys", tip: "Opens OpenClaw's official page for setting up API keys" });
+assert.deepEqual(fix({ id: "dsh", name: "DeepSeek Harness", installed: true, signedIn: null, usageType: "byok_no_limits" }),
+  { kind: "key", label: "Add key", url: "https://platform.deepseek.com/api_keys", tip: "Opens DeepSeek Harness's official page for setting up API keys" });
+assert.equal(fix({ id: "openclaw", name: "OpenClaw", installed: true, signedIn: null, usageType: "byok_no_limits" }), null, "OpenClaw is no longer a tab: no button");
 assert.equal(fix({ id: "opencode", name: "OpenCode", installed: true, signedIn: null }), null, "installed, no sign-in state, not BYOK: nothing to fix");
 assert.equal(fix({ id: "vibe", name: "Mistral Vibe", installed: true, signedIn: null, usageType: "no_usage_data" }), null, "no data published is not fixable");
 assert.equal(fix({ id: "nope", installed: false }), null, "unknown agent: no button");
@@ -28,7 +29,7 @@ assert.equal(fix({ id: "claude", installed: false, signedIn: false }).kind, "ins
 
 // Every agent the panel knows has an Install fix; every entry is safe to put in single quotes and points at https.
 const catalog = JSON.parse(fs.readFileSync(path.join(root, "agents-catalog.json"), "utf8")).agents.map((a) => a.id);
-const builtins = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp", "hermes"];
+const builtins = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp"];
 for (const id of [...builtins, ...catalog]) assert.ok(FIXES[id]?.install, `${id} has an install fix`);
 for (const [id, f] of Object.entries(FIXES)) for (const [k, e] of Object.entries(f)) {
   assert.ok(/^https:\/\//.test(e.src), `${id}.${k} cites an https source`);

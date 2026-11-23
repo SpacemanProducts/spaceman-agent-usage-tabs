@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs"; import os from "node:os"; import path from "node:path";
-import { parseKiroUsage, parseAmpUsage, parseHermesStatus, planInfo } from "./plan-info.mjs";
+import { parseKiroUsage, parseAmpUsage, planInfo } from "./plan-info.mjs";
 
 const kiro = "Estimated Usage | resets on 2026-12-01 | KIRO FREE\nCredits (0.02 of 50 covered in plan), 0.0%\nManage your plan at https://app.kiro.dev/account/usage\n";
 const k = parseKiroUsage(kiro);
@@ -14,11 +14,6 @@ assert.deepEqual(parseAmpUsage(amp), { signedIn: true, note: "" }, "a purchased 
 assert.deepEqual(parseAmpUsage(amp + "Daily free allowance: $10.00 remaining today\n"), { signedIn: true, note: "Daily allowance $10.00" });
 assert.equal(parseAmpUsage("Not signed in"), null);
 
-const hermes = "◆ Auth Providers\n  Nous Portal   ✓ logged in\n    Portal URL: x\n◆ Nous Tool Gateway\n  Your Nous Portal account has no usable paid credits, so managed tools is unavailable.\n";
-assert.deepEqual(parseHermesStatus(hermes), { loggedIn: true, freeTier: true });
-assert.deepEqual(parseHermesStatus("  Nous Portal   ✓ logged in\n"), { loggedIn: true, freeTier: false });
-assert.deepEqual(parseHermesStatus("  Nous Portal   ✗ not logged in\n"), { loggedIn: false, freeTier: false });
-assert.equal(parseHermesStatus("nothing"), null);
 
 
 // runner: cached 30 min, last good kept on failure, null for agents with no source

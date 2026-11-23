@@ -23,7 +23,7 @@ assert.equal(fs.readFileSync(`${home}/.config/omarchy/defaults/agent`, "utf8"), 
 fs.writeFileSync(`${home}/.config/omarchy/defaults/agent`, "claude\n");
 run("codex", "installed");
 assert.equal(fs.readFileSync(`${home}/.config/omarchy/defaults/agent`, "utf8"), "claude\n", "no change -> the user's own pick stays");
-run("hermes");  // not installed
+run("amp");  // not installed
 assert.equal(fs.readFileSync(`${home}/.config/omarchy/defaults/agent`, "utf8"), "claude\n");
 fs.rmSync(home, { recursive: true });
 console.log("default-agent: all tests passed");
