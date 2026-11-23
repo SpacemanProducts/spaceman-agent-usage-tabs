@@ -52,7 +52,7 @@ assert.notEqual(r.status, 0); assert.match(r.stdout, /No such folder/);
 // the panel adds a Browse pick to the list, selected, so the pick is visible
 const qml = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
 assert.match(qml, /squadRepos\.indexOf\(p\) < 0\) root\.squadRepos = \[p\]\.concat\(root\.squadRepos\)/, "a folder picked with Browse joins the list");
-assert.match(qml, /visible: !fp\.forSquad[\s\S]*?text: \(homeChip\.on \? "\\u2713 " : ""\) \+ "No project"[\s\S]*?root\.squadRepo = root\.home/, "the Start picker offers home without changing Squad's folder choices");
+assert.match(qml, /visible: !fp\.forSquad[\s\S]*?text: "No project"[\s\S]*?root\.squadRepo = root\.home/, "the Start picker offers home without changing Squad's folder choices");
 assert.match(qml, /agentHereReady: squadRepo !== "" \|\| squadNewName !== "" \|\| agentHereOpen/, "Start is ready with no folder selected");
 assert.match(qml, /"AGENT_DIR=" \+ \(squadRepo !== "" \? squadRepo : root\.home\)/, "no folder selection starts in home");
 assert.match(qml, /squadRepos\.indexOf\(squadRepo\) >= 0 \|\| folderPickerByFolder\[squadRepo\]/, "a folder picked with Browse stays selected while the grouped list catches up");

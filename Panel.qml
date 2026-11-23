@@ -761,6 +761,10 @@ Panel {
     if (s.indexOf(root.home + "/Projects/") === 0) return s.slice((root.home + "/Projects/").length)
     return s.indexOf(root.home) === 0 ? "~" + s.slice(root.home.length) : s
   }
+  function folderName(p) {
+    var s = String(p).replace(/\/+$/, "")
+    return s === "" || s === "/" ? s : s.slice(s.lastIndexOf("/") + 1)
+  }
   Process {
     id: squadCheck
     command: ["bash", "-c", "PATH=$HOME/.local/bin:$PATH command -v cs >/dev/null"]
@@ -1194,13 +1198,16 @@ Panel {
   // The small tinted square the stock panel uses for its hero-corner buttons (34 wide).
   // The folder step, shared by the CS screen and the agent screen (the header terminal button): recent repos (the last one
   // used preselected), then "+ New project", then "Browse...". It sets root.squadRepo / root.squadNewName.
-  component FolderUsageLine: Column {
+  component FolderUsageLine: Item {
     id: usageLine
     property var entries: []
     property bool active: true
-    visible: active && entries.length > 0
-    spacing: Style.space(2)
+    readonly property real lineHeight: Style.font.caption * 1.25
+    implicitHeight: active ? lineHeight * 2 : 0
+    height: implicitHeight
+    visible: active
     Text {
+      y: 0
       width: usageLine.width
       textFormat: Text.PlainText
       text: usageLine.entries.length ? usageLine.entries[0].text : ""
@@ -1212,7 +1219,9 @@ Panel {
       maximumLineCount: 1
     }
     Text {
+      y: usageLine.lineHeight
       width: usageLine.width
+      height: usageLine.lineHeight
       visible: usageLine.entries.length > 1
       textFormat: Text.PlainText
       text: usageLine.entries.slice(1).map(function(item) { return item.text }).join(" · ")
@@ -1261,7 +1270,7 @@ Panel {
     readonly property real folderGridSpacing: Style.space(8)
     readonly property real folderChipWidth: Math.max(0, Math.floor((width - folderGridSpacing) / 2))
     readonly property real folderNameRowHeight: Style.font.bodySmall * 1.25 + Style.space(12)
-    readonly property real folderChipHeight: Style.font.bodySmall * 1.25 + Style.font.caption * 2.4 + Style.space(14)
+    readonly property real folderChipHeight: Style.font.bodySmall * 1.25 + Style.font.caption * 2.5 + Style.space(14)
     spacing: Style.space(14)
     PanelSectionHeader { width: parent.width; text: "FOLDER" }
     Flow {
@@ -1274,19 +1283,20 @@ Panel {
         width: fp.folderChipWidth
         height: fp.folderNameRowHeight
         radius: Style.cornerRadius
-        color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
-                  : (homeArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent")
+        color: homeArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08)
+                                      : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
         border.width: 1
-        border.color: on ? Color.accent : root.soft(root.foreground, 0.3)
+        border.color: on ? root.soft(Color.accent, 0.5) : root.soft(root.foreground, 0.3)
         Text {
           id: homeLabel
-          anchors.centerIn: parent
+          anchors.left: parent.left
+          anchors.leftMargin: Style.space(10)
+          anchors.verticalCenter: parent.verticalCenter
           textFormat: Text.PlainText
-          text: (homeChip.on ? "\u2713 " : "") + "No project"
-          color: homeChip.on ? Color.accent : root.dim
+          text: "No project"
+          color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
-          font.bold: homeChip.on
         }
         MouseArea { id: homeArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { root.squadRepo = root.home; root.squadNewName = "" } }
         PanelToolTip { visible: homeArea.containsMouse; text: "Start in your home folder (~), without a project folder"; fontFamily: root.fontFamily }
@@ -1302,11 +1312,13 @@ Panel {
           width: fp.forSquad ? repoLabel.implicitWidth + Style.space(22) : fp.folderChipWidth
           height: fp.forSquad ? repoContent.implicitHeight + Style.space(14) : fp.folderChipHeight
           radius: Style.cornerRadius
-          color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
-                    : pinned ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.12)
-                    : (repoArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06))
-          border.width: pinned ? 2 : (on ? 1 : 0)
-          border.color: on || pinned ? Color.accent : root.soft(root.foreground, 0.3)
+          color: fp.forSquad
+            ? (on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
+                  : pinned ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.12)
+                  : (repoArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)))
+            : (repoHover.hovered ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05))
+          border.width: fp.forSquad ? (pinned ? 2 : (on ? 1 : 0)) : (on ? 1 : 0)
+          border.color: fp.forSquad ? (on || pinned ? Color.accent : root.soft(root.foreground, 0.3)) : root.soft(Color.accent, 0.5)
           Column {
             id: repoContent
             anchors.centerIn: parent
@@ -1315,14 +1327,18 @@ Panel {
             Text {
               id: repoLabel
               width: parent.width - (!fp.forSquad && repoHover.hovered ? Style.space(40) : (!fp.forSquad && repoChip.pinned ? Style.space(22) : 0))
-              horizontalAlignment: Text.AlignHCenter
+              horizontalAlignment: fp.forSquad ? Text.AlignHCenter : Text.AlignLeft
               textFormat: Text.PlainText
-              text: (repoChip.on ? "\u2713 " : "") + root.shortPath(repoChip.modelData)
-              color: repoChip.on ? Color.accent : root.foreground
+              text: fp.forSquad ? ((repoChip.on ? "\u2713 " : "") + root.shortPath(repoChip.modelData)) : root.folderName(repoChip.modelData)
+              color: fp.forSquad && repoChip.on ? Color.accent : root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
-              font.bold: repoChip.on
-              elide: Text.ElideRight
+              font.bold: fp.forSquad && repoChip.on
+              fontSizeMode: fp.forSquad ? Text.FixedSize : Text.HorizontalFit
+              minimumPixelSize: fp.forSquad ? Style.font.bodySmall : Style.font.caption * 0.75
+              wrapMode: fp.forSquad ? Text.WordWrap : Text.NoWrap
+              maximumLineCount: fp.forSquad ? 0 : 1
+              elide: fp.forSquad ? Text.ElideRight : Text.ElideNone
             }
             FolderUsageLine { width: parent.width; entries: repoChip.usageItems; active: !fp.forSquad }
           }
@@ -1339,7 +1355,7 @@ Panel {
               id: repoPinAction
               glyph: repoChip.pinned ? "󰐃" : "󰤱"
               tip: repoChip.pinned ? root.pluginText("picker.unpin") : root.pluginText("picker.pin")
-              emphasized: repoChip.pinned
+              emphasized: false
               available: root.folderPreferencesReady && !root.folderPreferenceBusy
               onTriggered: root.toggleFolderPin(repoChip.modelData)
             }
@@ -1454,25 +1470,27 @@ Panel {
           width: fp.folderChipWidth
           height: fp.folderChipHeight
           radius: Style.cornerRadius
-          color: on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.16)
-                    : pinned ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1)
-                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
-          border.width: pinned ? 2 : 1
-          border.color: pinned ? Color.accent : root.soft(root.foreground, 0.3)
+          color: hiddenRepoHover.hovered ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.06)
+                                         : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+          border.width: on ? 1 : 0
+          border.color: root.soft(Color.accent, 0.5)
           Column {
             anchors.centerIn: parent
             width: parent.width - Style.space(12)
             spacing: Style.space(4)
             Text {
               width: parent.width - (hiddenRepoHover.hovered ? Style.space(40) : (hiddenRepoChip.pinned ? Style.space(22) : 0))
-              horizontalAlignment: Text.AlignHCenter
+              horizontalAlignment: Text.AlignLeft
               textFormat: Text.PlainText
-              text: (hiddenRepoChip.on ? "\u2713 " : "") + root.shortPath(hiddenRepoChip.modelData)
-              color: hiddenRepoChip.on ? Color.accent : root.dim
+              text: root.folderName(hiddenRepoChip.modelData)
+              color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
-              font.bold: hiddenRepoChip.on || hiddenRepoChip.pinned
-              elide: Text.ElideRight
+              fontSizeMode: Text.HorizontalFit
+              minimumPixelSize: Style.font.caption * 0.75
+              wrapMode: Text.NoWrap
+              maximumLineCount: 1
+              elide: Text.ElideNone
             }
             FolderUsageLine { width: parent.width; entries: hiddenRepoChip.usageItems; active: true }
           }
@@ -1495,7 +1513,7 @@ Panel {
               id: hiddenRepoPinAction
               glyph: hiddenRepoChip.pinned ? "󰐃" : "󰤱"
               tip: hiddenRepoChip.pinned ? root.pluginText("picker.unpin") : root.pluginText("picker.pin")
-              emphasized: hiddenRepoChip.pinned
+              emphasized: false
               available: root.folderPreferencesReady && !root.folderPreferenceBusy
               onTriggered: root.toggleFolderPin(hiddenRepoChip.modelData)
             }

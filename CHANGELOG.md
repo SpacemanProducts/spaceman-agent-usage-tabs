@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.27.1 - 2026-11-23
+- Align Start-picker folder cards and names, keep usage rows aligned, and show full folder paths on hover.
+
 ## 1.27.0 - 2026-11-23
 - **Start picker groups folders into projects:** subfolders roll up to their project (the plugin folder, `~/Rough Rider Eats`), system and tool folders (`~/.gemini`, `~/.local/state`, `~/.config/omarchy`, backups, Claude Squad worktrees) hide by default, and only picker-started, pinned or real project folders show. Hidden folders keep a restorable view, pins still sort first, and folder usage is unchanged.
 
