@@ -441,6 +441,7 @@ Panel {
   property var folderUsageRecords: []
   property double folderUsageRefreshedAt: 0
   property var folderPins: []
+  property var folderRestored: []
   property var hiddenFolderTimes: ({})
   property bool folderPreferencesReady: false
   readonly property bool folderPreferenceBusy: folderPreferenceAction.running
@@ -474,8 +475,8 @@ Panel {
   function folderDefaultHidden(entry) {
     if (!entry) return true
     if (entry.keep) return false
-    if (entry.system) return !(entry.pinned || entry.picked)
-    return !(entry.pinned || entry.picked || entry.project)
+    if (entry.system) return !(entry.pinned || entry.picked || entry.restored)
+    return !(entry.pinned || entry.picked || entry.project || entry.restored)
   }
   function folderEntryVisible(entry) { return !!entry && !folderManualHidden(entry) && !folderDefaultHidden(entry) }
   function folderCandidates() {
@@ -486,6 +487,7 @@ Panel {
     Object.keys(folderActivityByPath()).forEach(add)
     folderUsageRecords.forEach(function(record) { if (record && typeof record === "object") add(record.folder) })
     folderPins.forEach(add)
+    root.folderRestored.forEach(add)
     Object.keys(hiddenFolderTimes).forEach(add)
     return folders
   }
@@ -549,10 +551,7 @@ Panel {
     runFolderPreferenceAction(["hide", folder, String(activity)])
   }
   function restoreFolder(folder) {
-    var entry = folderPickerEntry(folder)
-    var needsPin = entry ? (!entry.pinned && folderDefaultHidden(entry))
-                         : (!folderIsPinned(folder) && !(Number(folderActivityByPath()[folder]) > 0))
-    runFolderPreferenceAction(needsPin ? ["restore", folder, "--pin"] : ["restore", folder])
+    runFolderPreferenceAction(["restore", folder])
   }
   function folderUsageEntries(folder) {
     if (folderUsageRefreshedAt <= 0 || folderUsageRefreshedAt > Date.now() + 60000 || Date.now() - folderUsageRefreshedAt > 7 * 86400000) return []
@@ -688,7 +687,16 @@ Panel {
           if (folder.charAt(0) !== "/" || !isFinite(at) || at < 0) throw new Error("invalid hidden folder")
           hidden[folder] = at
         })
+        var restored = []
+        if (data.restored !== undefined) {
+          if (!Array.isArray(data.restored)) throw new Error("invalid restored folders")
+          data.restored.forEach(function(folder) {
+            if (typeof folder !== "string" || folder.charAt(0) !== "/") throw new Error("invalid restored folder path")
+            if (restored.indexOf(folder) < 0) restored.push(folder)
+          })
+        }
         root.folderPins = data.pinned
+        root.folderRestored = restored
         root.hiddenFolderTimes = hidden
         root.folderPreferencesReady = true
         root.refreshFolderPickerScan(true)
@@ -1530,7 +1538,6 @@ Panel {
           required property string modelData
           readonly property var usageItems: root.folderUsageEntries(modelData)
           readonly property bool on: root.squadRepo === modelData
-          readonly property bool pinned: root.folderIsPinned(modelData)
           width: fp.folderChipWidth
           height: fp.folderChipHeight
           radius: Style.cornerRadius
@@ -1543,7 +1550,7 @@ Panel {
             width: parent.width - Style.space(12)
             spacing: Style.space(4)
             Text {
-              width: parent.width - (hiddenRepoHover.hovered ? Style.space(40) : (hiddenRepoChip.pinned ? Style.space(22) : 0))
+              width: parent.width - hiddenRepoControls.implicitWidth - Style.space(12)
               horizontalAlignment: Text.AlignLeft
               textFormat: Text.PlainText
               text: root.folderName(hiddenRepoChip.modelData)
@@ -1572,26 +1579,38 @@ Panel {
             anchors.right: parent.right
             anchors.margins: Style.space(4)
             spacing: Style.space(2)
-            visible: hiddenRepoHover.hovered || hiddenRepoChip.pinned
-            FolderActionButton {
-              id: hiddenRepoPinAction
-              glyph: hiddenRepoChip.pinned ? "󰐃" : "󰤱"
-              tip: hiddenRepoChip.pinned ? root.pluginText("picker.unpin") : root.pluginText("picker.pin")
-              emphasized: false
-              available: root.folderPreferencesReady && !root.folderPreferenceBusy
-              onTriggered: root.toggleFolderPin(hiddenRepoChip.modelData)
-            }
-            FolderActionButton {
+            Rectangle {
               id: hiddenRepoRestoreAction
-              glyph: "󰦛"
-              tip: root.pluginText("picker.restore")
-              available: root.folderPreferencesReady && !root.folderPreferenceBusy
-              onTriggered: root.restoreFolder(hiddenRepoChip.modelData)
-              visible: hiddenRepoHover.hovered
+              readonly property bool hovered: hiddenRepoRestoreArea.containsMouse
+              readonly property bool available: root.folderPreferencesReady && !root.folderPreferenceBusy
+              implicitWidth: hiddenRepoRestoreText.implicitWidth + Style.space(14)
+              height: Style.space(22)
+              radius: Style.cornerRadius
+              color: hiddenRepoRestoreArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.16)
+                     : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08)
+              border.width: 1
+              border.color: root.soft(Color.accent, 0.5)
+              Text {
+                id: hiddenRepoRestoreText
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: root.pluginText("picker.restoreButton")
+                color: Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              MouseArea {
+                id: hiddenRepoRestoreArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: hiddenRepoRestoreAction.available ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: if (hiddenRepoRestoreAction.available) root.restoreFolder(hiddenRepoChip.modelData)
+              }
+              PanelToolTip { visible: hiddenRepoRestoreAction.hovered; text: root.pluginText("picker.restore"); fontFamily: root.fontFamily }
             }
           }
           PanelToolTip {
-            visible: !hiddenRepoPinAction.hovered && !hiddenRepoRestoreAction.hovered && hiddenRepoHover.hovered
+            visible: !hiddenRepoRestoreAction.hovered && hiddenRepoHover.hovered
             text: root.safeTooltipText(hiddenRepoChip.modelData)
             fontFamily: root.fontFamily
           }

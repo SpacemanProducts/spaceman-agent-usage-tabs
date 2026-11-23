@@ -138,9 +138,10 @@ def clean_paths(values: Any) -> list[str]:
   return out
 
 
-def load_preferences() -> tuple[list[str], dict[str, int]]:
+def load_preferences() -> tuple[list[str], dict[str, int], list[str]]:
   data = read_json(STATE / "folder-preferences.json")
   pinned = clean_paths(data.get("pinned"))
+  restored = clean_paths(data.get("restored"))
   hidden_raw = data.get("hidden")
   hidden: dict[str, int] = {}
   if isinstance(hidden_raw, dict):
@@ -154,7 +155,7 @@ def load_preferences() -> tuple[list[str], dict[str, int]]:
         continue
       if at >= 0:
         hidden[normalized] = max(hidden.get(normalized, 0), at)
-  return pinned, hidden
+  return pinned, hidden, restored
 
 
 def picked_paths() -> list[str]:
@@ -207,7 +208,7 @@ def activity_by_folder(now: int) -> dict[str, int]:
 
 
 def scan(paths: list[str], keep: list[str]) -> dict[str, Any]:
-  pinned, hidden = load_preferences()
+  pinned, hidden, restored = load_preferences()
   picked = picked_paths()
   keep_n = set(clean_paths(keep))
   explicit_roots = keep_n | set(pinned) | set(picked)
@@ -230,6 +231,8 @@ def scan(paths: list[str], keep: list[str]) -> dict[str, Any]:
     add(folder)
   for folder in hidden:
     add(folder)
+  for folder in restored:
+    add(folder)
   for folder in picked:
     add(folder)
   for folder in keep_n:
@@ -251,6 +254,7 @@ def scan(paths: list[str], keep: list[str]) -> dict[str, Any]:
       "sources": set(),
       "pinned": False,
       "picked": False,
+      "restored": False,
       "keep": folder in keep_n,
       "project": has_project_marker(Path(folder)),
       "system": system_root(folder) is not None,
@@ -267,6 +271,10 @@ def scan(paths: list[str], keep: list[str]) -> dict[str, Any]:
     key = group_key(folder)
     if key in groups:
       groups[key]["picked"] = True
+  for folder in restored:
+    key = group_key(folder)
+    if key in groups:
+      groups[key]["restored"] = True
   for folder, last_used in hidden.items():
     key = group_key(folder)
     if key in groups:

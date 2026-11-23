@@ -73,6 +73,7 @@ fs.writeFileSync(path.join(stateDir, "folder-usage.json"), JSON.stringify({
 fs.writeFileSync(path.join(stateDir, "folder-preferences.json"), JSON.stringify({
   version: 1,
   pinned: [path.join(home, "Projects", "app", "src")],
+  restored: [path.join(home, "Work")],
   hidden: {
     [path.join(home, ".gemini")]: at(10000),
     [path.join(home, "Documents", "notes", "src")]: at(8500),
@@ -109,6 +110,7 @@ assert.equal(by[rough].project, true);
 assert.equal(by[work].project, false);
 assert.equal(by[work].system, false);
 assert.equal(by[work].hiddenAt, at(10000));
+assert.equal(by[work].restored, true, "a restored folder is flagged without becoming a grouping root");
 assert.equal(by[picked].picked, true, "a folder started from the picker stays visible without project files");
 assert.deepEqual(by[picked].sources.sort(), [picked, path.join(picked, "sub")].sort());
 assert.equal(by[picked].project, false);

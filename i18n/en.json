@@ -3,5 +3,6 @@
   "picker.unpin": "Unpin folder",
   "picker.hide": "Hide folder",
   "picker.restore": "Restore folder",
+  "picker.restoreButton": "Restore",
   "picker.hiddenFolders": "Hidden folders (%1)"
 }

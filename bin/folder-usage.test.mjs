@@ -135,7 +135,7 @@ assert.match(qml, /FolderUsageLine \{ width: parent\.width; entries: repoChip\.u
 assert.match(qml, /folderPickerEntries\.forEach\(function\(entry, index\) \{\s*if \(entry\.folder === root\.home\) return\s*if \(folderEntryVisible\(entry\)\) ranked\.push/, "the visible list comes from grouped picker entries, with home left to the No project chip");
 assert.match(qml, /if \(aPinned !== bPinned\) return aPinned \? -1 : 1/, "pinned folders sort ahead of other active folders");
 assert.match(qml, /folderUsageRecords\.forEach\(function\(record\) \{ if \(record && typeof record === "object"\) add\(record\.folder\) \}\)/, "session folders are candidates even when absent from the recent-repository list");
-assert.match(qml, /folderPins\.forEach\(add\)[\s\S]*?Object\.keys\(hiddenFolderTimes\)\.forEach\(add\)/, "pinned and hidden folders stay candidates");
+assert.match(qml, /folderPins\.forEach\(add\)[\s\S]*?root\.folderRestored\.forEach\(add\)[\s\S]*?Object\.keys\(hiddenFolderTimes\)\.forEach\(add\)/, "pinned, restored and hidden folders stay candidates");
 assert.match(qml, /function hiddenFolderRepos\(\)[\s\S]*?!folderEntryVisible\(entry\)/, "the picker has a restorable hidden-folder model");
 assert.match(qml, /bin\/folder-picker\.py", "scan"/, "folder grouping runs through the picker scanner");
 assert.match(qml, /var group = root\.folderPickerGroups\[record\.folder\]/, "folder usage rolls up to the grouped project folder");
@@ -161,7 +161,11 @@ assert.match(qml, /border\.width: on \? 1 : 0[\s\S]*border\.color: root\.soft\(C
 assert.match(qml, /visible: !fp\.forSquad && \(repoHover\.hovered \|\| repoChip\.pinned\)/, "folder actions appear on hover while pinned folders retain a pin");
 assert.match(qml, /visible: repoHover\.hovered/, "the hide action only appears while hovering");
 assert.match(qml, /onTriggered: root\.hideFolder\(repoChip\.modelData\)/, "each visible folder can be manually hidden");
-assert.match(qml, /onTriggered: root\.restoreFolder\(hiddenRepoChip\.modelData\)/, "hidden folders can be restored");
+assert.match(qml, /root\.restoreFolder\(hiddenRepoChip\.modelData\)/, "hidden folders can be restored");
+assert.match(qml, /pluginText\("picker\.restoreButton"\)/, "the hidden-folder restore action is labeled, not just an icon");
+assert.doesNotMatch(qml, /hiddenRepoPinAction|toggleFolderPin\(hiddenRepoChip/, "hidden folders offer no pin action");
+assert.match(qml, /function restoreFolder\(folder\) \{\s*runFolderPreferenceAction\(\["restore", folder\]\)/, "restoring never pins: the folder returns as a normal entry");
+assert.match(qml, /entry\.restored/, "restored folders count as visible without pinning");
 assert.match(qml, /folderPreferencesRead\.running = true/, "persistent picker preferences load on open");
 assert.match(qml, /function safeTooltipText\(value\)[\s\S]*?replace\(\/</, "dynamic folder tooltips neutralize markup");
 assert.match(qml, /text: root\.safeTooltipText\(repoChip\.modelData\)/, "folder paths are sanitized before reaching the tooltip component");

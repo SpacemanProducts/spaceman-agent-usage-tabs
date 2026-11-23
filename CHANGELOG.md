@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.29.0 - 2026-11-23
+- **Hidden folders are restore-only:** the Hidden folders view shows a labeled Restore button and no pin control; restoring returns a folder to the main list unpinned (it can be pinned there), and hiding a pinned folder unpins it.
+
 ## 1.28.0 - 2026-11-23
 - **Antigravity surprise reset:** its notification stays on screen until clicked (sent at critical urgency, the only kind Omarchy's shell doesn't expire); clicking it plays the gold celebration unless it already played while the panel was open. Session and weekly resets are unchanged.
 

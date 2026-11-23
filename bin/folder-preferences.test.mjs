@@ -26,6 +26,7 @@ const prefs = (result) => {
 let result = prefs(run("list"));
 assert.deepEqual(result.pinned, [bulk, plugin], "Bulk Radar and the plugin folder are pinned initially");
 assert.deepEqual(result.hidden, {});
+assert.deepEqual(result.restored, []);
 
 result = prefs(run("hide", project, "1234"));
 assert.equal(result.hidden[project], 1234);
@@ -33,9 +34,13 @@ assert.ok(fs.statSync(project).isDirectory(), "hiding never removes a folder");
 
 result = prefs(run("pin", project));
 assert.ok(result.pinned.includes(project), "pinning persists");
+result = prefs(run("hide", project, "1234"));
+assert.ok(!result.pinned.includes(project), "hiding a pinned folder unpins it");
+assert.equal(result.hidden[project], 1234);
 result = prefs(run("restore", project));
 assert.equal(Object.hasOwn(result.hidden, project), false, "restoring clears the manual hide");
-assert.ok(result.pinned.includes(project), "restoring preserves the pin");
+assert.ok(result.restored.includes(project), "restoring marks the folder as kept without pinning it");
+assert.ok(!result.pinned.includes(project), "restoring does not pin the folder");
 
 result = prefs(run("unpin", bulk));
 assert.ok(!result.pinned.includes(bulk), "unpinning persists");
@@ -45,7 +50,8 @@ result = prefs(run("hide", idle, "0"));
 assert.equal(result.hidden[idle], 0);
 result = prefs(run("restore", idle, "--pin"));
 assert.equal(Object.hasOwn(result.hidden, idle), false);
-assert.ok(result.pinned.includes(idle), "restoring an inactive folder pins it so it is visible");
+assert.ok(result.pinned.includes(idle), "restoring with --pin still pins it");
+assert.ok(result.restored.includes(idle), "restoring marks the folder as kept");
 assert.equal(fs.statSync(path.join(state, "omarchy", "agent-usage-tabs", "folder-preferences.json")).mode & 0o777, 0o600,
   "folder preferences are private to the user");
 assert.notEqual(run("pin", "relative/path").status, 0, "preference commands reject relative paths");

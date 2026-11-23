@@ -35,7 +35,7 @@ def defaults() -> dict[str, Any]:
     home / "Projects" / "Bulk Radar",
     home / ".config" / "omarchy" / "plugins" / "spaceman.agent-usage-tabs",
   ]
-  return {"version": VERSION, "pinned": [str(path) for path in defaults if path.is_dir()], "hidden": {}}
+  return {"version": VERSION, "pinned": [str(path) for path in defaults if path.is_dir()], "hidden": {}, "restored": []}
 
 
 def validate(value: Any) -> dict[str, Any]:
@@ -43,8 +43,9 @@ def validate(value: Any) -> dict[str, Any]:
     raise PreferenceError("unsupported folder preferences format")
   pinned = value.get("pinned")
   hidden = value.get("hidden")
-  if not isinstance(pinned, list) or not isinstance(hidden, dict):
-    raise PreferenceError("folder preferences must contain pinned and hidden collections")
+  restored = value.get("restored", [])
+  if not isinstance(pinned, list) or not isinstance(hidden, dict) or not isinstance(restored, list):
+    raise PreferenceError("folder preferences must contain pinned, hidden and restored collections")
   normalized_pins = []
   for folder in pinned:
     if not isinstance(folder, str):
@@ -52,12 +53,19 @@ def validate(value: Any) -> dict[str, Any]:
     folder = absolute_path(folder)
     if folder not in normalized_pins:
       normalized_pins.append(folder)
+  normalized_restored = []
+  for folder in restored:
+    if not isinstance(folder, str):
+      raise PreferenceError("restored folder paths must be strings")
+    folder = absolute_path(folder)
+    if folder not in normalized_restored:
+      normalized_restored.append(folder)
   normalized_hidden = {}
   for folder, last_used in hidden.items():
     if not isinstance(folder, str) or isinstance(last_used, bool) or not isinstance(last_used, int) or last_used < 0:
       raise PreferenceError("hidden folders must map absolute paths to non-negative timestamps")
     normalized_hidden[absolute_path(folder)] = last_used
-  return {"version": VERSION, "pinned": normalized_pins, "hidden": normalized_hidden}
+  return {"version": VERSION, "pinned": normalized_pins, "hidden": normalized_hidden, "restored": normalized_restored}
 
 
 def save(path: Path, value: dict[str, Any]) -> None:
@@ -121,9 +129,12 @@ def main(argv: list[str]) -> int:
     if last_used < 0:
       raise PreferenceError("hide timestamp must be non-negative")
     prefs["hidden"][folder] = last_used
+    prefs["pinned"] = [pinned for pinned in prefs["pinned"] if pinned != folder]
   elif action == "restore" and len(argv) in (2, 3) and (len(argv) == 2 or argv[2] == "--pin"):
     folder = absolute_path(argv[1])
     prefs["hidden"].pop(folder, None)
+    if folder not in prefs["restored"]:
+      prefs["restored"].append(folder)
     if len(argv) == 3 and folder not in prefs["pinned"]:
       prefs["pinned"].append(folder)
   else:
