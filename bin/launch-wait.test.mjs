@@ -31,5 +31,7 @@ const qml = fs.readFileSync(path.join(here, "..", "Panel.qml"), "utf8");
 assert.match(qml, /launch-wait\.sh", "org\.omarchy\.agent"/, "Start goes through launch-wait.sh");
 assert.match(qml, /root\.agentHereError = String\(agentLauncherErr\.text\)/, "a failed start shows its error in the panel");
 assert.match(qml, /if \(code === 0\) root\.close\(\)/, "the panel closes only after the window appeared");
+assert.match(qml, /launch-wait\.sh", "org\.omarchy\.squad"/, "Run goes through launch-wait.sh too");
+assert.match(qml, /root\.squadError = String\(squadLauncherErr\.text\)/, "a failed Run shows its error in the panel");
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("launch-wait: all tests passed");

@@ -464,7 +464,19 @@ Panel {
     command: ["zenity", "--entry", "--title=New project", "--text=Name for the new project (made in ~/Projects with git set up):"]
     stdout: StdioCollector { onStreamFinished: { var n = String(text).trim(); if (n !== "" && n.indexOf("/") < 0 && n.charAt(0) !== ".") { root.squadNewName = n; root.squadRepo = "" } } }
   }
-  Process { id: squadLauncher; running: false }
+  // Same rule as Start: the panel closes only after the Claude Squad window really opened, else it shows why.
+  property string squadError: ""
+  property bool squadStarting: false
+  Process {
+    id: squadLauncher
+    running: false
+    stderr: StdioCollector { id: squadLauncherErr }
+    onExited: function(code) {
+      root.squadStarting = false
+      if (code === 0) root.close()
+      else root.squadError = String(squadLauncherErr.text).trim() || ("The terminal didn't open (exit " + code + ").")
+    }
+  }
   function shortPath(p) {
     var s = String(p)
     if (s.indexOf(root.home + "/Projects/") === 0) return s.slice((root.home + "/Projects/").length)
@@ -512,10 +524,11 @@ Panel {
     return ["omarchy-launch-tui", "--app-id=org.omarchy.squad", "env", env, "bash", pluginDir + "/bin/squad.sh"].concat(squadClis)
   }
   function launchSquad() {
-    if (!squadReady) return
-    squadLauncher.command = squadCommand()
+    if (!squadReady || squadLauncher.running) return
+    squadError = ""
+    squadStarting = true
+    squadLauncher.command = ["bash", pluginDir + "/bin/launch-wait.sh", "org.omarchy.squad", "20"].concat(squadCommand())
     squadLauncher.running = true
-    close()
   }
 
   function refreshNow() { if (!collector.running) collector.running = true }
@@ -1415,6 +1428,16 @@ Panel {
               }
               MouseArea { id: runArea; anchors.fill: parent; enabled: runTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.launchSquad() }
               PanelToolTip { visible: runArea.containsMouse; text: "Opens one Claude Squad window in a git repo folder, with a session started for each agent"; fontFamily: root.fontFamily }
+            }
+            Text {
+              visible: root.squadStarting || root.squadError !== ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: root.squadStarting ? "Opening the terminal..." : root.squadError
+              color: root.squadStarting ? root.dim : root.red
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
             }
           }

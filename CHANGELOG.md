@@ -12,6 +12,7 @@ Bump the version in `manifest.json` and add a line here with every change
 - **Start button always opens a terminal or says why:** it used to close the panel right after starting the launcher, and the terminal
   sometimes never appeared. Start now runs through `bin/launch-wait.sh`, which confirms a new window really opened (any workspace) and
   closes the panel only then; otherwise the panel shows the error. Tested with Copilot and Claude Code on a real repo, four launches in a row.
+  The Claude Squad **Run** button works the same way.
 
 ## 1.21.0 - 2026-11-23
 - **Cursor:** its dashboard can say 0% after the CLI was stopped by "You've hit your usage limit" (checked on a Free account). The CLI records
