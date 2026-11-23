@@ -8,6 +8,9 @@ HERE=$(dirname "$(readlink -f "$0")")
 export PATH="$HOME/.local/bin:$PATH"
 source "$HERE/folders.sh"
 pause() { read -rn1 -p "Press any key to close "; }
+pick_state="$(dirname "$state")/start-picks"
+# Every folder started from the Start picker is remembered, repo or not, so the picker can keep it visible.
+remember_pick() { [[ -n $1 && $1 != "$HOME" ]] || return 0; mkdir -p "$(dirname "$pick_state")"; { echo "$1"; grep -vxF "$1" "$pick_state" 2>/dev/null; } | head -20 >"$pick_state.new" && mv "$pick_state.new" "$pick_state"; }
 
 dir=${AGENT_DIR:-}
 if [[ -n ${AGENT_NEW:-} ]]; then      # a plain folder name, made in ~/Projects with git set up
@@ -16,6 +19,7 @@ if [[ -n ${AGENT_NEW:-} ]]; then      # a plain folder name, made in ~/Projects 
   if ! is_repo "$dir"; then mkdir -p "$dir" && init_repo "$dir" || { echo "Couldn't create $dir"; pause; exit 1; }; fi
 fi
 [[ -n $dir && -d $dir ]] || { echo "No such folder: ${dir:-(none)}"; pause; exit 1; }
+remember_pick "$dir"
 
 # Only a git repo goes on the recent list (a plain folder is fine for an agent, but the list is of repos).
 if is_repo "$dir"; then

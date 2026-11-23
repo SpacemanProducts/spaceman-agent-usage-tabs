@@ -407,6 +407,12 @@ Panel {
   property bool folderPreferencesReady: false
   readonly property bool folderPreferenceBusy: folderPreferenceAction.running
   property bool showHiddenFolders: false
+  property var folderPickerEntries: []
+  property var folderPickerByFolder: ({})
+  property var folderPickerGroups: ({})
+  property bool folderPickerReady: false
+  property bool folderPickerScanQueued: false
+  property string folderPickerScanKey: ""
   function folderActivityByPath() {
     var latest = ({})
     var now = Date.now(), cutoff = now - 7 * 86400000
@@ -419,53 +425,77 @@ Panel {
     })
     return latest
   }
-  function folderIsPinned(folder) { return folderPins.indexOf(folder) >= 0 }
-  function folderIsManuallyHidden(folder, activity) {
-    var hiddenAt = Number(hiddenFolderTimes[folder])
-    return isFinite(hiddenAt) && (Number(activity[folder]) || 0) <= hiddenAt
+  function folderPickerEntry(folder) { return folderPickerByFolder[folder] || null }
+  function folderIsPinned(folder) {
+    var entry = folderPickerEntry(folder)
+    return entry ? !!entry.pinned : folderPins.indexOf(folder) >= 0
   }
+  function folderManualHidden(entry) {
+    return !!entry && isFinite(Number(entry.hiddenAt)) && Number(entry.activity || 0) <= Number(entry.hiddenAt)
+  }
+  function folderDefaultHidden(entry) {
+    if (!entry) return true
+    if (entry.keep) return false
+    if (entry.system) return !(entry.pinned || entry.picked)
+    return !(entry.pinned || entry.picked || entry.project)
+  }
+  function folderEntryVisible(entry) { return !!entry && !folderManualHidden(entry) && !folderDefaultHidden(entry) }
   function folderCandidates() {
     var folders = squadRepos.slice()
-    Object.keys(folderActivityByPath()).concat(folderPins, Object.keys(hiddenFolderTimes)).forEach(function(folder) {
-      if (folder && folder.charAt(0) === "/" && folders.indexOf(folder) < 0) folders.push(folder)
-    })
+    function add(folder) {
+      if (typeof folder === "string" && folder.charAt(0) === "/" && folders.indexOf(folder) < 0) folders.push(folder)
+    }
+    Object.keys(folderActivityByPath()).forEach(add)
+    folderUsageRecords.forEach(function(record) { if (record && typeof record === "object") add(record.folder) })
+    folderPins.forEach(add)
+    Object.keys(hiddenFolderTimes).forEach(add)
     return folders
+  }
+  function refreshFolderPickerScan(force) {
+    var candidates = folderCandidates()
+    var key = candidates.join("\n")
+    if (folderPickerScan.running) {
+      if (force || key !== folderPickerScanKey) folderPickerScanQueued = true
+      return
+    }
+    if (!force && folderPickerReady && key === folderPickerScanKey) return
+    folderPickerScanKey = key
+    folderPickerScan.command = ["python3", pluginDir + "/bin/folder-picker.py", "scan", "--keep", root.pluginDir, "--keep", root.home].concat(candidates)
+    folderPickerScan.running = true
   }
   function ensureVisibleStartFolder() {
     if (!agentHereOpen || squadNewName !== "" || squadRepo === home) return
+    if (squadRepo !== "" && (squadRepos.indexOf(squadRepo) >= 0 || folderPickerByFolder[squadRepo])) return
     var folders = startFolderRepos()
-    if (folders.indexOf(squadRepo) < 0) squadRepo = folders.length ? folders[0] : home
+    squadRepo = folders.length ? folders[0] : home
   }
   function startFolderRepos() {
-    if (!folderPreferencesReady) return []
-    var activity = folderActivityByPath(), candidates = folderCandidates()
-    var indexes = ({})
-    candidates.forEach(function(folder, index) { indexes[folder] = index })
-    var folders = candidates.filter(function(folder) {
-      if (!folder || folderIsManuallyHidden(folder, activity)) return false
-      return folderIsPinned(folder) || Number(activity[folder]) > 0
+    if (!folderPickerReady) return []
+    var ranked = []
+    folderPickerEntries.forEach(function(entry, index) {
+      if (entry.folder === root.home) return
+      if (folderEntryVisible(entry)) ranked.push({ entry: entry, index: index })
     })
-    folders.sort(function(a, b) {
-      var aPinned = folderIsPinned(a), bPinned = folderIsPinned(b)
+    ranked.sort(function(a, b) {
+      var aPinned = !!a.entry.pinned, bPinned = !!b.entry.pinned
       if (aPinned !== bPinned) return aPinned ? -1 : 1
-      var recent = (Number(activity[b]) || 0) - (Number(activity[a]) || 0)
-      return recent || indexes[a] - indexes[b] || a.localeCompare(b)
+      var recent = Number(b.entry.activity || 0) - Number(a.entry.activity || 0)
+      return recent || a.index - b.index || a.entry.folder.localeCompare(b.entry.folder)
     })
-    return folders
+    return ranked.map(function(item) { return item.entry.folder })
   }
   function hiddenFolderRepos() {
-    if (!folderPreferencesReady) return []
-    var activity = folderActivityByPath(), candidates = folderCandidates()
-    var indexes = ({})
-    candidates.forEach(function(folder, index) { indexes[folder] = index })
-    var folders = candidates.filter(function(folder) {
-      return folderIsManuallyHidden(folder, activity) || (!folderIsPinned(folder) && !(Number(activity[folder]) > 0))
+    if (!folderPickerReady) return []
+    var ranked = []
+    folderPickerEntries.forEach(function(entry, index) {
+      if (entry.folder === root.home) return
+      if (!folderEntryVisible(entry)) ranked.push({ entry: entry, index: index })
     })
-    folders.sort(function(a, b) {
-      var recent = (Number(activity[b]) || 0) - (Number(activity[a]) || 0)
-      return recent || indexes[a] - indexes[b] || a.localeCompare(b)
+    ranked.sort(function(a, b) {
+      var recent = Number(b.entry.activity || 0) - Number(a.entry.activity || 0)
+      return recent || a.index - b.index || a.entry.folder.localeCompare(b.entry.folder)
     })
-    return folders
+    return ranked.map(function(item) { return item.entry.folder })
   }
   function runFolderPreferenceAction(args) {
     if (!folderPreferencesReady || folderPreferenceAction.running) return
@@ -476,12 +506,14 @@ Panel {
     runFolderPreferenceAction([folderIsPinned(folder) ? "unpin" : "pin", folder])
   }
   function hideFolder(folder) {
-    var activity = folderActivityByPath()
-    runFolderPreferenceAction(["hide", folder, String(Number(activity[folder]) || 0)])
+    var entry = folderPickerEntry(folder)
+    var activity = entry ? Number(entry.activity || 0) : Number(folderActivityByPath()[folder]) || 0
+    runFolderPreferenceAction(["hide", folder, String(activity)])
   }
   function restoreFolder(folder) {
-    var activity = folderActivityByPath()
-    var needsPin = !folderIsPinned(folder) && !(Number(activity[folder]) > 0)
+    var entry = folderPickerEntry(folder)
+    var needsPin = entry ? (!entry.pinned && folderDefaultHidden(entry))
+                         : (!folderIsPinned(folder) && !(Number(folderActivityByPath()[folder]) > 0))
     runFolderPreferenceAction(needsPin ? ["restore", folder, "--pin"] : ["restore", folder])
   }
   function folderUsageEntries(folder) {
@@ -489,7 +521,8 @@ Panel {
     var totals = ({})
     folderUsageRecords.forEach(function(record) {
       if (!record || typeof record !== "object") return
-      if (record.folder !== folder) return
+      var group = root.folderPickerGroups[record.folder]
+      if ((group === undefined ? record.folder : group) !== folder) return
       var id = String(record.agent || "")
       var amount = Number(record.amount), unit = id === "copilot" ? "AIC" : "tokens"
       if (!rawAgents.some(function(a) { return a.id === id }) || !isFinite(amount) || amount <= 0 || record.unit !== unit) return
@@ -525,6 +558,7 @@ Panel {
   function refreshFolderUsage() {
     if (!folderUsageRefresh.running) folderUsageRefresh.running = true
     if (!folderPreferencesRead.running) folderPreferencesRead.running = true
+    refreshFolderPickerScan(true)
   }
   function toggleAgentHere() {
     agentHereOpen = !agentHereOpen
@@ -580,6 +614,7 @@ Panel {
         var list = String(text).split("\n").filter(function(l) { return l.trim() !== "" })
         root.squadRepos = list
         if (root.squadRepo === "" && root.squadNewName === "" && list.length > 0) root.squadRepo = list[0]   // the last one used
+        root.refreshFolderPickerScan(true)
         root.ensureVisibleStartFolder()
       }
     }
@@ -618,6 +653,7 @@ Panel {
         root.folderPins = data.pinned
         root.hiddenFolderTimes = hidden
         root.folderPreferencesReady = true
+        root.refreshFolderPickerScan(true)
         root.ensureVisibleStartFolder()
       } catch (e) {
         root.folderPreferencesReady = false
@@ -635,6 +671,41 @@ Panel {
       else if (!folderPreferencesRead.running) folderPreferencesRead.running = true
     }
   }
+  Process {
+    id: folderPickerScan
+    command: []
+    running: false
+    stdout: StdioCollector { id: folderPickerScanOut }
+    stderr: StdioCollector { id: folderPickerScanErr }
+    onExited: function(code) {
+      root.folderPickerScanQueued = false
+      if (code !== 0) {
+        console.warn("usage-tabs: folder picker scan failed: " + String(folderPickerScanErr.text).trim())
+      } else {
+        try {
+          var data = JSON.parse(String(folderPickerScanOut.text || ""))
+          if (!data || !Array.isArray(data.folders)) throw new Error("invalid folder picker scan")
+          var entries = [], byFolder = ({}), groups = ({})
+          data.folders.forEach(function(entry) {
+            if (!entry || typeof entry.folder !== "string" || entry.folder.charAt(0) !== "/") return
+            entries.push(entry)
+            byFolder[entry.folder] = entry
+            groups[entry.folder] = entry.folder
+            ;(entry.sources || []).forEach(function(source) { if (typeof source === "string") groups[source] = entry.folder })
+          })
+          root.folderPickerEntries = entries
+          root.folderPickerByFolder = byFolder
+          root.folderPickerGroups = groups
+          root.folderPickerReady = true
+          root.ensureVisibleStartFolder()
+        } catch (e) {
+          root.folderPickerReady = false
+          console.warn("usage-tabs: folder picker scan couldn't be parsed: " + String(e))
+        }
+      }
+      if (root.folderPickerScanQueued) root.refreshFolderPickerScan(true)
+    }
+  }
   FileView {
     path: (Quickshell.env("XDG_STATE_HOME") || root.home + "/.local/state") + "/omarchy/agent-usage-tabs/folder-usage.json"
     watchChanges: true
@@ -645,14 +716,16 @@ Panel {
         var data = JSON.parse(String(text() || ""))
         root.folderUsageRecords = Array.isArray(data.records) ? data.records : []
         root.folderUsageRefreshedAt = Number(data.refreshedAt) || 0
+        root.refreshFolderPickerScan(true)
         root.ensureVisibleStartFolder()
       } catch (e) {
         root.folderUsageRecords = []
         root.folderUsageRefreshedAt = 0
+        root.refreshFolderPickerScan(true)
         root.ensureVisibleStartFolder()
       }
     }
-    onLoadFailed: { root.folderUsageRecords = []; root.folderUsageRefreshedAt = 0 }
+    onLoadFailed: { root.folderUsageRecords = []; root.folderUsageRefreshedAt = 0; root.refreshFolderPickerScan(true) }
   }
   Process { id: zenityCheck; command: ["bash", "-c", "command -v zenity >/dev/null"]; onExited: function(code) { root.squadZenity = code === 0 } }
   Process {
@@ -661,7 +734,9 @@ Panel {
     // A folder picked here joins the list (selected, with its check mark), so the pick is visible and Start/Run are ready.
     stdout: StdioCollector { onStreamFinished: { var p = String(text).trim(); if (p !== "") {
       if (root.squadRepos.indexOf(p) < 0) root.squadRepos = [p].concat(root.squadRepos)
-      root.squadRepo = p; root.squadNewName = "" } } }
+      root.squadRepo = p; root.squadNewName = ""
+      root.refreshFolderPickerScan(true)
+      root.ensureVisibleStartFolder() } } }
   }
   Process {
     id: nameAsker
@@ -940,6 +1015,7 @@ Panel {
     // Test hook: pick a folder and press Start, through the same function the button calls.
     function agentStart(p: string): string { root.agentHereOpen = true; root.squadRepo = p; root.squadNewName = ""; root.launchAgentHere(); return "started" }
     function agentCmd(): string { return root.agentHereReady ? JSON.stringify(root.agentHereCommand()) : "not ready" }
+    function folderPickerState(): string { return JSON.stringify({ ready: root.folderPickerReady, visible: root.startFolderRepos(), hidden: root.hiddenFolderRepos(), entries: root.folderPickerEntries }) }
     function squad(): string { root.toggleSquad(); return root.squadOpen ? "open" : "closed" }
     function resetOrder(): string { root.resetOrder(); return "ok" }
     // Test hook: drop chip `from` as if it were dragged onto chip `to` (same hit-testing as a real drag).

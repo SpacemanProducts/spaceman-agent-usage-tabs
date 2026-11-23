@@ -55,5 +55,9 @@ assert.match(qml, /squadRepos\.indexOf\(p\) < 0\) root\.squadRepos = \[p\]\.conc
 assert.match(qml, /visible: !fp\.forSquad[\s\S]*?text: \(homeChip\.on \? "\\u2713 " : ""\) \+ "No project"[\s\S]*?root\.squadRepo = root\.home/, "the Start picker offers home without changing Squad's folder choices");
 assert.match(qml, /agentHereReady: squadRepo !== "" \|\| squadNewName !== "" \|\| agentHereOpen/, "Start is ready with no folder selected");
 assert.match(qml, /"AGENT_DIR=" \+ \(squadRepo !== "" \? squadRepo : root\.home\)/, "no folder selection starts in home");
+assert.match(qml, /squadRepos\.indexOf\(squadRepo\) >= 0 \|\| folderPickerByFolder\[squadRepo\]/, "a folder picked with Browse stays selected while the grouped list catches up");
+const picks = fs.readFileSync(path.join(home, ".local/state/omarchy/agent-usage-tabs/start-picks"), "utf8").trim().split("\n");
+assert.ok(picks.includes(plain), "a folder started from the picker is remembered even without git");
+assert.ok(!picks.includes(home), "the home-folder entry is not remembered as a pick");
 fs.rmSync(tmp, { recursive: true });
 console.log("agent-here: all tests passed");
