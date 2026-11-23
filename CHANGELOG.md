@@ -6,6 +6,12 @@ they belong to. The full history, patch by patch, is in git (`git log`).
 Bump the version in `manifest.json` and add a line here with every change
 (patch for a fix, minor for a feature).
 
+## 1.18.0 - 2026-11-22
+- A gray tab has one small button under its reason line that goes straight to the fix: Install (a terminal running the agent's
+  official install command), Sign in (a terminal running its login command) or Add key (the agent's official API-key page).
+  Commands come only from each agent's official docs (`fixes.js`, with sources); with no confirmed command it links the official
+  setup page. Tested in `bin/fixes.test.mjs`.
+
 ## 1.17.0 - 2026-11-22
 - Every notification (limit alerts, resets, notices) closes by itself after about 8 seconds; the 100% alert was "critical" and
   stayed until dismissed. Still once per window.

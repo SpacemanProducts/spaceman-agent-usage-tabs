@@ -84,6 +84,11 @@ local until you sign in).
 - A **gray** tab always says why in one short line: its own status (for example *Limits unavailable* or, for Claude Code used
   without a plan login, *In use, but no Claude plan login found*), *Not installed*, *Not signed in*, or *No usage source* (the agent
   doesn't report limits here). A monthly or credit-style meter still colors the chip. Gray with "unsure" means the reading is out of date.
+- **Under that line, one small button goes straight to the fix:** **Install** opens a terminal running the agent's official install
+  command, **Sign in** opens a terminal running its login command, and **Add key** (bring-your-own-key agents) opens the agent's
+  official page for API keys. Every command comes from the agent's own docs (sources in `fixes.js`); where the docs give no Linux
+  command (Kiro's install, the archived Kimi CLI, DeepSeek Harness), the button opens the official setup page instead. Sign-in that
+  only happens inside a session (`/login`) says so in the button's tooltip.
 - **A window is reset the moment its reset time passes:** the chip, the bar number and the tab drop to 0% ("Reset, waiting for
   fresh data") right away, with no stale red left, and fresh data is fetched.
 - When a hidden agent signs in for the first time, you get a one-time "now available" notice.

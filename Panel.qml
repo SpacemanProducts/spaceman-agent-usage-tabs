@@ -7,6 +7,7 @@ import qs.Commons
 import qs.Ui
 import "chip-meters.js" as ChipMeters
 import "tab-order.js" as TabOrder
+import "fixes.js" as Fixes
 
 // Cook Meter (plugin id spaceman.agent-usage-tabs). Display only: bin/collect.mjs writes data.json, this file
 // watches it. Written from scratch; shares no code or state with other plugins.
@@ -348,6 +349,15 @@ Panel {
     if (a.id === "claude") return "Claude Code didn't report limits this time; retrying on the next refresh."
     if (a.usageType) return a.name + " doesn't report plan limits."
     return "No usage source: " + a.name + " doesn't report limits here."
+  }
+
+  // The one-click fix under a gray tab's reason line (Install / Sign in / Add key), or null. See fixes.js.
+  function grayFix(a) { return a ? Fixes.fixFor(a, ChipMeters.chipMeters(a).session < 0) : null }
+  function runFix(f) {
+    if (!f) return
+    if (f.url) Qt.openUrlExternally(f.url)
+    else if (root.bar && f.cmd) root.bar.run(Fixes.terminalCommand(f.cmd))
+    close()
   }
 
   // Highest percent across all of an agent's limit meters; -1 when it has none.
@@ -1765,6 +1775,29 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
+          }
+
+          // ...and one small button that goes straight to the fix (styled like the Install Claude Squad tile).
+          Rectangle {
+            id: fixTile
+            readonly property var fix: root.grayFix(root.agent)
+            visible: root.showDetail && fix !== null
+            width: fixLabel.implicitWidth + Style.space(22)
+            height: fixLabel.implicitHeight + Style.space(14)
+            radius: Style.cornerRadius
+            color: fixArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+            Text {
+              id: fixLabel
+              anchors.centerIn: parent
+              textFormat: Text.PlainText
+              text: fixTile.fix ? fixTile.fix.label : ""
+              color: fixArea.containsMouse ? Color.accent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+            MouseArea { id: fixArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.runFix(fixTile.fix) }
+            PanelToolTip { visible: fixArea.containsMouse && fixTile.fix !== null; text: fixTile.fix ? fixTile.fix.tip : ""; fontFamily: root.fontFamily }
           }
 
           PanelSeparator { foreground: root.foreground; visible: root.showDetail }
