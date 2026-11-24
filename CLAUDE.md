@@ -107,6 +107,12 @@ keeps the developer in flow:
   home/projects snapshot, revert/quarantine restore, strikes cap task size).
   Lessons and project rules are advice appended to prompts — never edit ROLE's
   core rules for them.
+  Since 1.41.0 she also hears finish signals (`bin/constance-notify.mjs` +
+  `watch` command: read-only `busctl --user monitor` snoop of
+  org.freedesktop.Notifications, matched to jobs by agent/done-file/folder,
+  foreign agents logged and left alone) and has a real ready-task queue
+  (`bin/constance-queue.mjs`, `C queue`, auto-handed on review accept, shown in
+  the panel's READY QUEUE section).
   Practice mode (`constancePractice` setting, panel switch, ON by default for now): `delegate` only
   logs the agent, reason and full prompt (kind `practice`) and the job is born finished — nothing
   launches, nothing changes. Model fallback (`bin/constance-model.mjs`): a plan rejection of the
