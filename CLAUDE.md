@@ -136,6 +136,11 @@ keeps the developer in flow:
   model ("issue with the selected model … may not have access") drops her opus→sonnet→haiku, logs
   kind `model`, and restarts the goal on a fresh session (a rejected run leaves no session, so
   `--resume` can't be used); other errors never downgrade her.
+  Since 1.44.0 Devin runs up to 10 copies (its published concurrent limit; `constanceMaxCopies`
+  setting lowers it) and they ramp (`bin/constance-ramp.mjs`): one start per 30 s, only under
+  0.8 load per core and >= max(2 GiB, 10%) free memory. Otherwise the job is `held` (files and
+  copy number reserved) and `releaseHeld()` starts it from wait/jobs/the driver heartbeat.
+  Tests use a fake `CONSTANCE_PROC` and `CONSTANCE_RAMP_GAP_MS=0`.
 
 ## Working rules
 

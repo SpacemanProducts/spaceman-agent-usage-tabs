@@ -83,7 +83,13 @@ echo "Report: b added by grok."
 const fakeHome = path.join(root, "home"); fs.mkdirSync(path.join(fakeHome, "Projects"), { recursive: true });
 fs.writeFileSync(path.join(bin, "busctl"), "#!/bin/bash\nsleep 30\n", { mode: 0o755 });
 fs.writeFileSync(path.join(fakeHome, "home-marker"), "the real (fake) home is visible\n");
-const env = { ...process.env, HOME: fakeHome, SQUAD_PROJECTS: path.join(fakeHome, "Projects"), XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}` };
+// A fake /proc for the copy ramp: a calm machine by default (the busy one is set
+// for the held-copy test), and no gap between copy starts so tests stay quick.
+const proc = path.join(root, "proc"); fs.mkdirSync(proc);
+const setLoad = (load) => fs.writeFileSync(path.join(proc, "loadavg"), `${load} 0.50 0.50 1/500 999\n`);
+setLoad("0.10");
+fs.writeFileSync(path.join(proc, "meminfo"), "MemTotal:       33554432 kB\nMemFree:        10000000 kB\nMemAvailable:   20971520 kB\n");
+const env = { ...process.env, HOME: fakeHome, SQUAD_PROJECTS: path.join(fakeHome, "Projects"), XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}`, CONSTANCE_PROC: proc, CONSTANCE_RAMP_GAP_MS: "0" };
 const run = (...a) => spawnSync("node", [CLI, ...a], { env, encoding: "utf8" });
 const status = () => JSON.parse(run("status").stdout);
 const until = async (fn, ms = 20000) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
@@ -394,6 +400,82 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   // Clean up the conflicted worktree/branch the test deliberately left behind.
   git("worktree", "remove", "--force", aJob.worktree); git("branch", "-D", aJob.branch);
 }
+
+// Ten Devin copies at once (the published limit): ten editing jobs run side by
+// side as Devin 1..10, an eleventh is refused, and all ten merge after review.
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+for i in $(seq 1 11); do $C delegate --agent devin --files t$i.txt --task "add t$i" >> "${root}/ten.out" 2>&1 || echo "refused-$i" >> "${root}/ten.out"; done
+$C jobs > "${root}/ten-jobs.json"
+touch "${root}/go"
+for i in $(seq 1 10); do
+  $C wait --timeout 60 > "${root}/ten-wait.json"
+  id=$(grep -o '"id": [0-9]*' "${root}/ten-wait.json" | head -1 | grep -o '[0-9]*')
+  $C review "$id" accept --note ok >> "${root}/ten-rev.txt" 2>&1
+done
+echo "Ten report: ten Devins merged."
+`, { mode: 0o755 });
+fs.rmSync(path.join(root, "go"), { force: true });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "ten copies").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the ten-copies goal finishes: " + JSON.stringify(status().goal));
+{
+  const ten = JSON.parse(fs.readFileSync(path.join(root, "ten-jobs.json"), "utf8"));
+  const live = ten.jobs.filter((j) => j.agent === "devin" && j.goal === status().goal.id && ["running", "waiting"].includes(j.status));
+  assert.equal(live.length, 10, "ten copies run at the same time: " + JSON.stringify(ten.jobs.map((j) => [j.id, j.worker, j.status])));
+  assert.deepEqual(live.map((j) => j.worker).sort(), Array.from({ length: 10 }, (_, i) => `Devin ${i + 1}`).sort(), "Devin 1..10");
+  assert.deepEqual(ten.copies.find((c) => c.agent === "devin"), { agent: "devin", limit: 10, running: 10, held: 0, heldReason: "" }, "jobs reports the copy count");
+  const outTen = fs.readFileSync(path.join(root, "ten.out"), "utf8");
+  assert.match(outTen, /already has 10 copies running or held/, "an eleventh copy is refused");
+  assert.match(outTen, /refused-11/); assert.doesNotMatch(outTen, /refused-([1-9]|10)\n/);
+  const cs = status();
+  const dj = cs.jobs.filter((j) => j.agent === "devin" && j.goal === cs.goal.id);
+  assert.equal(dj.length, 10); assert.ok(dj.every((j) => j.status === "accepted"), "all ten accepted: " + JSON.stringify(dj.map((j) => [j.id, j.status])));
+  for (let i = 1; i <= 10; i++) assert.ok(fs.existsSync(path.join(repo, `t${i}.txt`)), `t${i}.txt merged`);
+  assert.equal(git("branch", "--list", "constance/*").trim(), "", "all ten branches cleaned up");
+}
+
+// A held copy: the machine is busy, so the copy is held (its files reserved, the
+// reason shown), and it starts by itself once the load drops.
+setLoad("999.00");
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files h1.txt --task "add h1" > "${root}/held.out" 2>&1
+$C delegate --agent grok --files h1.txt --task "same file" >> "${root}/held.out" 2>&1 || echo "refused-held-files" >> "${root}/held.out"
+$C wait --timeout 60 > "${root}/held-wait.json"
+id=$(grep -o '"id": [0-9]*' "${root}/held-wait.json" | head -1 | grep -o '[0-9]*')
+$C review "$id" accept --note ok > "${root}/held-rev.txt" 2>&1
+echo "Held report: h1 added after the machine calmed down."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "held copy").status, 0);
+assert.ok(await until(() => { try { return fs.readFileSync(path.join(root, "held.out"), "utf8").includes("refused-held-files"); } catch { return false; } }), "both delegates ran");
+{
+  const outHeld = fs.readFileSync(path.join(root, "held.out"), "utf8");
+  assert.match(outHeld, /is held: machine busy: load 999\.0 on \d+ cores/, "the delegate says it is held and why");
+  assert.match(outHeld, /overlap job/, "a held job's files stay reserved");
+  const hs = status();
+  const hj = hs.jobs.find((j) => j.goal === hs.goal.id && j.files.includes("h1.txt"));
+  assert.equal(hj.status, "held"); assert.equal(hj.worker, "Devin 1"); assert.match(hj.heldReason, /machine busy/);
+  assert.equal(hj.pid, undefined, "nothing launched while held");
+  const c = hs.copies.find((x) => x.agent === "devin");
+  assert.equal(c.held, 1); assert.equal(c.running, 0); assert.match(c.heldReason, /machine busy/, "the panel gets the count and the reason");
+  assert.ok(hs.log.some((l) => l.kind === "held" && l.job === hj.id), "held is in her log");
+}
+setLoad("0.10");
+assert.ok(await until(() => status().goal.status === "done", 60000), "the held copy starts once the machine calms down, and the goal finishes: " + JSON.stringify(status().goal));
+{
+  const hs = status();
+  const hj = hs.jobs.find((j) => j.goal === hs.goal.id && j.files.includes("h1.txt"));
+  assert.equal(hj.status, "accepted"); assert.ok(fs.existsSync(path.join(repo, "h1.txt")), "h1 merged");
+  assert.ok(hs.log.some((l) => l.kind === "handoff" && l.job === hj.id), "it was handed off once released");
+}
+// The owner's setting lowers the limit (and never raises it past 10).
+fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false, constanceMaxCopies: 3 }));
+assert.equal(status().copies.find((x) => x.agent === "devin").limit, 3, "constanceMaxCopies lowers the copy limit");
+fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false, constanceMaxCopies: 40 }));
+assert.equal(status().copies.find((x) => x.agent === "devin").limit, 10, "never above the published limit");
+fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
 fs.rmSync(path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-worktrees"), { recursive: true, force: true });
 
 // The watcher: a fake busctl feeds it real-format Notify blocks. With no job

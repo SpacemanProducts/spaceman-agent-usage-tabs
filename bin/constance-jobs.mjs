@@ -58,7 +58,7 @@ export function overlaps(a = [], b = []) {
 // count: a worktree copy's branch isn't merged until review accepts it, so its
 // files are just as spoken for as a running job's.
 export function conflicts(jobs, dir, files) {
-  return jobs.filter((j) => ["running", "waiting", "finished"].includes(j.status) && (j.repo || j.dir) === dir && overlaps(j.files, files).length > 0);
+  return jobs.filter((j) => ["held", "running", "waiting", "finished"].includes(j.status) && (j.repo || j.dir) === dir && overlaps(j.files, files).length > 0);
 }
 
 export const doneFile = (dir, id) => path.join(dir, ".constance", `done-${id}.json`);

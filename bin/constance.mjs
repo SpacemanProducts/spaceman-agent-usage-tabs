@@ -25,7 +25,8 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { judgeAll, launchCommand, accountEnv, LAUNCH, copyLimit } from "./constance-agents.mjs";
+import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.mjs";
+import { copyLimit, roomForCopy, readMachine, PUBLISHED_MAX } from "./constance-ramp.mjs";
 import { pace } from "./constance-pace.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
@@ -87,6 +88,10 @@ const judged = (d) => judgeAll(d, Date.now(), { sandbox: boxProblem });
 // Practice mode (the panel's switch, on by default for now): a dry run. She still plans the goal and
 // picks agents, but delegate() only writes each handoff's agent, reason and full prompt into the log —
 // nothing launches and nothing changes. Missing settings.json means practice is on.
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(path.join(STATE, "settings.json"), "utf8")) || {}; } catch { return {}; }
+}
+const limitOf = (agent) => copyLimit(agent, readSettings());
 function practiceMode() {
   try { return JSON.parse(fs.readFileSync(path.join(STATE, "settings.json"), "utf8")).constancePractice !== false; }
   catch { return true; }
@@ -167,11 +172,12 @@ function excludeDoneFiles(dir) {
   if (!txt.split("\n").includes(".constance/")) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, (txt && !txt.endsWith("\n") ? "\n" : "") + ".constance/\n"); }
 }
 
-// Copies of one agent that still hold their slot: waiting/running, finished and
-// awaiting review (the branch isn't merged yet), or conflicted (left for the
-// owner). Accepted, sent-back and stopped jobs free their number.
+// Copies of one agent that still hold their slot: held (waiting for room on the
+// machine), waiting/running, finished and awaiting review (the branch isn't
+// merged yet), or conflicted (left for the owner). Accepted, sent-back and
+// stopped jobs free their number.
 function copySlots(s, agent, dir) {
-  return s.jobs.filter((j) => j.agent === agent && j.dir === dir && j.copy && ["waiting", "running", "finished", "conflict"].includes(j.status));
+  return s.jobs.filter((j) => j.agent === agent && j.dir === dir && j.copy && ["held", "waiting", "running", "finished", "conflict"].includes(j.status));
 }
 function claimCopy(s, agent, dir, limit, prefer = 0) {
   const used = new Set(copySlots(s, agent, dir).map((j) => j.copy));
@@ -179,14 +185,24 @@ function claimCopy(s, agent, dir, limit, prefer = 0) {
   for (let i = 1; i <= limit; i++) if (!used.has(i)) return i;
   return 0;
 }
+// Room for one more started copy of this agent: copies already launched (still
+// running) and when the newest one started feed the ramp check.
+function copyRoom(s, agent, machine) {
+  const started = s.jobs.filter((j) => j.agent === agent && j.copy && j.startedAt);
+  const running = started.filter((j) => j.status === "running" || j.status === "waiting").length;
+  const lastStartAt = Math.max(0, ...started.map((j) => j.startedAt));
+  return roomForCopy(machine, { running, lastStartAt });
+}
 
 // The actual handoff, shared by `delegate` and the queue's auto-next: checks the
 // agent is still available, enforces strike caps and file conflicts, builds the
 // prompt (project rules + guardrails), snapshots the world, and launches. Agents
-// with copyLimit > 1 (Devin, up to 4) get an editing job in their own git
-// worktree on their own branch, tracked as a numbered worker; it merges into the
-// repo only after review accepts it. Throws with a human reason on any refusal;
-// returns { job, who, verdict, practice }.
+// with copyLimit > 1 (Devin, up to 10, lowered by settings constanceMaxCopies)
+// get an editing job in their own git worktree on their own branch, tracked as a
+// numbered worker; it merges into the repo only after review accepts it. Copies
+// ramp up: when the machine has no room yet (constance-ramp.mjs), the job is
+// held — its files and number stay reserved — and releaseHeld() starts it later.
+// Throws with a human reason on any refusal; returns { job, who, verdict, practice, held }.
 function handOut({ agent, task, files = [], preferCopy = 0 }) {
   const g = store.read().goal;
   if (!g || g.status !== "running") throw new Error("No goal is running (stopped or paused), so nothing is handed out.");
@@ -204,22 +220,28 @@ function handOut({ agent, task, files = [], preferCopy = 0 }) {
   // Per-project rules are read fresh for every handoff; guardrails go to every
   // delegated agent (they are all fast/free models).
   const extra = rulesBlock(readProjectRules(dir)) + "\n" + guardrailBlock(files);
-  const limit = copyLimit(agent);
+  const limit = limitOf(agent);
+  const machine = readMachine();
   const job = store.update((s) => {
     const busy = conflicts(s.jobs, dir, files);
     if (busy.length) return { busy };
     const useCopy = limit > 1 && files.length > 0 && !practice;
-    let copy = 0, worker = "";
+    let copy = 0, worker = "", room = { ok: true, reason: "" };
     if (useCopy) {
       const slots = copySlots(s, agent, dir);
       if (slots.length >= limit) return { cap: limit };
       copy = claimCopy(s, agent, dir, limit, preferCopy);
       if (!copy) return { cap: limit };
       worker = `${verdict.name} ${copy}`;
+      // Older held copies go first: a new one never jumps the line.
+      room = s.jobs.some((j) => j.agent === agent && j.status === "held") ? { ok: false, reason: "earlier copies are still held" } : copyRoom(s, agent, machine);
     }
     const id = s.next++;
-    const j = { id, goal: g.id, agent, account, repo: dir, dir, files, task, status: practice ? "finished" : "waiting", createdAt: Date.now() };
+    const j = { id, goal: g.id, agent, account, repo: dir, dir, files, task, status: practice ? "finished" : room.ok ? "waiting" : "held", createdAt: Date.now() };
     if (useCopy) { j.copy = copy; j.worker = worker; j.worktree = worktreeFor(id); j.branch = branchFor(id); }
+    if (!room.ok) j.heldReason = room.reason;
+    // Claimed now, so a second handOut racing this one sees the start and ramps.
+    if (useCopy && room.ok) j.startedAt = Date.now();
     if (practice) { j.finishedAt = Date.now(); j.summary = "(practice run: the prompt is in the log, nothing was launched)"; }
     j.prompt = useCopy
       ? handoffPrompt({ id, dir, task, files, account, worktree: j.worktree, branch: j.branch, mainDir: dir }, extra)
@@ -228,12 +250,25 @@ function handOut({ agent, task, files = [], preferCopy = 0 }) {
     return j;
   });
   if (job.busy) throw new Error(`Those files overlap job ${job.busy.map((b) => `${b.id} (${b.agent}: ${b.files.join(", ")})`).join("; ")}. Wait for it, or split the work differently.`);
-  if (job.cap) throw new Error(`${agent} already has ${job.cap} copies running. Wait for one to be reviewed, or hand the task to another agent.`);
+  if (job.cap) throw new Error(`${agent} already has ${job.cap} copies running or held (the limit is ${job.cap}). Wait for one to be reviewed, or hand the task to another agent.`);
   const who = (job.worker || verdict.name) + (verdict.account ? ` (${verdict.account})` : "");
   if (practice) {
     store.log({ kind: "practice", job: job.id, agent, account: verdict.account, reason: verdict.reason, files, text: task, prompt: job.prompt });
     return { job, who, verdict, practice: true };
   }
+  if (job.status === "held") {
+    store.log({ kind: "held", job: job.id, agent, worker: job.worker, account: verdict.account, files, text: `${task} — held: ${job.heldReason}` });
+    return { job, who, verdict, practice: false, held: true };
+  }
+  launchJob(job, verdict.account);
+  return { job, who, verdict, practice: false };
+}
+
+// Starts a reserved job (status "waiting"): worktree for a copy, done-file setup,
+// guard snapshot, then the sandboxed agent. Throws (and marks the job stopped)
+// when it can't launch.
+function launchJob(job, accountLabel = job.account?.label || "") {
+  const agent = job.agent, dir = job.dir, files = job.files || [];
   // A copy job gets its worktree before anything else: no worktree, no launch.
   if (job.worktree) {
     try { createWorktree(dir, job.id); }
@@ -274,8 +309,48 @@ function handOut({ agent, task, files = [], preferCopy = 0 }) {
   const child = spawn(cmd, args, { cwd: rd, env: box.env, detached: true, stdio: ["ignore", fd, fd] });
   child.unref();
   store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "running"; j.pid = child.pid; j.startedAt = Date.now(); j.log = logPath; });
-  store.log({ kind: "handoff", job: job.id, agent, worker: job.worker, account: verdict.account, files, text: task });
-  return { job, who, verdict, practice: false };
+  store.log({ kind: "handoff", job: job.id, agent, worker: job.worker, account: accountLabel, files, text: job.task });
+}
+
+// Held copies start by themselves, oldest first and one at a time per agent, as
+// soon as the machine has room (and the agent is still under its limits). Called
+// from wait, jobs and the driver's heartbeat. Returns the jobs it started.
+function releaseHeld() {
+  const g = store.read().goal;
+  if (!g || g.status !== "running" || practiceMode()) return [];
+  const agents = [...new Set(store.read().jobs.filter((j) => j.status === "held").map((j) => j.agent))];
+  if (!agents.length) return [];
+  const machine = readMachine();
+  let verdicts = null;
+  const started = [];
+  for (const agent of agents) {
+    verdicts ??= judged(readData());
+    const v = verdicts.find((a) => a.id === agent);
+    const pick = store.update((s) => {
+      const j = s.jobs.filter((x) => x.agent === agent && x.status === "held").sort((a, b) => a.id - b.id)[0];
+      if (!j) return null;
+      const room = v?.available ? copyRoom(s, agent, machine) : { ok: false, reason: v ? v.reason : "not available" };
+      if (!room.ok) { j.heldReason = room.reason; return null; }
+      j.status = "waiting"; j.startedAt = Date.now(); delete j.heldReason;
+      return { ...j };
+    });
+    if (!pick) continue;
+    try { launchJob(pick); started.push(pick); }
+    catch (e) { store.log({ kind: "note", job: pick.id, agent, worker: pick.worker, text: `Held job ${pick.id} could not start: ${e.message}` }); }
+  }
+  return started;
+}
+
+// Per agent that can run copies: the limit, how many are running and held, and
+// why the held ones wait. For the panel and `jobs`.
+function copiesView(s) {
+  const machine = readMachine();
+  return Object.keys(PUBLISHED_MAX).map((agent) => {
+    const mine = s.jobs.filter((j) => j.agent === agent && j.copy && j.goal === s.goal?.id);
+    const held = mine.filter((j) => j.status === "held");
+    return { agent, limit: limitOf(agent), running: mine.filter((j) => j.status === "running" || j.status === "waiting").length,
+      held: held.length, heldReason: held.length ? held.sort((a, b) => a.id - b.id)[0].heldReason || copyRoom(s, agent, machine).reason : "" };
+  });
 }
 
 function delegate() {
@@ -286,6 +361,10 @@ function delegate() {
   const { job, who, verdict } = r;
   if (r.practice) {
     out(`Practice job ${job.id}: ${who} would take it (${verdict.reason}). Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
+    return;
+  }
+  if (r.held) {
+    out(`Job ${job.id} for ${who} is held: ${job.heldReason}. Its files are reserved and it starts by itself as soon as the machine has room; don't delegate it again. Run \`wait\`.`);
     return;
   }
   out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."}${job.worker ? ` ${job.worker} works in its own worktree on ${job.branch}.` : ""} It writes ${doneFile(runDir(job), job.id)} when done; run \`wait\`.`);
@@ -304,6 +383,7 @@ function autoNext(j) {
     store.log({ kind: "note", text: `Ready queue: "${item.task.slice(0, 80)}" went to ${agent} automatically as job ${r.job.id}.` });
     return r.practice
       ? ` Next queued task logged for ${agent} (practice).`
+      : r.held ? ` Next queued task is job ${r.job.id} for ${agent}, held until the machine has room (${r.job.heldReason}).`
       : ` Next queued task went to ${agent} as job ${r.job.id}.`;
   } catch (e) {
     store.log({ kind: "note", text: `Ready queue: "${item.task.slice(0, 80)}" stays queued — ${e.message}` });
@@ -341,6 +421,7 @@ async function waitJob() {
   const until = Date.now() + Math.min(560, Number(arg("--timeout", "100")) || 100) * 1000;
   for (;;) {
     for (const j of sweep()) store.log({ kind: "returned", job: j.id, agent: j.agent, worker: j.worker, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
+    releaseHeld();
     const s = store.read();
     const next = reviewQueue(s.jobs)[0];
     if (next) {
@@ -354,9 +435,11 @@ async function waitJob() {
         checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null })), signals: recentSignals(store.dir, 6),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
-    if (!s.jobs.some((j) => j.status === "running")) return out({ review: null, stillRunning: [], next: "No jobs are running." });
+    const held = s.jobs.filter((j) => j.status === "held").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, heldReason: j.heldReason || "" }));
+    if (!s.jobs.some((j) => j.status === "running" || j.status === "waiting") && !held.length) return out({ review: null, stillRunning: [], next: "No jobs are running." });
     if (s.goal?.status === "stopped") return out({ review: null, next: "Stopped by the owner. End now." });
-    if (Date.now() > until) return out({ review: null, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null })), next: "Still running; call `wait` again." });
+    if (Date.now() > until) return out({ review: null, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null })), held,
+      next: held.length ? `Still running; ${held.length} held cop${held.length === 1 ? "y starts" : "ies start"} by itself when the machine has room. Call \`wait\` again.` : "Still running; call `wait` again." });
     await sleep(5000);
   }
 }
@@ -430,7 +513,7 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - \`C pace\`: your own session/weekly pacing. Obey its mode. "normal": keep hard, risky or architectural work, delegate routine well-defined low-risk pieces. "delegate": you are burning your limits too fast, so delegate editing and testing too and keep only planning and review. You never run out of your own limits; the driver pauses you at 90% and resumes after the reset.
 - \`C agents\`: who is available right now (under their limits, signed in, readable, free). Re-check right before every handoff; availability changes as limits reset. No agent is the default: spread work over whoever has spare capacity. Never use an agent that isn't listed as available, and never anything that costs money.
 - \`C delegate --agent ID --files a,b --task "..."\`: hand off one small, clear task — the smaller and more self-contained, the better; give weaker agents smaller pieces. List every file it may edit; two editing jobs may never share files, and you must not edit a running job's files yourself. For read-only work (investigating a cause, summarizing a file) omit \`--files\`. The tool adds the folder check, git rules, tests/build and done file to the prompt, so the task text itself only needs to say what to do.
-- Devin may run as several copies at once (up to 4): each editing job gets its own worktree and branch, shows up as Devin 1..4, and merges into the project only after you accept it. Give copies tasks whose files never overlap; if a merge ever conflicts the job is marked and left for the owner — report it, don't force it.
+- Devin may run as several copies at once (up to ${limitOf("devin")}): each editing job gets its own worktree and branch, shows up as Devin 1..${limitOf("devin")}, and merges into the project only after you accept it. Give copies tasks whose files never overlap; if a merge ever conflicts the job is marked and left for the owner — report it, don't force it. Copies ramp up as the machine allows: a delegate may come back "held" — its files are reserved and it starts by itself when the load and free memory allow, so never delegate it again; just keep going and \`wait\`.
 - When a bug's cause is unknown, the first handoff changes nothing: tell the agent to find the cause, report it in a few lines and stop. Send the fix as a second handoff once you know the cause.
 - When a large file needs reading, hand that to a free agent to summarize instead of reading it all yourself.
 - Some work stays with you, never delegated: live database changes, bugs tangled across many parts of the code, and anything involving secrets or credentials.
@@ -566,6 +649,7 @@ async function drive() {
         const st = store.read().goal;
         if (!st || st.status === "stopped") return;
         if (!killed && pace(claudeOf(readData())).mode === "stop") { killGroup(g.brainPid); killed = true; }
+        try { releaseHeld(); } catch {}
         await sleep(5000);
       }
       const st = store.read().goal;
@@ -587,6 +671,7 @@ async function drive() {
     const watch = setInterval(() => {
       const st = store.read().goal;
       if (!st || st.status === "stopped") { killGroup(brain.pid); return; }
+      try { releaseHeld(); } catch {}
       if (pace(claudeOf(readData())).mode === "stop") { pausedByUs = true; killGroup(brain.pid); }
     }, 30e3);
     const code = await new Promise((r) => brain.on("exit", (c) => r(c)));
@@ -623,7 +708,7 @@ async function drive() {
 function stopAll() {
   const s = store.update((s) => {
     if (s.goal && ["running", "paused"].includes(s.goal.status)) { s.goal.status = "stopped"; s.goal.finishedAt = Date.now(); }
-    for (const j of s.jobs) if (j.status === "running" || j.status === "waiting") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; }
+    for (const j of s.jobs) if (j.status === "running" || j.status === "waiting" || j.status === "held") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; }
     return JSON.parse(JSON.stringify(s));
   });
   for (const j of s.jobs) if (j.status === "stopped") { dropJobTmp(j); if (j.worktree) dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true }); }
@@ -647,7 +732,7 @@ function recover() {
 
 function status() {
   const s = store.read(), d = readData();
-  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {},
+  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(80) });
 }
 
@@ -661,7 +746,7 @@ if (process.argv[1] === SELF) {
     out(judged(d).map((a) => `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}`).join("\n"));
   }
   else if (cmd === "pace") out(pace(claudeOf(freshData())));
-  else if (cmd === "jobs") { sweep(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
+  else if (cmd === "jobs") { sweep(); releaseHeld(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], copies: copiesView(s), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
   else if (cmd === "queue") queueCmd();
   else if (cmd === "signals") out(recentSignals(store.dir, 20));
   else if (cmd === "watch") await watch();

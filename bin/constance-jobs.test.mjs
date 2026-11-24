@@ -12,6 +12,7 @@ const jobs = [{ id: 1, dir: "/p", files: ["Panel.qml"], status: "running" }, { i
 assert.deepEqual(conflicts(jobs, "/p", ["Panel.qml", "y"]).map((j) => j.id), [1], "only unfinished jobs in the same folder conflict");
 assert.deepEqual(conflicts(jobs, "/p", ["x.js"]), [], "accepted work doesn't block");
 assert.deepEqual(conflicts(jobs, "/p", ["z.js"]).map((j) => j.id), [4], "a finished job still holds its files until it's merged");
+assert.deepEqual(conflicts([{ id: 9, status: "held", dir: "/p", files: ["h.js"] }], "/p", ["h.js"]).map((j) => j.id), [9], "a held copy keeps its files reserved");
 
 const p = handoffPrompt({ id: 7, dir: "/home/u/proj", task: "Add the button.", files: ["Panel.qml"] });
 const lines = p.split("\n");

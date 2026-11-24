@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs"; import os from "node:os"; import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { applySetting, applyHidden, applyVolume, applyOrder, DEFAULT_ORDER } from "./settings-set.mjs";
+import { applySetting, applyHidden, applyVolume, applyOrder, applyMaxCopies, DEFAULT_ORDER } from "./settings-set.mjs";
 
 assert.deepEqual(applySetting({}, "hideUninstalledAgents", "false"), { hideUninstalledAgents: false });
 assert.deepEqual(applySetting({ showUnusedModels: true }, "hideUninstalledAgents", "true"), { showUnusedModels: true, hideUninstalledAgents: true }, "other keys kept");
@@ -17,6 +17,10 @@ assert.deepEqual(applySetting({}, "resetSound", "false"), { resetSound: false })
 assert.deepEqual(applySetting({}, "autoOpenOnReset", "false"), { autoOpenOnReset: false });
 assert.deepEqual(applyVolume({}, "60"), { resetVolume: 60 }); assert.deepEqual(applyVolume({ resetSound: true }, 0), { resetSound: true, resetVolume: 0 });
 assert.deepEqual(applyVolume({}, "100"), { resetVolume: 100 });
+// Constance's copy limit: 1-10, kept beside the other settings.
+assert.deepEqual(applyMaxCopies({ resetSound: true }, "4"), { resetSound: true, constanceMaxCopies: 4 });
+assert.deepEqual(applyMaxCopies({}, "10"), { constanceMaxCopies: 10 });
+for (const bad of ["0", "11", "-1", "2.5", "x", ""]) assert.throws(() => applyMaxCopies({}, bad), /maxCopies must be/);
 for (const bad of ["101", "-1", "6.5", "abc", "", "1e2", null]) assert.throws(() => applyVolume({}, bad), /integer 0-100/, `rejects ${bad}`);
 
 // Per-agent hidden list

@@ -946,16 +946,23 @@ Panel {
     for (var i = 0; i < js.length; i++) if (js[i].agent === id && js[i].status === "running") return js[i]
     return null
   }
-  // One row per running copy of a multi-copy agent (Devin 1..4), so each worker
+  // One row per running or held copy of a multi-copy agent (Devin 1..10), so each worker
   // is tracked separately instead of collapsing into a single agent row.
   function constanceCopyRows(a) {
     var rows = [], js = constance.jobs || []
     for (var i = 0; i < js.length; i++) {
       var j = js[i]
-      if (j.agent !== a.id || !j.worker || (j.status !== "running" && j.status !== "waiting")) continue
+      if (j.agent !== a.id || !j.worker || (j.status !== "running" && j.status !== "waiting" && j.status !== "held")) continue
       rows.push({ id: a.id, worker: j.worker, job: j, available: true, reason: "", account: (j.account && j.account.label) || a.account || "", resetsAt: null, blockTitle: null })
     }
     return rows
+  }
+  // "Devin copies: 3 of 10 running · 2 held: machine busy: load 7.1 on 8 cores (starts under 6.4)".
+  function constanceCopiesLine(c) {
+    if (!c) return ""
+    var line = constanceAgentName(c.agent) + " copies: " + c.running + " of " + c.limit + " running"
+    if (c.held > 0) line += " · " + c.held + " held: " + c.heldReason
+    return line
   }
   function constanceGoalLine() {
     var g = constance.goal
@@ -966,7 +973,7 @@ Panel {
   function constanceLogLine(e) {
     var who = e.agent ? (e.worker || constanceAgentName(e.agent)) + (e.account ? " (" + e.account + ")" : "") : ""
     var head = { goal: "Goal", handoff: "Job " + e.job + " → " + who, practice: "Practice job " + e.job + " → " + who + (e.reason ? " (" + e.reason + ")" : ""),
-                 returned: "Job " + e.job + " back from " + who, model: "Model",
+                 returned: "Job " + e.job + " back from " + who, held: "Job " + e.job + " → " + who + " (held)", model: "Model",
                  review: "Job " + e.job + (e.verdict === "accept" ? " accepted" : " sent back"), report: "Report", paused: "Paused",
                  signal: "Signal", queue: "Queue",
                  resumed: "Resumed", stopped: "Stopped", failed: "Failed", note: "Note" }[e.kind] || e.kind
@@ -1343,7 +1350,7 @@ Panel {
       anchors.left: parent.left
       anchors.verticalCenter: cName.verticalCenter
       width: Style.space(8); height: width; radius: width / 2
-      color: job ? Color.accent : (me ? Color.accent : (modelData.available ? root.green : root.unsureColor))
+      color: job ? (job.status === "held" ? root.dim : Color.accent) : (me ? Color.accent : (modelData.available ? root.green : root.unsureColor))
     }
     Text {
       id: cName
@@ -1369,7 +1376,7 @@ Panel {
       wrapMode: Text.WordWrap
       maximumLineCount: 2
       elide: Text.ElideRight
-      text: job ? "Job " + job.id + ": " + job.task
+      text: job ? (job.status === "held" ? "Held (" + (job.heldReason || "waiting for room") + ") · Job " + job.id + ": " + job.task : "Job " + job.id + ": " + job.task)
         : me ? root.constanceClaudeLine()
         : (modelData.available ? "free: " : "")
           + (modelData.resetsAt ? (modelData.blockTitle ? modelData.blockTitle + ": " : "") + modelData.reason + " · " + root.countdown(modelData.resetsAt)
@@ -2578,6 +2585,51 @@ Panel {
               width: parent.width
               spacing: Style.space(8)
               PanelSectionHeader { width: parent.width; text: "AGENTS" }
+              // Copies: how many run of how many allowed, why any are held, and the owner's limit (− / +).
+              Repeater {
+                model: root.constance.copies || []
+                Item {
+                  required property var modelData
+                  width: parent.width
+                  height: Math.max(copiesText.implicitHeight, copiesStep.height)
+                  Text {
+                    id: copiesText
+                    anchors.left: parent.left
+                    anchors.right: copiesStep.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    text: root.constanceCopiesLine(modelData)
+                    color: modelData.held > 0 ? root.foreground : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Row {
+                    id: copiesStep
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(6)
+                    Repeater {
+                      model: [{ glyph: "\u2212", delta: -1 }, { glyph: "+", delta: 1 }]
+                      Rectangle {
+                        required property var modelData
+                        width: Style.space(22); height: Style.space(20); radius: Style.cornerRadius
+                        color: root.track
+                        Text { anchors.centerIn: parent; textFormat: Text.PlainText; text: modelData.glyph; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                        MouseArea {
+                          id: stepArea
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.writeSetting(["maxCopies", String(Math.max(1, Math.min(10, Number(copiesStep.parent.modelData.limit) + modelData.delta)))])
+                        }
+                        PanelToolTip { visible: stepArea.containsMouse; text: "Most copies she may run at once (1–10; 10 is Devin's published limit). New copies start one at a time, only when the machine's load and free memory allow."; fontFamily: root.fontFamily }
+                      }
+                    }
+                  }
+                }
+              }
               ConstanceAgentRow {
                 visible: !!root.constanceGroups.me
                 modelData: root.constanceGroups.me || ({ id: "claude" })

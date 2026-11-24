@@ -3,6 +3,7 @@
 // folder), never to shell.json.
 // Usage: settings-set.mjs <key> <true|false>   |   settings-set.mjs hidden <agentId> <true|false>
 //        |   settings-set.mjs volume <0-100>   |   settings-set.mjs order <id,id,...|reset>
+//        |   settings-set.mjs maxCopies <1-10>
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +20,15 @@ export function applyVolume(current, value) {
   if (!/^\d{1,3}$/.test(String(value)) || !Number.isInteger(n) || n < 0 || n > 100) throw new Error(`volume must be an integer 0-100: ${value}`);
   const base = current && typeof current === "object" && !Array.isArray(current) ? current : {};
   return { ...base, resetVolume: n };
+}
+
+// Constance's most copies of one agent at once: an integer 1-10 (10 is Devin's
+// published concurrent session limit; constance-ramp.mjs applies it).
+export function applyMaxCopies(current, value) {
+  const n = Number(value);
+  if (!/^\d{1,2}$/.test(String(value)) || !Number.isInteger(n) || n < 1 || n > 10) throw new Error(`maxCopies must be an integer 1-10: ${value}`);
+  const base = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+  return { ...base, constanceMaxCopies: n };
 }
 
 // A tab the user hides stays hidden (by agent id) until they unhide it, even
@@ -59,6 +69,7 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
     const next = process.argv[2] === "hidden" ? applyHidden(current, process.argv[3], process.argv[4])
       : process.argv[2] === "order" ? applyOrder(current, process.argv[3])
       : process.argv[2] === "volume" ? applyVolume(current, process.argv[3])
+      : process.argv[2] === "maxCopies" ? applyMaxCopies(current, process.argv[3])
       : applySetting(current, process.argv[2], process.argv[3]);
     fs.mkdirSync(dir, { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
