@@ -25,6 +25,7 @@ import { friendlyModels } from "./model-names.mjs";
 import { liveModels } from "./live-models.mjs";
 import { planInfo } from "./plan-info.mjs";
 import { makeInstalledCheck, agentCli } from "./installed.mjs";
+import { refreshTargets } from "./refresh-targets.mjs";
 import { planLoginNotices, planInstallNotices } from "./login-watch.mjs";
 import { buildAccounts } from "./accounts.mjs";
 import { loadCatalog, tabNote } from "./catalog.mjs";
@@ -208,7 +209,9 @@ const prev = readJson(OUT);
 const prevAgent = (id) => prev?.agents?.find((a) => a.id === id);
 const installedIds = new Set(AGENTS.filter((a) => isInstalled(a.bins)).map((a) => a.id));
 const installed = AGENTS.filter((a) => installedIds.has(a.id));
-refreshBuiltins([...new Set(installed.map((a) => a.builtin).filter(Boolean))]);
+// Claude joins the refresh only once extra accounts exist: its Omarchy record
+// then carries every account's limits (bin/refresh-targets.mjs).
+refreshBuiltins(refreshTargets([...new Set(installed.map((a) => a.builtin).filter(Boolean))], path.join(STATE, "agents", "accounts")));
 
 const agents = [];
 for (const a of AGENTS) {
