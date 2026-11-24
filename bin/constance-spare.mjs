@@ -51,7 +51,7 @@ export function useItOrLoseItOn(settings) { return settings?.constanceUseItOrLos
 // design. Everything else goes to the free agents.
 export const OPUS_KINDS = ["review", "bug", "design"];
 
-const openItems = (backlog) => (backlog || []).filter((b) => b && b.done !== true && typeof b.text === "string" && b.text.trim() !== "");
+const openItems = (backlog) => (backlog || []).filter((b) => b && b.done !== true && !b.job && typeof b.text === "string" && b.text.trim() !== "");
 const opusItem = (b) => OPUS_KINDS.includes(b.kind);
 
 // Decides which backlog items go to which agent's soon-resetting spare room. Agents are served
@@ -74,8 +74,9 @@ export function planSpare({ agents = [], available = [], backlog = [], now = Dat
   for (const { agent, window } of candidates) {
     const want = agent.id === "claude" ? opusItem : (b) => !opusItem(b);
     const taken = [];
-    for (let i = pool.length - 1; i >= 0 && taken.length < perAgent; i--) {
-      if (want(pool[i])) { taken.unshift(pool.splice(i, 1)[0]); }
+    // Top of the backlog first: the owner lists the most worthwhile work first.
+    for (let i = 0; i < pool.length && taken.length < perAgent; ) {
+      if (want(pool[i])) taken.push(pool.splice(i, 1)[0]); else i++;
     }
     if (taken.length > 0) picks.push({ agent: agent.id, window: { title: window.title, resetsAt: window.resetsAt, left: window.left }, items: taken });
   }

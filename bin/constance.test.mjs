@@ -787,6 +787,85 @@ echo "Report: done."
   assert.match(sb.now, /^Free\. Last goal finished\.$/);
   assert.match(run("goals", "next").stderr, /empty/);
   assert.deepEqual(fs.readFileSync(path.join(root, "queue-goals.txt"), "utf8").trim().split("\n").map((l) => l.replace(/^Goal from the owner: /, "")), ["build q1", "ask owner", "third goal, edited"]);
+  // The queue ran empty: the morning report is written and sent (silently).
+  assert.ok(await until(() => fs.existsSync(path.join(tabs, "constance", "morning-report.md")), 5000), "the morning report is written");
+  const mr = fs.readFileSync(path.join(tabs, "constance", "morning-report.md"), "utf8");
+  assert.match(mr, /# Morning report/); assert.match(mr, /build q1/); assert.match(mr, /third goal, edited/); assert.match(mr, /Pick a color/, "what needed the owner is in it");
+  assert.match(fs.readFileSync(path.join(root, "notified.txt"), "utf8"), /Constance: morning report/, "and a desktop notification went out");
+  assert.ok(sb && status().log.some((l) => l.kind === "morning"), "logged");
+  // Every reviewed job counts on the scorecard, shown on the board.
+  const sc = status().board.scorecard;
+  const grokRow = sc.rows.find((r) => r.agent === "grok");
+  assert.ok(grokRow && /accepted/.test(grokRow.line) && grokRow.hint, "grok has a scorecard row: " + JSON.stringify(sc));
+  assert.equal(sc.spareOn, true, "use it or lose it is on by default");
+  assert.match(run("scorecard").stdout, /grok: \d+ jobs, \d+ accepted/);
+  assert.match(run("agents").stdout, /AVAILABLE  grok .*\[grok: \d+ jobs/, "agents shows each available agent's record and size hint");
+}
+// Second-try rule, the backlog, and use it or lose it. "retry goal": a job is sent back twice,
+// the third try with the same files is refused, a split goes through. The goal also fills the
+// backlog; when it ends with the queue empty, devin's room (its window resets in 30 min, barely
+// used) goes to a backlog goal started by itself, once — then the morning report.
+{
+  fs.rmSync(path.join(root, "go"), { force: true });
+  try { fs.rmSync(path.join(root, "notified.txt")); } catch {}
+  fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+p="\${@: -1}"; C="node ${CLI}"
+echo "$p" | head -1 >> "${root}/retry-goals.txt"
+if grep -q "retry goal" <<<"$p"; then
+  touch "${root}/go"
+  $C delegate --agent grok --files r1.txt,r2.txt --task "add r" >> "${root}/retry.out" 2>&1
+  $C wait --timeout 30 > /dev/null
+  $C review $($C jobs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{console.log(JSON.parse(d).jobs.at(-1).id)})') send-back --note "wrong" >> "${root}/retry.out" 2>&1
+  first=$($C jobs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{console.log(JSON.parse(d).jobs.at(-1).id)})')
+  $C delegate --agent grok --files r1.txt,r2.txt --again "$first" --task "add r again" >> "${root}/retry.out" 2>&1
+  $C wait --timeout 30 > /dev/null
+  $C review $($C jobs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{console.log(JSON.parse(d).jobs.at(-1).id)})') send-back --note "still wrong" >> "${root}/retry.out" 2>&1
+  $C delegate --agent grok --files r2.txt,r1.txt --task "add r a third time" >> "${root}/retry.out" 2>&1 || echo "refused-third" >> "${root}/retry.out"
+  $C delegate --agent grok --files r1.txt --task "add r1 only" >> "${root}/retry.out" 2>&1 || echo "refused-split" >> "${root}/retry.out"
+  $C wait --timeout 30 > /dev/null
+  $C review $($C jobs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{console.log(JSON.parse(d).jobs.at(-1).id)})') accept --note "split worked" >> "${root}/retry.out" 2>&1
+  $C backlog add --kind test --text "cover the parser edge cases" >> "${root}/retry.out" 2>&1
+  $C backlog add --kind review --text "look over the guard design" >> "${root}/retry.out" 2>&1
+  $C backlog add --kind nonsense --text "x" >> "${root}/retry.out" 2>&1 || echo "refused-kind" >> "${root}/retry.out"
+  $C backlog >> "${root}/retry.out" 2>&1
+  $C spare >> "${root}/retry.out" 2>&1
+elif grep -q "Use it or lose it" <<<"$p"; then
+  $C backlog done 1 >> "${root}/retry.out" 2>&1
+fi
+echo "Report: done."
+`, { mode: 0o755 });
+  // devin: a window that resets in 30 minutes, barely used — room it would lose.
+  fs.writeFileSync(path.join(tabs, "data.json"), JSON.stringify({ generatedAt: Date.now(), agents: [
+    { id: "claude", installed: true, signedIn: true, limits: [{ title: "Session", percent: 0.1, resetsAt: soon(4) }, { title: "Weekly", percent: 0.1, resetsAt: soon(150) }] },
+    { id: "grok", installed: true, signedIn: true, limits: [{ title: "Daily", percent: 0.1 }] },
+    { id: "devin", name: "Devin", installed: true, signedIn: true, limits: [{ title: "Daily", percent: 0.1, resetsAt: soon(0.5) }] }] }));
+  // Earlier blocks gave grok guardrail strikes (one file per job); this block needs two-file jobs.
+  { const jf = path.join(tabs, "constance", "jobs.json"), d = JSON.parse(fs.readFileSync(jf, "utf8")); d.guards = {}; fs.writeFileSync(jf, JSON.stringify(d)); }
+  assert.equal(run("start", "--dir", repo, "--goal", "retry goal").status, 0);
+  assert.ok(await until(() => { const t = fs.existsSync(path.join(root, "retry-goals.txt")) ? fs.readFileSync(path.join(root, "retry-goals.txt"), "utf8") : ""; return /Use it or lose it/.test(t) && status().goal.status === "done"; }, 60000),
+    "a backlog goal started by itself after the retry goal: " + JSON.stringify(status().goal));
+  const ro = fs.readFileSync(path.join(root, "retry.out"), "utf8");
+  assert.match(ro, /sent back twice \(jobs \d+ and \d+\)/, "the second send-back says to split or do it");
+  assert.match(ro, /were already sent back for this work.*split it into smaller jobs/s, "the third try with the same files is refused");
+  assert.match(ro, /refused-third/); assert.doesNotMatch(ro, /refused-split/, "a smaller split goes through");
+  assert.match(ro, /refused-kind/, "an unknown backlog kind is refused");
+  assert.match(ro, /#1 test: cover the parser edge cases/); assert.match(ro, /#2 review: look over the guard design/);
+  assert.match(ro, /devin: #1 test: cover the parser edge cases/, "spare: devin's leftover room goes to the backlog's worker item");
+  const g = status().goal;
+  assert.equal(g.fromSpare, true);
+  assert.match(g.text, /Hand to Devin: test: cover the parser edge cases \(backlog #1\)/);
+  assert.doesNotMatch(g.text, /look over the guard design/, "review work is only for Constance's own leftover Opus, and she has none near a reset");
+  assert.match(fs.readFileSync(path.join(repo, ".constance", "backlog.md"), "utf8"), /- \[x\] test: cover the parser edge cases/, "she marked it done");
+  // Once per reset window: no second backlog goal, then the morning report.
+  assert.ok(await until(() => fs.existsSync(path.join(root, "notified.txt")) && /morning report/.test(fs.readFileSync(path.join(root, "notified.txt"), "utf8")), 10000), "the morning report went out after the backlog goal");
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(fs.readFileSync(path.join(root, "retry-goals.txt"), "utf8").trim().split("\n").filter((l) => /Use it or lose it/.test(l)).length, 1, "only one backlog goal for that window");
+  // The setting turns it off.
+  fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false, constanceUseItOrLoseIt: false }));
+  assert.match(run("spare", "--dir", repo).stdout, /use it or lose it is off/);
+  assert.equal(status().board.scorecard.spareOn, false);
+  fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
+  writeData();
 }
 // A copy job's own worktree means no excuses: the fake devin commits cover.txt
 // outside its list while a shared-folder grok job's file list covers that same

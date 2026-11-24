@@ -46,6 +46,11 @@ import { tokenMeter, matchJobs, snapshots, readRecords, usageFile, refreshInBack
 import { parseItems, parseItemArg, checklist } from "./constance-checklist.mjs";
 import { cards, nowLine, history, goalRecord } from "./constance-board.mjs";
 import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner } from "./constance-goalqueue.mjs";
+import { readScorecard, recordReview, scoreRows, sizeHint, rankAgents, scoreLine } from "./constance-scorecard.mjs";
+import { secondTry, sendBackAdvice } from "./constance-retry.mjs";
+import { planSpare, useItOrLoseItOn } from "./constance-spare.mjs";
+import { readBacklog, addItem as addBacklogItem, markTaken, markDone, removeItem as removeBacklogItem, openItems as openBacklog, formatItem, KINDS as BACKLOG_KINDS } from "./constance-backlog.mjs";
+import { buildReport, writeReport, lastReportAt } from "./constance-morning.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -265,10 +270,14 @@ function copyRoom(s, agent, machine) {
 // ramp up: when the machine has no room yet (constance-ramp.mjs), the job is
 // held — its files and number stay reserved — and releaseHeld() starts it later.
 // Throws with a human reason on any refusal; returns { job, who, verdict, practice, held }.
-function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = "" }) {
+function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = "", againOf = null }) {
   const g = store.read().goal;
   if (!g || g.status !== "running") throw new Error("No goal is running (stopped or paused), so nothing is handed out.");
   if (!agent || !task) throw new Error("delegate needs --agent ID and --task TEXT");
+  // Second-try rule: work sent back twice is never resent as it was; it is split
+  // into smaller jobs (fewer files each) or she does it herself.
+  const twice = secondTry(store.read().jobs, { files, againOf });
+  if (twice) throw new Error(twice.reason);
   const verdict = judged(freshData()).find((a) => a.id === agent);
   if (!verdict?.available) throw new Error(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
@@ -302,6 +311,7 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
     const j = { id, goal: g.id, agent, account, repo: dir, dir, files, task, status: practice ? "finished" : room.ok ? "waiting" : "held", createdAt: Date.now() };
     if (items.length) j.items = items;
     if (title) j.title = String(title).trim().slice(0, 80);
+    if (Number.isFinite(againOf) && againOf > 0) j.againOf = againOf;
     if (useCopy) { j.copy = copy; j.worker = worker; j.worktree = worktreeFor(id); j.branch = branchFor(id); }
     if (!room.ok) j.heldReason = room.reason;
     // Claimed now, so a second handOut racing this one sees the start and ramps.
@@ -425,11 +435,14 @@ function copiesView(s) {
 
 function delegate() {
   const agent = arg("--agent"), task = arg("--task"), files = arg("--files").split(",").map((x) => x.trim()).filter(Boolean);
-  const items = parseItemArg(arg("--item")), title = arg("--title");
+  const items = parseItemArg(arg("--item")), title = arg("--title"), againOf = Number(arg("--again")) || null;
   let r;
-  try { r = handOut({ agent, task, files, items, title }); }
+  try { r = handOut({ agent, task, files, items, title, againOf }); }
   catch (e) { fail(e.message); }
   const { job, who, verdict } = r;
+  // The scorecard sizes tasks: advice, printed when the job is bigger than this agent's record suggests.
+  const row = scoreRows(readScorecard(store.dir)).find((x) => x.agent === agent), hint = sizeHint(row);
+  if (files.length > hint.maxFiles) process.stdout.write(`Scorecard: ${agent} ${hint.note}, so jobs of up to ${hint.maxFiles} file${hint.maxFiles === 1 ? "" : "s"} suit it best (this one has ${files.length}).\n`);
   if (r.practice) {
     out(`Practice job ${job.id}: ${who} would take it (${verdict.reason}).${job.practiceWorktree ? ` A real run would work in its own worktree ${job.practiceWorktree} on ${job.practiceBranch}.` : ""} Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
     return;
@@ -560,6 +573,15 @@ function cleanupRejected(j) {
   return did.join("; ");
 }
 
+// The scorecard counts every reviewed job once, with its kept tokens and run time.
+function score(j, verdict) {
+  try {
+    if (!j.worktree) keepTokens(true);   // copies already kept theirs before the merge/cleanup
+    const fresh = store.read().jobs.find((x) => x.id === j.id) || j;
+    recordReview(store.dir, fresh, verdict);
+  } catch (e) { store.log({ kind: "note", job: j.id, text: `Scorecard not updated: ${e.message}` }); }
+}
+
 function review() {
   const id = Number(process.argv[3]), verdict = process.argv[4], note = arg("--note");
   if (!["accept", "send-back"].includes(verdict)) fail("Usage: review ID accept|send-back --note TEXT");
@@ -576,11 +598,14 @@ function review() {
   if (verdict === "accept" && j.worktree) {
     const m = withMergeLock(() => mergeAccepted(j));
     if (!m.ok) {
+      score(j, verdict);
       out(`Job ${id} accepted, but merging ${j.branch} ${m.conflict ? "conflicted" : "failed"}: ${(m.output || "").trim().slice(-300)}. Nothing was forced; the worktree and branch were left in place.`);
       return;
     }
   }
-  const extra = verdict === "accept" ? autoNext(j) : (j.worktree ? ` ${cleanupRejected(j)}` : "");
+  const cleaned = verdict === "send-back" && j.worktree ? ` ${cleanupRejected(j)}` : "";
+  score(j, verdict);
+  const extra = verdict === "accept" ? autoNext(j) : `${cleaned}${(() => { const a = sendBackAdvice(store.read().jobs, j); return a ? ` ${a}` : ""; })()}`;
   out(`Job ${id} ${j.status}.${extra}`);
 }
 
@@ -589,11 +614,13 @@ const ROLE = (dir) => `You are Constance, the quarterback of the owner's coding 
 
 Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir}.
 - \`C pace\`: your own session/weekly pacing. Obey its mode. "normal": keep hard, risky or architectural work, delegate routine well-defined low-risk pieces. "delegate": you are burning your limits too fast, so delegate editing and testing too and keep only planning and review. You never run out of your own limits; the driver pauses you at 90% and resumes after the reset.
-- \`C agents\`: who is available right now (under their limits, signed in, readable, free). Re-check right before every handoff; availability changes as limits reset. No agent is the default: spread work over whoever has spare capacity. Never use an agent that isn't listed as available, and never anything that costs money.
+- \`C agents\`: who is available right now (under their limits, signed in, readable, free), best scorecard first, each with its record (jobs, accepted, sent back, average tokens and time) and how big a job suits it. Re-check right before every handoff; availability changes as limits reset. No agent is the default: spread work over whoever has spare capacity, and size each task to its agent's record. Never use an agent that isn't listed as available, and never anything that costs money.
 - The goal's checklist: \`C status\` shows the goal split into numbered items (board.checklist), which the owner watches tick. Tag every handoff with the item it is for, \`--item N\` (or \`--item 1,3\`), and give it \`--title "fixing the guard"\`: a few plain words, starting with a verb in -ing form, shown to the owner as "Devin 2 is fixing the guard". An item ticks when one of its jobs is merged and none is still open. When you finish an item yourself, \`C check N --note "..."\`.
 - If the goal ends with something only the owner can settle (a decision, a merge conflict, a failure you couldn't fix, an item you had to leave), run \`C needs-owner "one plain sentence"\` before your report. The owner's next queued goal then waits for them instead of starting.
 - \`C delegate --agent ID --files a,b --item N --title "..." --task "..."\`: hand off one small, clear task — the smaller and more self-contained, the better; give weaker agents smaller pieces. List every file it may edit; two editing jobs may never share files, and you must not edit a running job's files yourself. For read-only work (investigating a cause, summarizing a file) omit \`--files\`. The tool adds the folder check, git rules, tests/build and done file to the prompt, so the task text itself only needs to say what to do.
 - Devin may run as several copies at once (up to ${limitOf("devin")}): each editing job gets its own worktree and branch, shows up as Devin 1..${limitOf("devin")}, and merges into the project only after you accept it. Give copies tasks whose files never overlap; if a merge ever conflicts the job is marked and left for the owner — report it, don't force it. Copies ramp up as the machine allows: a delegate may come back "held" — its files are reserved and it starts by itself when the load and free memory allow, so never delegate it again; just keep going and \`wait\`.
+- Second-try rule: when a job comes back wrong, a redo goes out with \`--again ID\` (the job it redoes). Work sent back twice is never resent as it was: split it into smaller jobs with fewer files each, or do it yourself. \`delegate\` refuses a third try with the same files.
+- Use it or lose it: \`C spare\` shows which agents have room they would lose at a reset that is close, and which items of this project's backlog (\`C backlog\`; \`C backlog add --kind review|bug|design|task|test|docs --text "..."\`) could use it. Spend leftover room only on backlog items, never on made-up work just to burn it. Your own leftover Opus goes to reviews, tangled bugs and design. When you hand a backlog item out, \`C backlog take N --job ID\`; when it is finished, \`C backlog done N\`.
 - When a bug's cause is unknown, the first handoff changes nothing: tell the agent to find the cause, report it in a few lines and stop. Send the fix as a second handoff once you know the cause.
 - When a large file needs reading, hand that to a free agent to summarize instead of reading it all yourself.
 - Some work stays with you, never delegated: live database changes, bugs tangled across many parts of the code, and anything involving secrets or credentials.
@@ -690,6 +717,10 @@ function afterGoal() {
       pauseQueue(store.dir, why.join("; "));
       store.log({ kind: "needs-you", text: `Goal queue stopped: ${why.join("; ")}. ${q.goals.length} goal${q.goals.length === 1 ? "" : "s"} wait for you.` });
       tellOwner("Constance needs you", `${why.join("; ")}. The goal queue is stopped until you start the next goal.`);
+    } else if (g.fromQueue || g.fromSpare) {
+      // The queue ran dry on a goal that needs the owner: the morning report says so (one notice, not two).
+      store.log({ kind: "needs-you", text: `${why.join("; ")}.` });
+      morningReport();
     } else {
       store.log({ kind: "needs-you", text: `${why.join("; ")}.` });
       tellOwner("Constance needs you", `${why.join("; ")}.`);
@@ -697,7 +728,13 @@ function afterGoal() {
     return false;
   }
   const next = takeNext(store.dir);
-  if (!next) return false;
+  if (!next) {
+    // The queue is empty. Room an agent would lose at a reset goes to the project's backlog
+    // first (use it or lose it); when there's nothing worth doing, the morning report goes out.
+    if (startSpareGoal(g)) return true;
+    if (g.fromQueue || g.fromSpare) morningReport();
+    return false;
+  }
   let dir;
   try { dir = resolveDir(next.dir); }
   catch (e) {
@@ -713,6 +750,70 @@ function afterGoal() {
   store.log({ kind: "note", text: "Started the next goal from the goal queue." });
   spawnWatcher();
   return true;
+}
+
+// ---------------------------------------------------------------- use it or lose it, and the morning report
+// Limits per agent for the spare-room planner: the agent's own meters, else its first account's.
+const limitsOf = (a) => ((a.limits || []).length ? a.limits : (a.accounts || []).find((x) => (x.limits || []).length)?.limits || []);
+function sparePlan(dir, d = freshData()) {
+  const available = judged(d).filter((a) => a.available).map((a) => a.id);
+  return planSpare({ agents: (d.agents || []).map((a) => ({ id: a.id, limits: limitsOf(a) })), available,
+    backlog: dir ? openBacklog(dir) : [], settings: readSettings() });
+}
+const spareFile = () => path.join(store.dir, "spare.json");
+function readSpare() { try { const d = JSON.parse(fs.readFileSync(spareFile(), "utf8")); return { used: Array.isArray(d.used) ? d.used : [] }; } catch { return { used: [] }; } }
+
+// When the goal queue is empty and an agent has room it would lose before a reset, start one goal
+// made only of the project's own backlog items (never invented work). Once per reset window, so it
+// can't loop; the setting (constanceUseItOrLoseIt) turns it off.
+function startSpareGoal(g) {
+  if (!g?.dir || !useItOrLoseItOn(readSettings())) return false;
+  let plan;
+  try { plan = sparePlan(g.dir); } catch { return false; }
+  const seen = readSpare().used;
+  const key = (p) => `${p.agent}:${p.window.title}:${p.window.resetsAt}`;
+  const picks = plan.picks.filter((p) => !seen.includes(key(p)));
+  if (!picks.length) return false;
+  const names = Object.fromEntries((readData().agents || []).map((a) => [a.id, a.name || a.id]));
+  const lines = [];
+  for (const p of picks) for (const it of p.items)
+    lines.push(`${lines.length + 1}. ${p.agent === "claude" ? "You (Constance) do this yourself" : `Hand to ${names[p.agent] || p.agent}`}: ${formatItem(it)} (backlog #${it.id})`);
+  const text = [`Use it or lose it: ${plan.reason} Work only on these items from this project's backlog (.constance/backlog.md). If one turns out not to be worth doing, skip it and say why: never make work just to use the room. When an item is finished run \`C backlog done N\` with its backlog number.`, ...lines].join("\n");
+  const res = beginGoal(text, g.dir, { fromSpare: true, driverPid: process.pid });
+  if (res.busy) return false;
+  fs.writeFileSync(spareFile(), JSON.stringify({ used: [...seen, ...picks.map(key)].slice(-200) }) + "\n");
+  store.log({ kind: "note", text: `Use it or lose it: started a backlog goal (${picks.map((p) => `${names[p.agent] || p.agent} ${p.window.title}`).join(", ")}).` });
+  spawnWatcher();
+  return true;
+}
+
+// The morning report: what got done since the last one, tokens, and what needs the owner.
+function morningReport() {
+  try {
+    const rep = buildReport({ records: readHistory(), since: lastReportAt(store.dir) });
+    const file = writeReport(store.dir, rep);
+    store.log({ kind: "morning", text: rep.text.trim(), file });
+    tellOwner(rep.title, rep.body);
+    return rep;
+  } catch (e) { store.log({ kind: "note", text: `Morning report not written: ${e.message}` }); return null; }
+}
+
+// `backlog`: the project's worthwhile-work list (list | add --kind K --text T [--files a,b] | take N --job ID | done N | rm N).
+function backlogCmd() {
+  const g = store.read().goal;
+  const dir = arg("--dir") ? path.resolve(arg("--dir")) : g?.dir;
+  if (!dir) fail("No goal is running: pass --dir PROJECT.");
+  const sub = process.argv[3], n = Number(process.argv[4]);
+  if (sub === "add") {
+    try { const it = addBacklogItem(dir, { kind: arg("--kind", "task"), text: arg("--text"), files: arg("--files").split(",").map((x) => x.trim()).filter(Boolean) }); out(`Backlog #${it.id}: ${formatItem(it)}`); }
+    catch (e) { fail(`${e.message} (kinds: ${BACKLOG_KINDS.join(", ")})`); }
+    return;
+  }
+  if (sub === "take") { if (!markTaken(dir, n, Number(arg("--job")) || 0)) fail(`No backlog item ${n}.`); return out(`Backlog #${n} marked as handed out.`); }
+  if (sub === "done") { if (!markDone(dir, n)) fail(`No backlog item ${n}.`); return out(`Backlog #${n} done.`); }
+  if (sub === "rm") { if (!removeBacklogItem(dir, n)) fail(`No backlog item ${n}.`); return out(`Backlog #${n} removed.`); }
+  const items = readBacklog(dir);
+  out(items.length ? items.map((it) => `#${it.id} ${it.done ? "[done] " : it.job !== null ? `[job ${it.job}] ` : ""}${formatItem(it)}`).join("\n") : "The backlog is empty.");
 }
 
 // `goals`: the owner's goal queue.
@@ -991,7 +1092,20 @@ function boardView(s, d, records) {
     now: nowLine({ goal: s.goal, jobs: s.jobs, names: name, goalQueue: gq.goals, queuePaused: gq.paused }),
     history: history({ records: readHistory(), log: store.readLog(5000), goal: s.goal, jobs: s.jobs, live }),
     goalQueue: gq,
+    scorecard: scorecardView(name, s.goal?.dir),
   };
+}
+
+// The panel's SCORECARD: one line per agent with a size hint, and the use-it-or-lose-it state.
+function scorecardView(name, dir) {
+  const rows = scoreRows(readScorecard(store.dir), name).map((r) => {
+    const h = sizeHint(r);
+    return { agent: r.agent, name: r.name, line: scoreLine(r), hint: `${h.note}: up to ${h.maxFiles} file${h.maxFiles === 1 ? "" : "s"} a job` };
+  });
+  const spareOn = useItOrLoseItOn(readSettings());
+  let spare = "";
+  if (spareOn && dir) { try { const p = sparePlan(dir, readData()); spare = p.picks.length ? p.reason : ""; } catch {} }
+  return { rows, spareOn, spare };
 }
 
 function status() {
@@ -1007,12 +1121,22 @@ if (process.argv[1] === SELF) {
   else if (cmd === "drive") await drive();
   else if (cmd === "status") status();
   else if (cmd === "agents") {
-    const d = freshData(), guards = store.read().guards || {};
-    out(judged(d).map((a) => `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}`).join("\n"));
+    const d = freshData(), guards = store.read().guards || {}, card = readScorecard(store.dir), rows = scoreRows(card);
+    const all = judged(d), order = rankAgents(all.filter((a) => a.available).map((a) => a.id), card);
+    // Available agents first, best scorecard first; each with its record and a size hint.
+    const sorted = [...order.map((id) => all.find((a) => a.id === id)), ...all.filter((a) => !a.available)];
+    out(sorted.map((a) => {
+      const row = rows.find((r) => r.agent === a.id), h = sizeHint(row);
+      const sc = a.available ? `  [${row ? scoreLine(row) : "no reviewed jobs yet"}; ${h.note}: up to ${h.maxFiles} file${h.maxFiles === 1 ? "" : "s"} a job]` : "";
+      return `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}${sc}`;
+    }).join("\n"));
   }
   else if (cmd === "pace") out(pace(claudeOf(freshData())));
   else if (cmd === "jobs") { sweep(); releaseHeld(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], copies: copiesView(s), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
   else if (cmd === "queue") queueCmd();
+  else if (cmd === "backlog") backlogCmd();
+  else if (cmd === "scorecard") { const rows = scoreRows(readScorecard(store.dir)); out(rows.length ? rows.map((r) => `${scoreLine(r)} — ${sizeHint(r).note}`).join("\n") : "No reviewed jobs yet."); }
+  else if (cmd === "spare") { const g = store.read().goal; const p = sparePlan(arg("--dir") ? path.resolve(arg("--dir")) : g?.dir); out(p.picks.length ? [p.reason, ...p.picks.flatMap((x) => x.items.map((it) => `${x.agent}: #${it.id} ${formatItem(it)}`))].join("\n") : p.reason); }
   else if (cmd === "signals") out(recentSignals(store.dir, 20));
   // The whole log as plain text (the panel's Copy all): every entry, practice prompts in full.
   else if (cmd === "log") { const names = Object.fromEntries((readData().agents || []).map((a) => [a.id, a.name || a.id])); process.stdout.write(logText(store.readLog(Infinity), (id) => names[id] || id)); }
@@ -1040,5 +1164,5 @@ if (process.argv[1] === SELF) {
     out("noted: the goal queue waits for the owner after this goal");
   }
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|agents|pace|jobs|job|delegate|wait|review|check|needs-owner|note|lesson|queue|goals|signals|log|watch|stop|recover");
+  else fail("Usage: constance.mjs start|status|agents|scorecard|pace|jobs|job|delegate|wait|review|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|stop|recover");
 }

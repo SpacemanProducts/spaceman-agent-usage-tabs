@@ -123,4 +123,10 @@ r = planSpare({
   available: ["grok"], backlog: [item("a", "chore")], now });
 assert.equal(r.picks[0].window.title, "Session", "soonest reset wins");
 
+// The top of the backlog goes first, and items already handed to a job are skipped.
+r = planSpare({
+  agents: [grok()], available: ["grok"], perAgent: 2, now,
+  backlog: [{ ...item("t", "chore"), job: 9 }, item("first", "chore"), item("second", "chore"), item("third", "chore")] });
+assert.deepEqual(r.picks[0].items.map((i) => i.id), ["first", "second"]);
+
 console.log("constance-spare: tests passed");
