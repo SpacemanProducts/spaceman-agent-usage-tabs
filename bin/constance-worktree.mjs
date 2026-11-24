@@ -17,7 +17,10 @@ export function repoBranch(dir) {
 
 // Worktrees live in /var/tmp when it exists: /tmp is replaced by each job's own
 // sandbox temp folder, so a worktree there would be hidden inside the sandbox.
+// CONSTANCE_WORKTREES overrides it: the tests point it at their own temp folder,
+// so they never create or remove anything in the real worktree area.
 export function worktreeRoot(env = process.env) {
+  if (env.CONSTANCE_WORKTREES) return env.CONSTANCE_WORKTREES;
   const base = fs.existsSync("/var/tmp") ? "/var/tmp" : (env.TMPDIR || os.tmpdir());
   return path.join(base, "constance-worktrees");
 }

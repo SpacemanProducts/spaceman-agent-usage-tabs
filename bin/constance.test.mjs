@@ -96,7 +96,10 @@ const proc = path.join(root, "proc"); fs.mkdirSync(proc);
 const setLoad = (load) => fs.writeFileSync(path.join(proc, "loadavg"), `${load} 0.50 0.50 1/500 999\n`);
 setLoad("0.10");
 fs.writeFileSync(path.join(proc, "meminfo"), "MemTotal:       33554432 kB\nMemFree:        10000000 kB\nMemAvailable:   20971520 kB\n");
-const env = { ...process.env, HOME: fakeHome, SQUAD_PROJECTS: path.join(fakeHome, "Projects"), XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}`, CONSTANCE_PROC: proc, CONSTANCE_RAMP_GAP_MS: "0" };
+// Copy worktrees go in this test's own folder (removed with root), never the real
+// /var/tmp/constance-worktrees, where a real Constance run may have copies going.
+const worktrees = path.join(root, "worktrees");
+const env = { ...process.env, CONSTANCE_WORKTREES: worktrees, HOME: fakeHome, SQUAD_PROJECTS: path.join(fakeHome, "Projects"), XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}`, CONSTANCE_PROC: proc, CONSTANCE_RAMP_GAP_MS: "0" };
 const run = (...a) => spawnSync("node", [CLI, ...a], { env, encoding: "utf8" });
 const status = () => JSON.parse(run("status").stdout);
 const until = async (fn, ms = 20000) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
@@ -347,7 +350,7 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   const ps = status();
   const pl = ps.log.filter((l) => l.kind === "practice" && l.agent === "devin").pop();
   assert.ok(pl, "the devin handoff is logged");
-  const wt = path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-worktrees", `job-${pl.job}`);
+  const wt = path.join(worktrees, `job-${pl.job}`);
   assert.equal(pl.worktree, wt, "the log names the would-be worktree");
   assert.ok(pl.prompt.includes(`if it is not exactly ${wt}, stop now`), "the pwd check names the worktree: " + pl.prompt);
   assert.ok(pl.prompt.includes(`write the file ${wt}/.constance/done-${pl.job}.json`), "the done file is in the worktree");
@@ -356,7 +359,7 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   assert.equal(git("branch", "--list", "constance/*").trim(), "", "practice created no branch");
   const pj = ps.jobs.find((j) => j.id === pl.job);
   assert.equal(pj.status, "accepted"); assert.ok(!pj.worktree && !pj.branch, "nothing for a merge to act on");
-  assert.match(fs.readFileSync(path.join(root, "practice-copy.out"), "utf8"), /own worktree .*constance-worktrees\/job-/);
+  assert.match(fs.readFileSync(path.join(root, "practice-copy.out"), "utf8"), new RegExp(`own worktree ${worktrees}/job-`));
   // Copy all: `log` prints the whole log as text, practice prompts in full.
   const lt = run("log").stdout;
   assert.ok(lt.includes(pl.prompt), "the full practice prompt is in the copied log");
@@ -395,7 +398,7 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   // The fake Devin passed the pwd check in its own worktree and wrote the done file there,
   // and that is where she read it from (nothing landed in the main folder's .constance/).
   for (const j of dj) {
-    assert.match(j.summary, new RegExp(`in .*constance-worktrees/job-${j.id}$`), "the copy worked in its worktree: " + j.summary);
+    assert.match(j.summary, new RegExp(`in ${worktrees}/job-${j.id}$`), "the copy worked in its worktree: " + j.summary);
     assert.ok(!fs.existsSync(path.join(repo, ".constance", `done-${j.id}.json`)), "no done file in the main folder");
   }
   assert.equal(git("branch", "--list", "constance/*").trim(), "", "copy branches are deleted after merge");
@@ -526,7 +529,10 @@ assert.equal(status().copies.find((x) => x.agent === "devin").limit, 3, "constan
 fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false, constanceMaxCopies: 40 }));
 assert.equal(status().copies.find((x) => x.agent === "devin").limit, 10, "never above the published limit");
 fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
-fs.rmSync(path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-worktrees"), { recursive: true, force: true });
+// Only this test's own copies: every worktree it made is in its own folder.
+for (const w of fs.existsSync(worktrees) ? fs.readdirSync(worktrees) : []) { try { git("worktree", "remove", "--force", path.join(worktrees, w)); } catch {} }
+git("worktree", "prune");
+for (const b of git("branch", "--list", "constance/*", "--format=%(refname:short)").split("\n").filter(Boolean)) git("branch", "-D", b);
 
 // The watcher: a fake busctl feeds it real-format Notify blocks. With no job
 // running for the named agent, the notification is logged as the owner's own —

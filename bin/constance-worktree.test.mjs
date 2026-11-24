@@ -11,6 +11,8 @@ import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, bra
 
 const root = fs.mkdtempSync(path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-wt-test-"));
 const repo = path.join(root, "repo");
+// Worktrees go in this test's own folder, never the real /var/tmp/constance-worktrees.
+process.env.CONSTANCE_WORKTREES = path.join(root, "worktrees");
 fs.mkdirSync(repo);
 const git = (...a) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8" });
 const gitIn = (dir, ...a) => execFileSync("git", ["-C", dir, ...a], { encoding: "utf8" });
@@ -21,6 +23,7 @@ assert.equal(repoBranch(repo), git("branch", "--show-current").trim());
 // A copy worktree is outside the repo, on its own branch, at the same commit.
 const w1 = createWorktree(repo, 901);
 assert.equal(w1.worktree, worktreeFor(901)); assert.equal(w1.branch, branchFor(901));
+assert.equal(path.dirname(w1.worktree), path.join(root, "worktrees"), "the test's own worktree folder");
 assert.ok(!w1.worktree.startsWith(repo), "the worktree is outside the repo");
 assert.equal(fs.readFileSync(path.join(w1.worktree, ".git"), "utf8").trim().startsWith("gitdir:"), true, "a worktree .git is a pointer file");
 assert.equal(repoBranch(w1.worktree), w1.branch, "the worktree is on its own branch");
@@ -51,6 +54,5 @@ assert.equal(git("status", "--porcelain").trim(), "", "no merge is left in progr
 for (const w of [w2, w3]) dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true });
 assert.equal(git("worktree", "list", "--porcelain").split("worktree ").length - 1, 1, "all copy worktrees are gone");
 
-fs.rmSync(root, { recursive: true, force: true });
-fs.rmSync(path.dirname(worktreeFor(901)), { recursive: true, force: true });
+fs.rmSync(root, { recursive: true, force: true });   // the repo and its worktree folder, nothing else
 console.log("constance-worktree: tests passed");
