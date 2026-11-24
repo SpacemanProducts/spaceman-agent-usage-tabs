@@ -28,13 +28,18 @@ assert.deepEqual(cm([{ title: "Free grok-4.7 (24 h)", percent: 0.7, cap: true },
 // barMeters: the bar's session/weekly split has no fallback — only real session
 // and weekly meters fill in, everything else reports -1.
 const bm = (limits) => JSON.parse(JSON.stringify(ctx.barMeters({ limits })));
-assert.deepEqual(bm([L("Session", 0.92), L("Weekly", 0.38)]), { session: 0.92, weekly: 0.38 }, "both distinct");
-assert.deepEqual(bm([L("Session", 0.5)]), { session: 0.5, weekly: -1 }, "session only: no invented weekly");
-assert.deepEqual(bm([L("Weekly", 0.3)]), { session: -1, weekly: 0.3 }, "weekly only: no invented session");
-assert.deepEqual(bm([L("Monthly", 0.2), L("Daily", 0.1), L("Prompt credits", 0.9)]), { session: -1, weekly: -1 }, "other meters report nothing");
-assert.deepEqual(bm([]), { session: -1, weekly: -1 }, "no meters -> no data");
-assert.deepEqual(bm([L("Gemini Session", 0.2), L("Gemini Weekly", 0.7), L("Claude/GPT Session", 0.4), L("Claude/GPT Weekly", 0.1)]), { session: 0.4, weekly: 0.7 }, "fullest of each kind");
-assert.deepEqual(bm([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "x" }, L("Weekly", 0)]), { session: 1, weekly: 1 }, "a hit limit counts as both");
-assert.deepEqual(JSON.parse(JSON.stringify(ctx.barMeters(null))), { session: -1, weekly: -1 });
-assert.deepEqual(JSON.parse(JSON.stringify(ctx.barMeters({ limits: [L("Session", 0.2), L("Weekly", 0.2)], accounts: [{ limits: [L("Session", 0.9), L("Weekly", 0.1)] }] }))), { session: 0.9, weekly: 0.2 }, "worst meter across accounts");
+const B = (session, weekly, other = -1, otherTitle = "") => ({ session, weekly, other, otherTitle });
+assert.deepEqual(bm([L("Session", 0.92), L("Weekly", 0.38)]), B(0.92, 0.38), "both distinct");
+assert.deepEqual(bm([L("Session", 0.5)]), B(0.5, -1), "session only: no invented weekly");
+assert.deepEqual(bm([L("Weekly", 0.3)]), B(-1, 0.3), "weekly only: no invented session");
+assert.deepEqual(bm([L("Monthly", 0.2), L("Daily", 0.1), L("Prompt credits", 0.9)]), B(-1, -1, 0.9, "Prompt credits"), "other meters report only through `other`");
+assert.deepEqual(bm([]), B(-1, -1), "no meters -> no data");
+assert.deepEqual(bm([L("Gemini Session", 0.2), L("Gemini Weekly", 0.7), L("Claude/GPT Session", 0.4), L("Claude/GPT Weekly", 0.1)]), B(0.4, 0.7), "fullest of each kind");
+assert.deepEqual(bm([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "x" }, L("Weekly", 0)]), B(1, 1), "a hit limit counts as both");
+assert.deepEqual(JSON.parse(JSON.stringify(ctx.barMeters(null))), B(-1, -1), "null agent");
+assert.deepEqual(JSON.parse(JSON.stringify(ctx.barMeters({ limits: [L("Session", 0.2), L("Weekly", 0.2)], accounts: [{ limits: [L("Session", 0.9), L("Weekly", 0.1)] }] }))), { session: 0.9, weekly: 0.2, other: -1, otherTitle: "" }, "worst meter across accounts");
+// `other` carries the fullest non-session/weekly meter (monthly, credits…) so the robot can show real severity.
+assert.deepEqual(bm([L("Chat and agent requests", 0.943), L("Editor autocomplete", 0)]), { session: -1, weekly: -1, other: 0.943, otherTitle: "Chat and agent requests" }, "fullest other wins, a 0% meter never overrides it");
+assert.deepEqual(bm([L("Monthly", 0.2), L("Daily", 0.1)]), { session: -1, weekly: -1, other: 0.2, otherTitle: "Monthly" });
+assert.deepEqual(bm([L("Session", 0.5), L("Prompt credits", 0.9)]), { session: 0.5, weekly: -1, other: 0.9, otherTitle: "Prompt credits" });
 console.log("bar-meters: all tests passed");

@@ -25,7 +25,7 @@ const freeReal = parseCopilotQuota({ copilot_plan: "individual", access_type_sku
   premium_interactions: { entitlement: 0, remaining: 0, percent_remaining: 0, unlimited: false, has_quota: false, credits_used: 0 } } });
 assert.equal(freeReal.plan, "Free", "not Pro: access_type_sku says free");
 assert.equal(freeReal.free, true);
-assert.deepEqual(freeReal.limits.map((l) => [l.title, l.note, Math.round(l.percent * 1000) / 1000]), [["Chat and agent requests", "Shared plan quota", 0.001], ["Editor autocomplete", "Not used by the CLI", 0]], "plain-language labels, the same numbers");
+assert.deepEqual(freeReal.limits.map((l) => [l.title, l.note, Math.round(l.percent * 1000) / 1000]), [["Chat and agent requests", "Shared plan quota", 0.001]], "plain-language labels, the same numbers; editor autocomplete is not a CLI meter");
 assert.ok(freeReal.limits.every((l) => l.window === "monthly"), "still monthly meters (the window is kept for reset detection)");
 assert.equal(freeReal.limits[0].resetsAt, "2026-12-01T00:00:00.000Z"); assert.equal(freeReal.status, "", "meters shown, so no 'no allowance' line");
 // used up: 150 of 200 chat left -> 25% used, from the most precise figure

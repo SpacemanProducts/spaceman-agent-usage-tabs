@@ -27,14 +27,15 @@ function chipMeters(agent) {
   return { session: session, weekly: weekly }
 }
 
-// The bar's two indicators: {session, weekly} as 0..1 fractions, or -1 for
-// "no data". Unlike chipMeters there is no fallback — the percentage is only a
-// real session meter and the robot only a real weekly meter, so the bar never
-// invents a value for a limit the agent doesn't report. A limit at 100%, one
-// the agent reported hitting, or a cap that walls the agent off counts as both:
-// the agent can't work either way.
+// The bar's indicators: {session, weekly, other} as 0..1 fractions or -1 for
+// "no data". Session and weekly only fill from real meters of those kinds —
+// the percentage never invents a session limit. `other` is the fullest meter
+// of any other kind (monthly, daily, credits) with its title, so the robot can
+// still show real severity for agents that report no session/weekly split.
+// A limit at 100%, one the agent reported hitting, or a cap that walls the
+// agent off counts as both session and weekly: the agent can't work either way.
 function barMeters(agent) {
-  var session = -1, weekly = -1
+  var session = -1, weekly = -1, other = -1, otherTitle = ""
   var limits = ((agent && agent.limits) || []).slice()
   var accts = (agent && agent.accounts) || []
   for (var a = 0; a < accts.length; a++) limits = limits.concat((accts[a] && accts[a].limits) || [])
@@ -45,6 +46,7 @@ function barMeters(agent) {
     if (p >= 1 || limits[i].hitAt || limits[i].cap) { if (p > session) session = p; if (p > weekly) weekly = p }
     else if (/session/i.test(t)) { if (p > session) session = p }
     else if (/weekly/i.test(t)) { if (p > weekly) weekly = p }
+    else if (p > other) { other = p; otherTitle = t }
   }
-  return { session: session, weekly: weekly }
+  return { session: session, weekly: weekly, other: other, otherTitle: otherTitle }
 }

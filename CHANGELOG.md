@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.31.1 - 2026-11-23
+- **One severity system on the bar:** the robot now falls back to the fullest real meter when the agent reports no weekly limit, so Copilot at 94% shows red instead of neutral, and Cursor at its cap shows red instead of nothing. The percentage still only appears for a real session limit. Copilot's editor-autocomplete meter is gone — the CLI never uses it, so it could never be the right number to show.
+
 ## 1.31.0 - 2026-11-23
 - **The bar shows session and weekly separately:** the percentage is now the default agent's session limit and the robot its weekly limit, each with its own color (green/amber/red). Agents that don't report one kind show nothing invented for it — no percent, a neutral robot — and the tooltip says which is which ("Devin — session 42% · weekly 67%"). The angry robot now means the weekly limit is used up.
 

@@ -39,7 +39,8 @@ export function parseCopilotQuota(payload) {
   const free = plan === "Free";
   const resetsAt = (() => { const d = new Date(payload?.quota_reset_date_utc || ""); return isNaN(d.getTime()) ? "" : d.toISOString(); })();
   const snaps = payload?.quota_snapshots;
-  const allowances = [allowanceMeter(snaps?.chat, "Chat and agent requests", "Shared plan quota", resetsAt), allowanceMeter(snaps?.completions, "Editor autocomplete", "Not used by the CLI", resetsAt)].filter(Boolean);
+  // Only the chat/agent allowance: the completions meter is editor autocomplete, which the CLI never uses.
+  const allowances = [allowanceMeter(snaps?.chat, "Chat and agent requests", "Shared plan quota", resetsAt)].filter(Boolean);
   const snap = snaps?.premium_interactions;
   if (!snap || typeof snap !== "object") return { limits: allowances, plan, free, status: "" };
   if (snap.unlimited === true) return { limits: allowances, plan, free, status: "Unlimited premium requests on this plan." };

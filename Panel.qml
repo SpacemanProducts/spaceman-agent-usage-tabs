@@ -134,11 +134,11 @@ Panel {
     handoffAnswerer.running = true
     handoffPending = null
   }
-  // The bar robot looks angry (theme red) while the default agent's weekly limit is used up.
+  // The bar robot looks angry (theme red) while the default agent has a limit used up.
   readonly property bool angryRobot: userSettings.angryRobot !== undefined
     ? userSettings.angryRobot !== false : root.setting("angryRobot", true) !== false
   property bool testAngry: false   // set for 8 s by the testAngry IPC hook, to check the look in the real bar
-  readonly property bool robotAngry: angryRobot && (barWeekly >= 1 || testAngry)
+  readonly property bool robotAngry: angryRobot && (barRobot >= 1 || testAngry)
   Timer { id: testAngryTimer; interval: 8000; onTriggered: root.testAngry = false }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
@@ -222,18 +222,26 @@ Panel {
     return agents.length > 0 ? agents[0] : null
   }
   readonly property string defaultAgentName: barAgent && barAgent.name ? barAgent.name : "the default agent"
-  // The bar shows two independent readings of the default agent: the percentage
-  // is its session limit, the robot its weekly limit. -1 means the agent
-  // doesn't report that kind of limit — nothing is invented for it.
+  // The bar shows two readings of the default agent: the percentage is its
+  // session limit, the robot its usage severity. -1 means the agent doesn't
+  // report that kind of limit — nothing is invented for it.
   readonly property var barReadings: ChipMeters.barMeters(barAgent)
   readonly property real barSession: barReadings.session
   readonly property real barWeekly: barReadings.weekly
-  readonly property bool barHasData: barSession >= 0 || barWeekly >= 0
+  readonly property real barOther: barReadings.other
+  readonly property string barOtherTitle: barReadings.otherTitle || ""
+  // Robot severity: the weekly meter when the agent reports one, else the
+  // fullest real meter it does report (session or other) — one color system.
+  readonly property real barRobot: barWeekly >= 0 ? barWeekly : Math.max(barSession, barOther)
+  readonly property bool barHasData: barSession >= 0 || barWeekly >= 0 || barOther >= 0
   // What the bar tooltip says: which reading is which, for this agent.
   readonly property string barTooltip: {
-    var s = barSession >= 0 ? Math.round(barSession * 100) + "%" : "not reported"
-    var w = barWeekly >= 0 ? Math.round(barWeekly * 100) + "%" : "not reported"
-    return defaultAgentName + " — session " + s + " · weekly " + w
+    var name = defaultAgentName
+    var parts = []
+    if (barSession >= 0) parts.push("session " + Math.round(barSession * 100) + "%")
+    if (barWeekly >= 0) parts.push("weekly " + Math.round(barWeekly * 100) + "%")
+    if (barOther >= 0) parts.push((barOtherTitle || "other") + " " + Math.round(barOther * 100) + "%")
+    return name + " — " + (parts.length ? parts.join(" · ") : "no limits reported")
   }
   onFirstIdChanged: applyDefault()
   onFirstInstalledChanged: applyDefault()
@@ -1664,8 +1672,8 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // The robot is the weekly meter: its own color from the weekly percentage,
-    // angry eyes when the weekly limit is used up. Neutral when unreported.
+    // The robot is the usage-severity meter: weekly when reported, else the
+    // fullest real meter. Angry eyes when a limit is used up. Neutral with none.
     iconComponent: Component {
       OpticalGlyph {
         implicitWidth: Style.bar.iconCanvas
@@ -1674,8 +1682,8 @@ Panel {
         fontFamily: root.fontFamily
         fontSize: Style.bar.iconFont
         paintedSize: Style.bar.iconSize
-        color: root.barWeekly >= 0
-          ? (root.robotAngry ? Color.urgent : root.meterColorFor(root.barWeekly, root.lightBar))
+        color: root.barRobot >= 0
+          ? (root.robotAngry ? Color.urgent : root.meterColorFor(root.barRobot, root.lightBar))
           : root.barForeground
       }
     }
@@ -2352,7 +2360,7 @@ Panel {
             }
             SettingSwitch {
               width: parent.width
-              label: "Angry robot when the weekly limit is hit"
+              label: "Angry robot when a limit is used up"
               checked: root.angryRobot
               onToggled: root.writeSetting(["angryRobot", String(!root.angryRobot)])
             }
