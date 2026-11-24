@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.38.0 - 2026-11-24
+- **Public-release polish:** README rewritten for new users — install check, update and uninstall steps, settings, Constance with practice mode and model fallback, multi-account support, privacy and the Ko-fi link. Fresh panel-only screenshots in dark and light themes (tabs, Start picker, Constance) with folder names blurred. New `bin/install-check.mjs` preflight tells a new user what their machine is missing before they install, and a lifecycle test proves a clean install and uninstall leave nothing behind.
+
 ## 1.37.0 - 2026-11-24
 - **The whole plugin now follows the active Omarchy theme like the stock panels:** meter colors moved into `usage-colors.js`, which picks the bright or deep set for each surface's actual background and verifies WCAG contrast — any color that wouldn't read is adjusted toward black or white, and a mid-tone background that would collapse the three levels triggers a hue-preserving rebuild so low, medium and high stay tellable apart. The panel popups, tab chips, limit bars, top-bar percentage and robot, Start picker, Constance panel and settings all draw from the same live `Color`/`Style` sources, so a theme switch updates everything without a restart. Celebrations keep their dark/light variants.
 

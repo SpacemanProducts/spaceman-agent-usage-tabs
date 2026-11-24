@@ -24,8 +24,13 @@ you have installed.
 
 ![The panel on the Claude Code tab](docs/screenshot.png)
 
-The header has four square buttons, all the same style: **+** (add an account), **>_** (start your default agent), **CS** (Claude
-Squad) and the gear (settings). All four open as **their own screen**: the agent chips and usage meters are
+Dark and light themes, live (folder names blurred for privacy):
+
+![The tabs view in a dark theme](docs/tabs-dark.png)
+![The tabs view in a light theme](docs/tabs-light.png)
+
+The header has five square buttons, all the same style: **+** (add an account), **>_** (start your default agent), **CS** (Claude
+Squad), **C** (Constance) and the gear (settings). All five open as **their own screen**: the agent chips and usage meters are
 hidden, only that screen's options are shown, and a **Back** button in the header returns to the normal view.
 
 ## Quick start (new to Omarchy?)
@@ -33,7 +38,14 @@ hidden, only that screen's options are shown, and a **Back** button in the heade
 Omarchy is a Linux desktop with a bar across the top of the screen. This plugin adds an
 icon to that bar. Click it to open the panel above.
 
-**1. Install it - one command, in a terminal:**
+**1. Check your machine (optional but recommended):**
+
+`node bin/install-check.mjs` (from a clone of this repo, or
+`node ~/.config/omarchy/plugins/spaceman.agent-usage-tabs/bin/install-check.mjs` after
+installing) tells you in plain words whether everything the plugin needs is there — it
+lists what is missing and what only unlocks optional features. It changes nothing.
+
+**2. Install it - one command, in a terminal:**
 
 ```
 omarchy plugin add https://github.com/SpacemanProducts/spaceman-agent-usage-tabs.git --enable
@@ -41,12 +53,12 @@ omarchy plugin add https://github.com/SpacemanProducts/spaceman-agent-usage-tabs
 
 From a local copy of the repo instead: `omarchy plugin add /path/to/spaceman-agent-usage-tabs --enable`.
 
-**2. Click the robot icon in the bar.** Each tool you have installed gets a tab. Tools you
+**3. Click the robot icon in the bar.** Each tool you have installed gets a tab. Tools you
 haven't installed are hidden, and a new one shows up on its own the next time the panel
 refreshes (every 5 minutes). The number beside the icon is your default agent's (the first tab):
 its session usage, or its weekly when that is higher, colored like its chip.
 
-**3. Sign in to the tools you want to see.** A tab for a tool you aren't signed in to says
+**4. Sign in to the tools you want to see.** A tab for a tool you aren't signed in to says
 so in one line. These need a login first:
 
 | Tool | Sign in with |
@@ -187,6 +199,11 @@ Omarchy's own launcher uses. The two buttons share one list, so a repo you open 
 
 The robot's **right-click** on the bar and the **keyboard shortcut** are unchanged: they start the default agent at once, with no picker.
 
+Dark and light:
+
+![The Start picker in a dark theme](docs/start-dark.png)
+![The Start picker in a light theme](docs/start-light.png)
+
 ### Claude Squad
 
 ![Choosing agents for Claude Squad](docs/squad.png)
@@ -234,6 +251,18 @@ you give her a goal.
 - **Stop** halts her and every job at once. The screen lists every agent and what it is working on, and the **log** shows each task she
   handed out, to whom, and what came back. Her job file (`constance/jobs.json` in the state folder) lets her pick up where she left off
   after a shell restart.
+- **Practice mode** (on by default, switch beside the Give button): she still plans the goal, picks the agents and writes every
+  handoff prompt — the log shows which agent she'd pick, why, and the full prompt — but she launches nothing and changes no files.
+  It is a dry run for trying a goal before trusting it.
+- **Model fallback:** if Opus isn't allowed on your Claude plan, she uses the best model that is (Sonnet, then Haiku) and says so in
+  her log instead of failing.
+- **Multiple accounts:** when an agent has more than one Omarchy account, she judges each account's limits as its own source of free
+  capacity, picks the one with the most room, and pins the handoff to it — the agent list and her log name it, like "Claude (Work)".
+
+Dark and light:
+
+![Constance in a dark theme](docs/constance-dark.png)
+![Constance in a light theme](docs/constance-light.png)
 
 A background loop that works without a goal is planned for later.
 
@@ -302,6 +331,15 @@ no reset button.
 - `gh` (GitHub CLI), only for Copilot's usage numbers
 - Omarchy's own `omarchy-agent-usage-*` collectors, used for Codex, Cursor, OpenCode, Kimi,
   and Devin token history
+
+## Update
+
+```
+omarchy plugin update spaceman.agent-usage-tabs
+omarchy-restart-shell
+```
+
+Your settings, tab order and folder picks live in the state folder and survive updates.
 
 ## Install by hand
 
@@ -383,7 +421,9 @@ agent's live list decides. Delete a model that is truly gone. Edits apply on the
 
 ## Privacy and safety
 
-- Logins are read-only. Each token is sent only to its own vendor's endpoint listed above.
+- Logins are read-only. The plugin **never writes, refreshes or stores tokens or credentials**:
+  it reads them where the agent's own CLI already keeps them, uses each one only for that
+  vendor's endpoint listed above, and keeps nothing itself.
 - Nothing is sent anywhere else: no telemetry, no analytics. The one exception is the
   agyresets.com lookup above, made only when a surprise Antigravity reset is detected, with
   a plain request that carries nothing about you. Reset announcements come from
@@ -431,6 +471,15 @@ omarchy plugin disable spaceman.agent-usage-tabs
 omarchy plugin remove spaceman.agent-usage-tabs --yes
 rm -r ~/.local/state/omarchy/agent-usage-tabs
 ```
+
+That removes the plugin folder and its state folder (usage data, settings, Constance's
+jobs and log). It leaves nothing else behind: the handoff note it may have written stays in
+your repo unless you delete it, and Claude Squad's own config is untouched.
+
+## Support
+
+Cook Meter is free. If it saves you from hitting a wall mid-flow, you can say thanks on
+[Ko-fi](https://ko-fi.com/spacemanproducts). No pressure — it pays for the sounds.
 
 ## License
 
