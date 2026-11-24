@@ -26,6 +26,7 @@ import { liveModels } from "./live-models.mjs";
 import { planInfo } from "./plan-info.mjs";
 import { makeInstalledCheck, agentCli } from "./installed.mjs";
 import { refreshTargets } from "./refresh-targets.mjs";
+import { grokWalls } from "./grok-account-walls.mjs";
 import { planLoginNotices, planInstallNotices } from "./login-watch.mjs";
 import { buildAccounts } from "./accounts.mjs";
 import { loadCatalog, tabNote } from "./catalog.mjs";
@@ -167,8 +168,8 @@ const stale = (prev) => (prev ? { limits: prev.limits || [], plan: prev.plan || 
 
 // ------------------------------------------- own scripts: grok.mjs, agy.mjs
 const HERE = path.dirname(new URL(import.meta.url).pathname);
-function ownScript(name, agentId = name) {
-  const r = spawnSync("node", [path.join(HERE, `${name}.mjs`)], { encoding: "utf8", env: ENV, timeout: 45000 });
+function ownScript(name, agentId = name, extraEnv = {}) {
+  const r = spawnSync("node", [path.join(HERE, `${name}.mjs`)], { encoding: "utf8", env: { ...ENV, ...extraEnv }, timeout: 45000 });
   const bad = (msg) => { diag.add(agentId, `${name} collector: ${msg}`, { stdout: String(r.stdout || "").slice(0, 200), stderr: String(r.stderr || "").slice(0, 200), exit: r.status }); return { status: `${name} collector ${msg}.` }; };
   try { return JSON.parse(r.stdout || "null") || bad("gave no output"); }
   catch { return bad("gave invalid output"); }
@@ -250,6 +251,19 @@ for (const a of AGENTS) {
       const sq = ownScript(a.id === "grok" ? "grok" : "agy", a.id);
       out.limits = sq.limits || []; if (sq.plan) out.plan = sq.plan; out.status = sq.status || ""; if (sq.unsure) out.unsure = sq.unsure;
       out.signedIn = !String(sq.status || "").startsWith("Not signed in");
+      // Grok's free-cap wall is per home: check every registered account's own
+      // GROK_HOME, and pin the seated account's wall to its account entry too.
+      if (a.id === "grok") {
+        const reg = readJson(path.join(STATE, "agents", "accounts", "grok.json"));
+        const walls = grokWalls(reg, {
+          primaryHome: process.env.GROK_HOME || path.join(HOME, ".grok"), homeDir: HOME,
+          run: (home) => ownScript("grok", "grok", { GROK_HOME: home }),
+        });
+        const seated = (reg?.accounts || []).find((x) => x && x.active)?.id || reg?.active;
+        const own = (sq.limits || []).filter((l) => l && l.cap === true);
+        if (own.length && seated) (walls[seated] = walls[seated] || []).push(...own);
+        if (Object.keys(walls).length) out.accountWalls = walls;
+      }
       // Quota failed but local stats exist: the one-line status still says why.
     } else if (!local) {
       out.status = a.builtin ? "No usage recorded yet." : "No usage data source for this agent yet.";
@@ -311,7 +325,12 @@ for (const a of AGENTS) {
   const r = spawnSync("omarchy-agent-account-list", ["--json"], { encoding: "utf8", env: ENV, timeout: 20000 });
   let list = null; try { list = JSON.parse(r.stdout || "null"); } catch {}
   const byProvider = buildAccounts(list);
-  for (const a of agents) if (byProvider[a.id]) a.accounts = byProvider[a.id].map((x) => ({ ...x, limits: expireResets(planLimitsOnly(x.limits)) }));
+  for (const a of agents) {
+    if (byProvider[a.id]) a.accounts = byProvider[a.id].map((x) => ({
+      ...x, limits: expireResets(planLimitsOnly([...(x.limits || []), ...((a.accountWalls || {})[x.id] || [])])),
+    }));
+    delete a.accountWalls;
+  }
 }
 
 // ------------------------------------------------- "now available" login notice
