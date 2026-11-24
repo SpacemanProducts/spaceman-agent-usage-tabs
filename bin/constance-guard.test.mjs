@@ -1,13 +1,13 @@
 // Constance's post-run guardrails in a scratch HOME/projects dir and git repo:
 // a clean run passes, a run that touches files outside its list or creates a
-// project folder is caught, restored (commit reverted, stray project quarantined)
-// and capped to smaller tasks afterwards.
+// project folder is caught; only the run's own verified commit is reverted, and
+// nothing is ever deleted, moved, checked out or cleaned.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { snapshot, checkRun, restoreRun, changedPaths, fileCap } from "./constance-guard.mjs";
+import { snapshot, checkRun, restoreRun, changedPaths, commitFromRun, fileCap } from "./constance-guard.mjs";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-guard-"));
 const home = path.join(root, "home"), projects = path.join(home, "Projects"), repo = path.join(projects, "app");
@@ -21,8 +21,9 @@ fs.writeFileSync(path.join(repo, ".git/info/exclude"), ".constance/\n");
 fs.mkdirSync(path.join(repo, ".constance"));
 fs.writeFileSync(path.join(repo, ".constance", "done-1.json"), '{"summary":"ok","commit":""}');
 
-const before = snapshot(env);
+const before = snapshot(env, repo);
 assert.deepEqual(before.home, ["Projects"], "home snapshot lists top-level names");
+assert.match(before.head, /^[0-9a-f]{40}$/, "the pre-run HEAD is recorded");
 assert.deepEqual(before.projects, ["app"]);
 
 // A clean run: allowed file committed, done file ignored -> no violations.
@@ -51,22 +52,58 @@ res = checkRun({ dir: repo, files: [], commit: badCommit, before, env });
 assert.equal(res.ok, false, "read-only jobs may not change anything");
 
 // Creating a folder in ~/Projects during the run is caught.
-const projBefore = snapshot(env);
+const projBefore = snapshot(env, repo);
 fs.mkdirSync(path.join(projects, "sneaky-app"));
-res = checkRun({ dir: repo, files: ["b.txt"], commit: badCommit, before: projBefore, env });
+fs.writeFileSync(path.join(projects, "sneaky-app", "keep.txt"), "k\n");
+res = checkRun({ dir: repo, files: ["b.txt"], commit: "", before: projBefore, env });
 assert.equal(res.ok, false);
 assert.ok(res.violations.some((v) => v.includes("sneaky-app")), "new project folder flagged");
 assert.deepEqual(res.addedProjects, ["sneaky-app"]);
 
-// restoreRun: revert the bad commit and quarantine the stray project folder.
-const did = restoreRun({ dir: repo, commit: badCommit, badPaths: ["c.txt"], addedProjects: ["sneaky-app"], projectsDir: projects });
+// restoreRun reverts the run's own commit and touches nothing else: the new
+// project folder (which may be the owner's) stays exactly where it is.
+let did = restoreRun({ dir: repo, commit: badCommit, badPaths: ["c.txt"], addedProjects: ["sneaky-app"] });
 assert.ok(did.some((d) => d.startsWith("reverted commit")), did.join("; "));
-assert.ok(did.some((d) => d.startsWith("quarantined project sneaky-app")), did.join("; "));
-assert.ok(!fs.existsSync(path.join(projects, "sneaky-app")), "stray project moved out of Projects");
-assert.ok(fs.existsSync(path.join(repo, ".constance", "quarantine")), "quarantine dir exists");
-assert.ok(fs.readdirSync(path.join(repo, ".constance", "quarantine")).some((n) => n.endsWith("-sneaky-app")), "the folder is kept, not deleted");
-assert.equal(git("status", "--porcelain").trim(), "", "worktree is clean after restore");
+assert.ok(did.some((d) => d.includes("left in place") && d.includes("sneaky-app")), did.join("; "));
+assert.equal(fs.readFileSync(path.join(projects, "sneaky-app", "keep.txt"), "utf8"), "k\n", "the project folder is never moved");
+assert.ok(!fs.existsSync(path.join(repo, ".constance", "quarantine")), "no quarantine moves");
+assert.equal(git("status", "--porcelain").trim(), "", "worktree is clean after the revert");
 assert.ok(!fs.existsSync(path.join(repo, "c.txt")), "reverted file is gone");
+fs.rmSync(path.join(projects, "sneaky-app"), { recursive: true });
+
+// The owner's own uncommitted and untracked work, there before the run, is never
+// blamed on the agent and never touched — even when the run also leaves a stray.
+fs.writeFileSync(path.join(repo, "a.txt"), "owner edit\n");
+fs.writeFileSync(path.join(repo, "owner-draft.md"), "draft\n");
+const ownerBefore = snapshot(env, repo);
+fs.writeFileSync(path.join(repo, "stray2.txt"), "x\n");
+res = checkRun({ dir: repo, files: ["b.txt"], commit: "", before: ownerBefore, env });
+assert.deepEqual(res.badPaths, ["stray2.txt"], "only the run's own stray is flagged: " + res.badPaths);
+did = restoreRun({ dir: repo, commit: "", badPaths: res.badPaths });
+assert.equal(fs.readFileSync(path.join(repo, "a.txt"), "utf8"), "owner edit\n", "owner's edit kept");
+assert.equal(fs.readFileSync(path.join(repo, "owner-draft.md"), "utf8"), "draft\n", "owner's untracked file kept");
+assert.ok(fs.existsSync(path.join(repo, "stray2.txt")), "even the stray is only reported, never deleted");
+fs.rmSync(path.join(repo, "stray2.txt")); fs.rmSync(path.join(repo, "owner-draft.md")); git("checkout", "--", "a.txt");
+
+// A reported commit that the run didn't make (an older one) is never trusted:
+// it's flagged, its files aren't blamed, and it's never reverted.
+const runBefore = snapshot(env, repo);
+assert.equal(commitFromRun(repo, cleanCommit, runBefore.head), false, "an old commit is not this run's");
+assert.equal(commitFromRun(repo, runBefore.head, runBefore.head), false, "the pre-run HEAD is not this run's");
+res = checkRun({ dir: repo, files: [], commit: cleanCommit, before: runBefore, env });
+assert.equal(res.ownCommit, "");
+assert.ok(res.violations.some((v) => v.includes("not a new commit")), res.violations.join("; "));
+assert.deepEqual(res.badPaths, [], "the old commit's files are not blamed on this run");
+fs.writeFileSync(path.join(repo, "e.txt"), "e\n"); git("add", "e.txt"); git("commit", "-qm", "add e");
+assert.equal(commitFromRun(repo, git("rev-parse", "HEAD").trim(), runBefore.head), true, "a new commit on the branch is the run's");
+
+// A revert that can't apply cleanly is aborted: no half-reverted tree.
+fs.writeFileSync(path.join(repo, "e.txt"), "e2\n"); git("commit", "-qam", "owner changes e");
+const eCommit = git("rev-list", "-n1", "HEAD~1").trim();
+did = restoreRun({ dir: repo, commit: eCommit });
+assert.ok(did.some((d) => d.startsWith("could not revert")), did.join("; "));
+assert.equal(git("status", "--porcelain").trim(), "", "the tree is as it was");
+assert.equal(fs.readFileSync(path.join(repo, "e.txt"), "utf8"), "e2\n");
 
 // Home-level additions are reported but never auto-touched; hidden churn is ignored.
 fs.writeFileSync(path.join(home, "stray-home-file"), "x");

@@ -109,15 +109,40 @@ export function inspectJobDir(dir, id) {
   return parts.join("; ");
 }
 
+// Which notifications she may even look at (privacy): the watcher sees every
+// desktop notification, so only two kinds of sender count — a terminal that
+// raises an agent CLI's OSC escape (Ghostty), or an agent CLI under its own app
+// name ("Devin", "codex", "Claude Code"). Mail, chat, browsers, this plugin's own
+// alerts ("Cook Meter") and everything else are dropped unread: never matched,
+// never written to notify.jsonl or her log.
+const TERMINAL_APPS = /^(ghostty|com\.mitchellh\.ghostty)$/i;
+export function agentApp(app) {
+  const a = String(app || "").trim().toLowerCase().replace(/\s+(cli|code)$/, "");
+  return KNOWN.find((k) => k.names.includes(a)) || null;
+}
+export function allowedSender(app) {
+  return TERMINAL_APPS.test(String(app || "").trim()) || !!agentApp(app);
+}
+
+const clip = (s, n) => (String(s || "").length > n ? String(s).slice(0, n - 1) + "…" : String(s || ""));
+
 // One notification -> record it, log what matters, return the event (null for
-// unrelated notifications so they never reach her log).
+// unrelated notifications so they never reach her log or any file).
+// What is kept is minimal: a signal for one of her running jobs keeps a clipped
+// summary (never the body); one for an agent she didn't start (the owner's own
+// run) keeps no text at all — just which agent finished, and when.
 export function handleNotification({ app = "", summary = "", body = "" }, { jobs = [], storeDir = "" } = {}) {
-  const text = `${app} ${summary} ${body}`.trim();
+  if (!allowedSender(app)) return null;
+  const fromAgent = agentApp(app);
+  const text = `${fromAgent ? app + " " : ""}${summary} ${body}`.trim();
   const m = matchJob(text, jobs);
   if (!m) return null;
-  const ev = { at: Date.now(), app, summary, body, agent: m.agent, kind: m.kind };
-  if (m.job !== undefined) {
-    ev.job = m.job; ev.dir = m.dir;
+  let ev;
+  if (m.kind === "foreign") {
+    if (!FINISHED.test(`${summary} ${body}`)) return null;   // only "finished" news is worth noting
+    ev = { at: Date.now(), agent: m.agent, kind: "foreign" };
+  } else {
+    ev = { at: Date.now(), agent: m.agent, kind: m.kind, summary: clip(summary || body, 120), job: m.job, dir: m.dir };
     if (m.ambiguous) ev.note = "several jobs for this agent were running; matched the newest";
     if (m.kind === "agent-done") ev.inspection = inspectJobDir(m.dir, m.job);
   }

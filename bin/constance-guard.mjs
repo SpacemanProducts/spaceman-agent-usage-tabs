@@ -12,35 +12,65 @@ const names = (dir) => {
 };
 
 // What the world looked like before the run: top-level names of $HOME and of the
-// projects folder (~/Projects, or SQUAD_PROJECTS). Names only — cheap and enough
-// to catch an agent creating or deleting folders where it shouldn't.
-export function snapshot(env = process.env) {
+// projects folder (~/Projects, or SQUAD_PROJECTS), plus the project's HEAD and the
+// paths that were already dirty (the owner's own work in progress, never the
+// agent's). Names only — cheap and enough to catch an agent creating or deleting
+// folders where it shouldn't.
+export function snapshot(env = process.env, dir = "") {
   const home = env.HOME || os.homedir();
   const projects = env.SQUAD_PROJECTS || path.join(home, "Projects");
-  return { home: names(home), projects: names(projects), projectsDir: projects };
+  const snap = { home: names(home), projects: names(projects), projectsDir: projects };
+  if (dir) { snap.head = headOf(dir); snap.dirty = dirtyPaths(dir); }
+  return snap;
 }
 
 const git = (dir, ...args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
 
-// Paths the run changed: its commit's files plus anything still dirty in the
-// worktree (an agent that forgot to commit still shows up here).
-export function changedPaths(dir, commit) {
+const isHash = (c) => /^[0-9a-f]{7,40}$/i.test(c || "");
+function headOf(dir) {
+  const r = git(dir, "rev-parse", "HEAD");
+  return r.status === 0 ? r.stdout.trim() : "";
+}
+
+// Paths dirty in the worktree right now.
+export function dirtyPaths(dir) {
+  const out = [];
+  const st = git(dir, "status", "--porcelain");
+  if (st.status !== 0) return out;
+  for (const line of st.stdout.split("\n")) {
+    if (!line.trim()) continue;
+    let p = line.slice(3).trim();
+    const arrow = p.indexOf(" -> ");
+    if (arrow >= 0) p = p.slice(arrow + 4);
+    if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
+    out.push(p);
+  }
+  return out;
+}
+
+// A reported commit counts only if the run really made it: new since the
+// pre-run HEAD and on the current branch. Anything else (an old commit, someone
+// else's, a typo) is never inspected or reverted as the agent's.
+export function commitFromRun(dir, commit, baseHead) {
+  if (!isHash(commit)) return false;
+  if (git(dir, "merge-base", "--is-ancestor", commit, "HEAD").status !== 0) return false;
+  if (!baseHead) return false;
+  const full = git(dir, "rev-parse", commit + "^{commit}");
+  if (full.status !== 0 || full.stdout.trim() === baseHead) return false;
+  return git(dir, "merge-base", "--is-ancestor", baseHead, commit).status === 0;
+}
+
+// Paths the run changed: its own commit's files plus anything dirty now that
+// wasn't dirty before the run (an agent that forgot to commit still shows up;
+// the owner's earlier uncommitted work never does).
+export function changedPaths(dir, commit, before = null) {
   const out = new Set();
-  if (/^[0-9a-f]{7,40}$/i.test(commit || "")) {
+  if (isHash(commit)) {
     const r = git(dir, "show", "--name-only", "--format=", commit);
     if (r.status === 0) r.stdout.split("\n").filter(Boolean).forEach((p) => out.add(p));
   }
-  const st = git(dir, "status", "--porcelain");
-  if (st.status === 0) {
-    for (const line of st.stdout.split("\n")) {
-      if (!line.trim()) continue;
-      let p = line.slice(3).trim();
-      const arrow = p.indexOf(" -> ");
-      if (arrow >= 0) p = p.slice(arrow + 4);
-      if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
-      out.add(p);
-    }
-  }
+  const already = new Set((before && before.dirty) || []);
+  for (const p of dirtyPaths(dir)) if (!already.has(p)) out.add(p);
   return [...out];
 }
 
@@ -58,7 +88,11 @@ export function checkRun({ dir, files = [], commit = "", before = null, env = pr
   const violations = [];
   if (!before) return { ok: true, violations };
   const allowed = [...files, ".constance/"];
-  const bad = changedPaths(dir, commit).filter((p) => !inside(p, allowed));
+  // An old snapshot without a recorded HEAD can't tell the run's commit from
+  // anyone else's: judge the dirty paths only.
+  const own = before.head !== undefined ? commitFromRun(dir, commit, before.head) : false;
+  if (isHash(commit) && before.head !== undefined && !own) violations.push(`reported commit ${commit.slice(0, 9)} is not a new commit from this run`);
+  const bad = changedPaths(dir, own ? commit : "", before).filter((p) => !inside(p, allowed));
   if (bad.length) violations.push(`changed files outside its list: ${bad.join(", ")}`);
   const after = snapshot(env);
   const homeAfter = visible(after.home), homeBefore = visible(before.home || []);
@@ -71,36 +105,26 @@ export function checkRun({ dir, files = [], commit = "", before = null, env = pr
   if (removedHome.length) violations.push(`removed entries from the home folder: ${removedHome.join(", ")}`);
   if (addedProjects.length) violations.push(`created projects outside the folder: ${addedProjects.join(", ")}`);
   if (removedProjects.length) violations.push(`removed projects: ${removedProjects.join(", ")}`);
-  return { ok: violations.length === 0, violations, badPaths: bad, addedProjects, addedHome, removedHome, removedProjects, projectsDir: after.projectsDir };
+  return { ok: violations.length === 0, violations, badPaths: bad, ownCommit: own ? commit : "", addedProjects, addedHome, removedHome, removedProjects, projectsDir: after.projectsDir };
 }
 
-// Undo what can be undone, safely:
-//  - the job's own commit is reverted (a new commit, never a reset);
-//  - disallowed paths still dirty are checked out / cleaned by name only;
-//  - folders the run created in the projects dir are moved into the project's
-//    .constance/quarantine/ (kept, not deleted);
-//  - home-folder entries are only reported: nothing there is safe to touch blindly.
-export function restoreRun({ dir, commit = "", badPaths = [], addedProjects = [], projectsDir = "" } = {}) {
+// Undo what can be undone, and nothing else. The guard never deletes, moves,
+// checks out or cleans anything: the owner, Constance and other jobs share these
+// folders, so a stray path may well be theirs. The only automatic undo is a
+// `git revert` of the run's own verified commit (a new commit, never a reset);
+// if that revert can't apply cleanly it is aborted, leaving the tree as it was.
+// Everything else is reported for the owner to look at.
+export function restoreRun({ dir, commit = "", badPaths = [], addedProjects = [], addedHome = [], removedHome = [], removedProjects = [] } = {}) {
   const did = [];
-  if (/^[0-9a-f]{7,40}$/i.test(commit || "")) {
+  if (isHash(commit)) {
     const r = git(dir, "revert", "--no-edit", commit);
     if (r.status === 0) did.push(`reverted commit ${commit.slice(0, 9)}`);
+    else { git(dir, "revert", "--abort"); did.push(`could not revert commit ${commit.slice(0, 9)} cleanly; left it for you`); }
   }
-  for (const p of badPaths) {
-    const clean = p.replace(/^["']|["']$/g, "");
-    if (clean.includes("..") || path.isAbsolute(clean)) continue;
-    git(dir, "checkout", "--", clean);
-    git(dir, "clean", "-fdq", "--", clean);
-    did.push(`restored ${clean}`);
-  }
-  if (projectsDir && addedProjects.length) {
-    const quarantine = path.join(dir, ".constance", "quarantine");
-    fs.mkdirSync(quarantine, { recursive: true });
-    for (const n of addedProjects) {
-      const src = path.join(projectsDir, n);
-      try { fs.renameSync(src, path.join(quarantine, `${Date.now()}-${n}`)); did.push(`quarantined project ${n}`); } catch {}
-    }
-  }
+  const left = [...badPaths.map((p) => `${p} (in the project)`), ...addedProjects.map((n) => `${n} (new in Projects)`), ...addedHome.map((n) => `${n} (new in home)`)];
+  if (left.length) did.push(`left in place for you to check: ${left.join(", ")}`);
+  const gone = [...removedProjects, ...removedHome];
+  if (gone.length) did.push(`missing since the run started: ${gone.join(", ")}`);
   return did;
 }
 

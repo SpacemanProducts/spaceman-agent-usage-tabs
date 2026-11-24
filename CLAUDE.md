@@ -104,13 +104,17 @@ keeps the developer in flow:
   Since 1.40.0 she has a learning layer (`bin/constance-lessons.mjs`: seeded
   `lessons.json` in her state dir, `C lesson`, per-project `.constance/rules.md`)
   and post-run guardrails (`bin/constance-guard.mjs`: allowed-files diff check,
-  home/projects snapshot, revert/quarantine restore, strikes cap task size).
+  home/projects snapshot, strikes cap task size). Since 1.41.1 the guard never deletes,
+  moves, checks out or cleans anything: it reverts only a commit verified as the run's own
+  (new since the pre-run HEAD) and reports the rest; paths dirty before the run are never blamed.
+  She refuses to start in the home folder itself.
   Lessons and project rules are advice appended to prompts — never edit ROLE's
   core rules for them.
   Since 1.41.0 she also hears finish signals (`bin/constance-notify.mjs` +
   `watch` command: read-only `busctl --user monitor` snoop of
   org.freedesktop.Notifications, matched to jobs by agent/done-file/folder,
-  foreign agents logged and left alone) and has a real ready-task queue
+  foreign agents logged and left alone; since 1.41.1 only Ghostty/agent-CLI senders are heard,
+  bodies are never stored, foreign runs keep no text, and the watcher exits when the goal ends) and has a real ready-task queue
   (`bin/constance-queue.mjs`, `C queue`, auto-handed on review accept, shown in
   the panel's READY QUEUE section).
   Practice mode (`constancePractice` setting, panel switch, ON by default for now): `delegate` only

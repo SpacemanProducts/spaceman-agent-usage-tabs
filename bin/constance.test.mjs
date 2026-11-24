@@ -61,12 +61,24 @@ $C wait --timeout 30 > "${root}/wait2.json"
 $C review 2 accept --note "looks right"
 echo "Report: b added by grok."
 `, { mode: 0o755 });
-const env = { ...process.env, XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}` };
+// A fake home and projects folder: the guard snapshots HOME and ~/Projects, and the tests must
+// never read or touch the real ones. A quiet fake busctl from the start, so no goal's watcher
+// ever listens to the real session bus (the owner's own notifications).
+const fakeHome = path.join(root, "home"); fs.mkdirSync(path.join(fakeHome, "Projects"), { recursive: true });
+fs.writeFileSync(path.join(bin, "busctl"), "#!/bin/bash\nsleep 30\n", { mode: 0o755 });
+const env = { ...process.env, HOME: fakeHome, SQUAD_PROJECTS: path.join(fakeHome, "Projects"), XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}` };
 const run = (...a) => spawnSync("node", [CLI, ...a], { env, encoding: "utf8" });
 const status = () => JSON.parse(run("status").stdout);
 const until = async (fn, ms = 20000) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
 
 assert.match(run("start", "--dir", repo, "--goal", "").stderr, /goal first/);
+// Never the home folder itself (the panel's fallback when no folder is picked).
+{
+  const r = run("start", "--dir", fakeHome, "--goal", "tidy up");
+  assert.notEqual(r.status, 0); assert.match(r.stderr, /never works in your home folder/);
+  assert.notEqual(run("start", "--dir", root, "--goal", "tidy up").status, 0, "nor anything above it");
+  assert.equal(status().goal, null, "no goal was started");
+}
 assert.equal(run("start", "--dir", repo, "--goal", "add b").status, 0);
 assert.match(run("start", "--dir", repo, "--goal", "other").stderr, /already on a goal/, "one goal at a time");
 assert.ok(await until(() => status().goal.status === "done"), "the goal finishes: " + JSON.stringify(status().goal));
@@ -187,6 +199,8 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
 // strike counted, and the agent is capped to smaller tasks.
 fs.mkdirSync(path.join(repo, ".constance"), { recursive: true });
 fs.writeFileSync(path.join(repo, ".constance", "rules.md"), "Never touch generated files.\n");
+// The owner's own uncommitted note, there before the run: never flagged, never touched.
+fs.writeFileSync(path.join(repo, "owner-notes.txt"), "mine\n");
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 echo "$@" > "${root}/claude-args-guard"
 C="node ${CLI}"
@@ -207,8 +221,12 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   assert.ok(Array.isArray(job7.guardViolation) && job7.guardViolation.some((v) => v.includes("evil.txt")), "the stray file is flagged: " + JSON.stringify(job7.guardViolation));
   assert.equal(gs.guards.grok.strikes, 1, "one strike counted");
   assert.equal(job7.status, "accepted", "she still reviewed and accepted it");
-  assert.ok(!fs.existsSync(path.join(repo, "evil.txt")), "the stray file was cleaned up");
+  assert.ok(fs.existsSync(path.join(repo, "evil.txt")), "the guard never deletes: the stray file is left for the owner");
+  assert.ok(!job7.guardViolation.some((v) => v.includes("owner-notes.txt")), "the owner's earlier work is not blamed on the agent");
+  assert.equal(fs.readFileSync(path.join(repo, "owner-notes.txt"), "utf8"), "mine\n", "the owner's file is untouched");
+  assert.ok(gs.log.some((l) => l.kind === "guard" && /left in place for you to check: evil\.txt/.test(l.text)), "the log says what was left in place");
   assert.ok(fs.existsSync(path.join(repo, "g.txt")), "the allowed commit was left alone");
+  fs.rmSync(path.join(repo, "evil.txt")); fs.rmSync(path.join(repo, "owner-notes.txt"));
   assert.match(fs.readFileSync(path.join(root, "guard.out"), "utf8"), /refused-cap/, "a 4-file job is refused after one strike");
   const kinds = gs.log.map((l) => l.kind);
   assert.ok(kinds.includes("guard"), "a guard event is in the log");
@@ -281,7 +299,18 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
 // The watcher: a fake busctl feeds it real-format Notify blocks. With no job
 // running for the named agent, the notification is logged as the owner's own —
 // noted and left alone — and `signals` shows it.
-fs.writeFileSync(path.join(root, "notify-fixture.txt"), `‣ Type=method_call  Endian=l  Flags=0  Version=1 Cookie=1  Timestamp="x"
+fs.writeFileSync(path.join(root, "notify-fixture.txt"), `‣ Type=method_call  Endian=l  Flags=0  Version=1 Cookie=0  Timestamp="x"
+  Sender=:1.1  Destination=:1.2  Path=/org/freedesktop/Notifications  Interface=org.freedesktop.Notifications  Member=Notify
+  MESSAGE "susssasa{sv}i" {
+          STRING "Slack";
+          UINT32 0;
+          STRING "";
+          STRING "Devin";
+          STRING "done with lunch, ready when you are";
+          INT32 -1;
+  };
+
+‣ Type=method_call  Endian=l  Flags=0  Version=1 Cookie=1  Timestamp="x"
   Sender=:1.1  Destination=:1.2  Path=/org/freedesktop/Notifications  Interface=org.freedesktop.Notifications  Member=Notify
   UniqueName=:1.1
   MESSAGE "susssasa{sv}i" {
@@ -298,7 +327,7 @@ fs.writeFileSync(path.join(root, "notify-fixture.txt"), `‣ Type=method_call  E
   };
 `);
 fs.writeFileSync(path.join(bin, "busctl"), `#!/bin/bash\ncat "${root}/notify-fixture.txt"\nsleep 30\n`, { mode: 0o755 });
-// Kill any real watcher the goals spawned, then start ours against the fake bus.
+// Kill any watcher the goals spawned, then start ours against the fixture bus.
 {
   const wp = path.join(tabs, "constance", "watcher.pid");
   try { const pid = Number(fs.readFileSync(wp, "utf8")); process.kill(pid, "SIGKILL"); } catch {}
@@ -307,15 +336,19 @@ fs.writeFileSync(path.join(bin, "busctl"), `#!/bin/bash\ncat "${root}/notify-fix
 const { spawn } = await import("node:child_process");
 const watcher = spawn("node", [CLI, "watch"], { env, stdio: "ignore" });
 const notifyJsonl = path.join(tabs, "constance", "notify.jsonl");
-assert.ok(await until(() => { try { return fs.readFileSync(notifyJsonl, "utf8").includes("Devin finished"); } catch { return false; } }, 10000), "the watcher recorded the notification");
+assert.ok(await until(() => { try { return fs.readFileSync(notifyJsonl, "utf8").includes('"agent":"devin"'); } catch { return false; } }, 10000), "the watcher recorded the notification");
 watcher.kill("SIGKILL");
 {
   const sig = JSON.parse(run("signals").stdout);
-  const mine = sig.find((s) => s.agent === "devin" && s.summary === "Devin finished");
+  const mine = sig.find((s) => s.agent === "devin");
   assert.ok(mine, "the fake notification was recorded: " + JSON.stringify(sig));
   assert.equal(mine.kind, "foreign", "no job of hers -> the owner's own agent");
-  const slog = status().log.filter((l) => l.kind === "signal").find((l) => /Devin finished/.test(l.text || ""));
+  assert.equal(mine.summary, undefined, "the owner's own run keeps no notification text");
+  const slog = status().log.filter((l) => l.kind === "signal").find((l) => l.agent === "devin");
   assert.ok(slog && /left alone/.test(slog.text), "the signal is in her log: " + JSON.stringify(slog));
+  // The unrelated chat message in the same stream never reached any file.
+  const files = [notifyJsonl, path.join(tabs, "constance", "log.jsonl")].map((f) => fs.readFileSync(f, "utf8")).join("");
+  assert.ok(!/lunch|Slack/.test(files), "an unrelated notification is never written anywhere");
 }
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance: tests passed");

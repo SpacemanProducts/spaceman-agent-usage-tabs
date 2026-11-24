@@ -100,7 +100,8 @@ function sweep() {
 
 // After a delegated run ends, check it stayed inside its guardrails: only its
 // allowed files changed, and the home/projects lists match the pre-run
-// snapshot. A violation restores what can be restored, logs a lesson, counts a
+// snapshot. A violation reverts the run's own bad commit (nothing is ever deleted or
+// moved), reports the rest, logs a lesson, counts a
 // strike (smaller tasks from then on) and marks the job so her review sees it.
 function guardFinished(j) {
   if (!j.guardBefore || j.guardChecked) return;
@@ -109,8 +110,10 @@ function guardFinished(j) {
   if (res.ok) return;
   // Revert the commit only when the commit itself touched disallowed files; a
   // home/projects-only or dirty-leftover violation leaves committed work alone.
-  const commitBad = changedFiles(j.dir, j.commit).some((p) => (res.badPaths || []).includes(p));
-  const did = restoreRun({ dir: j.dir, commit: commitBad ? j.commit : "", badPaths: res.badPaths || [], addedProjects: res.addedProjects || [], projectsDir: res.projectsDir });
+  // Only a commit the guard verified as this run's own is ever reverted.
+  const commitBad = !!res.ownCommit && changedFiles(j.dir, res.ownCommit).some((p) => (res.badPaths || []).includes(p));
+  const did = restoreRun({ dir: j.dir, commit: commitBad ? res.ownCommit : "", badPaths: res.badPaths || [], addedProjects: res.addedProjects || [],
+    addedHome: res.addedHome || [], removedHome: res.removedHome || [], removedProjects: res.removedProjects || [] });
   const lesson = `${j.agent} broke a guardrail on job ${j.id}: ${res.violations.join("; ")}.`;
   addLesson(lesson, store.dir);
   store.update((s) => {
@@ -177,7 +180,7 @@ function handOut({ agent, task, files = [] }) {
   try { fs.rmSync(doneFile(dir, job.id)); } catch {}
   // Snapshot the world before the run: the post-run guard checks the diff and
   // these lists against it.
-  const before = guardSnapshot(ENV);
+  const before = guardSnapshot(ENV, dir);
   store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.guardBefore = before; });
   const logPath = path.join(store.dir, `job-${job.id}.log`);
   const fd = fs.openSync(logPath, "w");
@@ -316,6 +319,11 @@ function startGoal() {
     }
   }
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) fail(`No such folder: ${dir}`);
+  // Never the home folder itself (or anything above it): she and her agents run
+  // with permission prompts skipped, so the project folder is their whole world.
+  const home = path.resolve(process.env.HOME || "/");
+  const real = fs.realpathSync(dir);
+  if (real === home || real === "/" || home.startsWith(real.endsWith("/") ? real : real + "/")) fail("Pick a project folder first: Constance never works in your home folder itself.");
   const res = store.update((s) => {
     if (s.goal && ["running", "paused"].includes(s.goal.status)) return { busy: s.goal };
     s.goal = { id: randomUUID().slice(0, 8), text, dir, status: "running", session: randomUUID(), startedAt: Date.now(), started: false };
@@ -371,11 +379,11 @@ async function watch() {
     const ev = handleNotification(evt, { jobs: store.read().jobs, storeDir: store.dir });
     if (!ev) return;
     if (ev.kind === "agent-done") {
-      store.log({ kind: "signal", job: ev.job, agent: ev.agent, text: `"${ev.summary || ev.body}" — ${ev.inspection}` });
+      store.log({ kind: "signal", job: ev.job, agent: ev.agent, text: `"${ev.summary}" — ${ev.inspection}` });
     } else if (ev.kind === "agent-signal") {
-      store.log({ kind: "signal", agent: ev.agent, text: `"${ev.summary || ev.body}" (still running, no done file)` });
+      store.log({ kind: "signal", agent: ev.agent, text: `"${ev.summary}" (still running, no done file)` });
     } else {
-      store.log({ kind: "signal", agent: ev.agent, text: `"${ev.summary || ev.body}" — finished outside Constance; noted, left alone` });
+      store.log({ kind: "signal", agent: ev.agent, text: "finished outside Constance; noted, left alone" });
     }
   };
   let buf = "";
@@ -392,6 +400,13 @@ async function watch() {
   // flush anyway so the last notification is never stuck in the parser.
   const flush = setInterval(() => { const evt = parser.end(); if (evt) onEvent(evt); }, 2000);
   bus.on("exit", () => { clearInterval(flush); process.exit(0); });
+  // She only listens while she has a goal: once it is done, failed or stopped
+  // the watcher (and its busctl) goes away instead of hearing every desktop
+  // notification forever.
+  setInterval(() => {
+    const g = store.read().goal;
+    if (!g || !["running", "paused"].includes(g.status)) { try { bus.kill("SIGTERM"); } catch {} process.exit(0); }
+  }, 15e3);
   // Keep the event loop alive for the bus stream.
   await new Promise(() => {});
 }

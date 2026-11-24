@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { NotifyParser, notificationsIn, agentInText, matchJob, handleNotification, inspectJobDir, recentSignals, notifyFile } from "./constance-notify.mjs";
+import { NotifyParser, notificationsIn, agentInText, matchJob, handleNotification, inspectJobDir, recentSignals, notifyFile, allowedSender } from "./constance-notify.mjs";
 import { doneFile } from "./constance-jobs.mjs";
 
 // A busctl monitor chunk in the exact shape captured live (method_call Notify
@@ -122,9 +122,34 @@ assert.match(ev.inspection, /git log: /, "the git log is inspected");
 assert.ok(fs.existsSync(notifyFile(stateDir)), "notify.jsonl is written");
 assert.equal(recentSignals(stateDir).length, 1);
 assert.equal(recentSignals(stateDir)[0].agent, "grok");
-// Unrelated notifications never reach the file.
-assert.equal(handleNotification({ app: "Music", summary: "track changed", body: "" }, { jobs, storeDir: stateDir }), null);
-assert.equal(recentSignals(stateDir).length, 1);
+assert.equal(recentSignals(stateDir)[0].body, undefined, "the body is never stored");
+
+// Privacy: the watcher sees every desktop notification. Anything not from a
+// terminal or an agent CLI is dropped unread, even when it names an agent and
+// sounds finished — chat from a person called Devin, mail about Claude, a
+// browser tab, this plugin's own alerts.
+const unrelated = [
+  { app: "Music", summary: "track changed", body: "" },
+  { app: "Slack", summary: "Devin", body: "done with the contract, ready to sign" },
+  { app: "Thunderbird", summary: "Your Claude receipt", body: "payment complete" },
+  { app: "Google Chrome", summary: "Gmail", body: "Grok finished the report you asked for" },
+  { app: "Cook Meter", summary: "Claude just reset", body: "Session is ready, go cook." },
+  { app: "Signal", summary: "Cursor", body: "finished!" },
+];
+for (const n of unrelated) {
+  assert.equal(allowedSender(n.app), false, n.app);
+  assert.equal(handleNotification(n, { jobs, storeDir: stateDir }), null, `${n.app} is ignored`);
+}
+assert.equal(recentSignals(stateDir).length, 1, "nothing unrelated reached notify.jsonl");
+assert.ok(!/contract|receipt|Gmail|reset|Signal/.test(fs.readFileSync(notifyFile(stateDir), "utf8")), "no unrelated text on disk");
+// Terminal and agent-CLI senders are heard.
+assert.ok(allowedSender("Ghostty") && allowedSender("com.mitchellh.ghostty") && allowedSender("Claude Code") && allowedSender("codex"));
+// The owner's own run (no job of hers) keeps no text at all, and only "finished" news counts.
+const own = handleNotification({ app: "Ghostty", summary: "Codex finished", body: "secret project details" }, { jobs, storeDir: stateDir });
+assert.deepEqual(Object.keys(own).sort(), ["agent", "at", "kind"]);
+assert.equal(own.agent, "codex"); assert.equal(own.kind, "foreign");
+assert.equal(handleNotification({ app: "Ghostty", summary: "Codex", body: "waiting for input" }, { jobs, storeDir: stateDir }), null, "a non-finish foreign signal is dropped");
+assert.ok(!/secret project/.test(fs.readFileSync(notifyFile(stateDir), "utf8")), "foreign notification text is never stored");
 
 // inspectJobDir on a clean repo.
 const info = inspectJobDir(repo, 99);
