@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.33.4 - 2026-11-23
+- **Dragging a tab into first spot selects it:** the first tab is the default agent, but a reorder left the panel showing the previously selected agent's limits until it was clicked. A drop that changes which tab is first now selects the new first tab right away, so the details and the top bar switch with the order; drops that leave the first tab alone keep the current selection.
+
 ## 1.33.3 - 2026-11-23
 - **The bar mirrors the tab chip, and the percent sits right:** the percentage is drawn by the button's built-in label again, so it gets the same spacing, centering and vertical alignment as before — "100%" no longer overlaps the neighbouring icon. Colors now mirror the chip exactly: the percentage and the button's active state (its underline) take the chip's outside-border color (the session tint) and the robot takes the chip's inside color (the weekly tint), both through the chip's own `tintFor` rule so unsure readings never go green. The robot no longer uses the theme's `urgent` color for the angry state — on themes where urgent isn't red (e.g. Hackerman's green) a maxed-out agent showed a green robot; it now shows the weekly tint, which is red at 100%.
 

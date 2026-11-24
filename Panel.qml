@@ -203,7 +203,13 @@ Panel {
   // Dragging a chip onto another one's place: reorder the visible tabs, hidden ones keep their slots.
   function dropTab(id, toVisibleIndex) {
     var vis = agents.map(function(a) { return a.id })
-    saveOrder(TabOrder.mergeVisible(allIds(), TabOrder.moveTo(vis, id, toVisibleIndex)))
+    var before = agents.length > 0 ? agents[0].id : ""
+    var after = TabOrder.moveTo(vis, id, toVisibleIndex)
+    saveOrder(TabOrder.mergeVisible(allIds(), after))
+    // A drop into the first spot makes that tab the default agent: select it
+    // right away so the details and the bar switch with the order.
+    var sel = TabOrder.selectAfterDrop(before, after)
+    if (sel !== "") selectedId = sel
   }
 
   // ---- The first tab is Omarchy's default agent (so the shortcut and right-click start it).

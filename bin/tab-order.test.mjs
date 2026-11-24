@@ -16,4 +16,9 @@ assert.deepEqual(j(ctx.moveTo(DEF, "copilot", 0)), ["copilot", "claude", "antigr
 assert.deepEqual(j(ctx.moveTo(DEF, "claude", 2)), ["antigravity", "grok", "claude", "codex", "copilot"]);
 // hidden tabs keep their slots when the visible ones are reordered
 assert.deepEqual(j(ctx.mergeVisible(["claude", "antigravity", "grok", "codex"], ["grok", "claude", "codex"])), ["grok", "antigravity", "claude", "codex"]);
+// A drop that changes the first tab selects the new default; other drops keep the selection.
+assert.equal(ctx.selectAfterDrop("claude", ["antigravity", "claude", "grok"]), "antigravity", "dragged into first spot -> select it");
+assert.equal(ctx.selectAfterDrop("claude", ["grok", "claude", "antigravity"]), "grok", "first tab dragged away -> select the new first");
+assert.equal(ctx.selectAfterDrop("antigravity", ["antigravity", "grok", "claude"]), "", "first unchanged -> keep selection");
+assert.equal(ctx.selectAfterDrop("claude", []), "", "no tabs -> nothing to select");
 console.log("tab-order: all tests passed");

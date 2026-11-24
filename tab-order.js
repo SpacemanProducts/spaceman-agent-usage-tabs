@@ -29,3 +29,10 @@ function mergeVisible(allOrder, newVisible) {
   newVisible.forEach(function(id) { vis[id] = true })
   return allOrder.map(function(id) { return vis[id] ? newVisible[k++] : id })
 }
+// A drop that changes which tab is first also changes the default agent, so the
+// panel selects the new first tab. Returns its id, or "" when the first tab is
+// unchanged (the selection stays where it is).
+function selectAfterDrop(firstBefore, newVisibleOrder) {
+  var first = newVisibleOrder.length > 0 ? newVisibleOrder[0] : ""
+  return first !== "" && first !== firstBefore ? first : ""
+}
