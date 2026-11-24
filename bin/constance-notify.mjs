@@ -127,6 +127,51 @@ export function allowedSender(app) {
 
 const clip = (s, n) => (String(s || "").length > n ? String(s).slice(0, n - 1) + "…" : String(s || ""));
 
+// Her own headless jobs write to a <job-id>.log in the store dir instead of a
+// terminal, so Ghostty never raises a notification for them and the bus snoop
+// never hears a finish. The log is the finish signal: only the tail matters —
+// a job log can be megabytes — and "finished" is either finish-sounding words
+// or a line naming the done file the worker was told to write.
+export function logSaysFinished(text) {
+  try {
+    const tail = String(text ?? "").slice(-4096);
+    if (!tail) return false;
+    if (FINISHED.test(tail)) return true;
+    return tail.split("\n").some((l) => l.includes(".constance/done-"));
+  } catch { return false; }
+}
+
+// The same event shape matchJob/handleNotification produce for a bus
+// notification, but sourced from the job itself (its exit, its log tail, or
+// the done file appearing) rather than a desktop notification. Never carries
+// log text or notification bodies — only the clipped job summary.
+export function jobFinishSignal(job, { source, runDir } = {}) {
+  return {
+    at: Date.now(),
+    agent: job.agent,
+    kind: "agent-done",
+    source,
+    job: job.id,
+    dir: runDir,
+    summary: clip(job.summary, 120),
+    inspection: runDir ? inspectJobDir(runDir, job.id) : "no run dir",
+  };
+}
+
+// Append one signal to notify.jsonl, the same record handleNotification
+// writes. A signal for a job id already on file is a duplicate — the job's
+// exit, log and done file can all report the same finish — so it is skipped.
+// Events without a job id (foreign/owner runs) have nothing to dedupe on.
+export function recordSignal(storeDir, ev) {
+  if (!storeDir) return false;
+  if (ev && ev.job != null) {
+    for (const old of recentSignals(storeDir, Infinity)) {
+      if (old && old.job === ev.job) return false;
+    }
+  }
+  try { fs.appendFileSync(notifyFile(storeDir), JSON.stringify(ev) + "\n"); return true; } catch { return false; }
+}
+
 // One notification -> record it, log what matters, return the event (null for
 // unrelated notifications so they never reach her log or any file).
 // What is kept is minimal: a signal for one of her running jobs keeps a clipped
@@ -147,9 +192,7 @@ export function handleNotification({ app = "", summary = "", body = "" }, { jobs
     if (m.ambiguous) ev.note = "several jobs for this agent were running; matched the newest";
     if (m.kind === "agent-done") ev.inspection = inspectJobDir(m.dir, m.job);
   }
-  if (storeDir) {
-    try { fs.appendFileSync(notifyFile(storeDir), JSON.stringify(ev) + "\n"); } catch {}
-  }
+  recordSignal(storeDir, ev);
   return ev;
 }
 

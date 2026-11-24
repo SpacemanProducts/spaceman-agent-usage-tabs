@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { NotifyParser, notificationsIn, agentInText, matchJob, handleNotification, inspectJobDir, recentSignals, notifyFile, allowedSender } from "./constance-notify.mjs";
+import { NotifyParser, notificationsIn, agentInText, matchJob, handleNotification, inspectJobDir, recentSignals, notifyFile, allowedSender, logSaysFinished, jobFinishSignal, recordSignal } from "./constance-notify.mjs";
 import { doneFile } from "./constance-jobs.mjs";
 
 // A busctl monitor chunk in the exact shape captured live (method_call Notify
@@ -170,6 +170,59 @@ assert.ok(!/secret project/.test(fs.readFileSync(notifyFile(stateDir), "utf8")),
 const info = inspectJobDir(repo, 99);
 assert.match(info, /no done file yet/);
 assert.match(info, /worktree clean|uncommitted/);
+
+// logSaysFinished: her headless jobs' <id>.log tails are the finish signal.
+assert.equal(logSaysFinished(""), false);
+assert.equal(logSaysFinished(undefined), false);
+assert.equal(logSaysFinished(null), false);
+assert.equal(logSaysFinished("still working on the refactor\nno news"), false);
+assert.equal(logSaysFinished("all tests passed\nGrok finished the task"), true);
+assert.equal(logSaysFinished("wrote .constance/done-7.json and stopped"), true, "a done-file mention counts as finished");
+assert.equal(logSaysFinished(`pad\n${"x".repeat(5000)}\nfinished`), true, "only the last ~4 KB is read");
+assert.equal(logSaysFinished(`finished\n${"x".repeat(5000)}\nstill going`), false, "a finish word outside the tail does not count");
+assert.equal(logSaysFinished(42), false, "never throws on odd input");
+
+// jobFinishSignal: same record shape as a matched agent-done notification,
+// for each finish source (exit, log, done-file). No log text or bodies.
+{
+  const job = { id: 11, agent: "grok", summary: "s".repeat(200) };
+  for (const source of ["exit", "log", "done-file"]) {
+    const sig = jobFinishSignal(job, { source, runDir: repo });
+    assert.equal(sig.agent, "grok");
+    assert.equal(sig.kind, "agent-done");
+    assert.equal(sig.source, source);
+    assert.equal(sig.job, 11);
+    assert.equal(sig.dir, repo);
+    assert.equal(sig.summary.length, 120, "summary is clipped like notification summaries");
+    assert.match(sig.inspection, /no done file yet|done file present/);
+    assert.equal(sig.body, undefined, "no notification body is ever carried");
+    assert.equal(sig.log, undefined, "no log text is ever carried");
+  }
+  const noDir = jobFinishSignal({ id: 12, agent: "devin" }, { source: "exit" });
+  assert.equal(noDir.inspection, "no run dir");
+  assert.equal(noDir.summary, "");
+}
+
+// recordSignal: appends like handleNotification, dedupes on job id, and
+// recentSignals reads it back.
+{
+  const sigDir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-sig-"));
+  const sig = jobFinishSignal({ id: 21, agent: "devin", summary: "did the thing" }, { source: "exit", runDir: repo });
+  assert.equal(recordSignal(sigDir, sig), true, "first write succeeds");
+  assert.equal(recordSignal(sigDir, { ...sig, source: "log" }), false, "same job id is a duplicate");
+  assert.equal(recordSignal(sigDir, jobFinishSignal({ id: 22, agent: "grok", summary: "other" }, { source: "done-file", runDir: repo })), true, "a different job writes");
+  const foreign = { at: Date.now(), agent: "codex", kind: "foreign" };
+  assert.equal(recordSignal(sigDir, foreign), true);
+  assert.equal(recordSignal(sigDir, { ...foreign, at: Date.now() + 1 }), true, "events without a job id are not deduped");
+  const sigs = recentSignals(sigDir);
+  assert.equal(sigs.length, 4);
+  assert.equal(sigs[0].job, 21);
+  assert.equal(sigs[0].source, "exit");
+  assert.equal(sigs[1].job, 22);
+  assert.equal(sigs[2].kind, "foreign");
+  assert.ok(!/did the thing/.test(JSON.stringify(sigs[2])), "foreign events keep no text");
+  fs.rmSync(sigDir, { recursive: true, force: true });
+}
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance-notify: tests passed");
