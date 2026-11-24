@@ -1,1 +1,4 @@
 AGENTS.md
+.constance/
+*.log
+handoff/
