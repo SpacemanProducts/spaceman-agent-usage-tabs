@@ -180,10 +180,13 @@ function guardFinished(j) {
   store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.guardChecked = true; });
   // Concurrent jobs share the folder and its git history, and the guard sees
   // every commit since the snapshot: work another overlapping job was allowed
-  // to do is that job's, never this one's violation.
+  // to do is that job's, never this one's violation. A job with its own
+  // worktree (a copy) is never excused and never excuses: its history is all
+  // its own, and its commits only reach the shared repo when its branch merges.
   const jStart = j.startedAt || 0, jEnd = j.finishedAt || Date.now();
-  const others = store.read().jobs.filter((k) => k.id !== j.id && k.startedAt && runDir(k) === dir &&
-    k.startedAt <= jEnd && jStart <= (k.finishedAt || Infinity));
+  const hasWorktree = (k) => !!(k.worktree || k.branch);
+  const others = hasWorktree(j) ? [] : store.read().jobs.filter((k) => k.id !== j.id && k.startedAt && runDir(k) === dir &&
+    !hasWorktree(k) && k.startedAt <= jEnd && jStart <= (k.finishedAt || Infinity));
   const allowed = (k) => [...(k.files || []), ".constance/"];
   const excusedCommits = new Set(), excusedPaths = new Set();
   for (const c of res.badCommits || []) {

@@ -77,6 +77,7 @@ while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-x.txt}
 before=$(git rev-parse HEAD)
 echo "devin $name" > "$name"; git add "$name"; git commit -qm "devin: $name" || true
+if grep -q "sneaky copy" <<<"$p"; then echo cover > cover.txt; git add cover.txt; git commit -qm "devin: cover outside its list" || true; fi
 after=$(git rev-parse HEAD); c=""; [[ "$after" != "$before" ]] && c="$after"
 echo "{\\"summary\\": \\"added \${name%.*} in $here\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]}" > "$f"
 `, { mode: 0o755 });
@@ -786,6 +787,41 @@ echo "Report: done."
   assert.match(sb.now, /^Free\. Last goal finished\.$/);
   assert.match(run("goals", "next").stderr, /empty/);
   assert.deepEqual(fs.readFileSync(path.join(root, "queue-goals.txt"), "utf8").trim().split("\n").map((l) => l.replace(/^Goal from the owner: /, "")), ["build q1", "ask owner", "third goal, edited"]);
+}
+// A copy job's own worktree means no excuses: the fake devin commits cover.txt
+// outside its list while a shared-folder grok job's file list covers that same
+// file — overlapping in time — and the copy is still flagged. The grok job,
+// which stayed inside its list, is clean.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files d1.txt --task "sneaky copy: also commit cover.txt" >> "${root}/copyguard.out" 2>&1
+$C delegate --agent grok --files cover.txt --task "add cover" >> "${root}/copyguard.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/cg-wait1.json"
+$C wait --timeout 60 > "${root}/cg-wait2.json"
+$C jobs > "${root}/cg-jobs.json"
+did=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.agent==="devin"&&j.files.includes("d1.txt")).id)' "${root}/cg-jobs.json")
+gid=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.agent==="grok"&&j.files.includes("cover.txt")).id)' "${root}/cg-jobs.json")
+$C review "$did" send-back --note "strayed outside its list" >> "${root}/copyguard.out" 2>&1
+$C review "$gid" accept --note "cover is fine" >> "${root}/copyguard.out" 2>&1
+echo "Copy guard report: the copy's stray commit was flagged."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "copy guard goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the copy guard goal finishes: " + JSON.stringify(status().goal));
+{
+  const cg = status();
+  const dj = cg.jobs.find((j) => j.agent === "devin" && j.files.includes("d1.txt") && j.goal === cg.goal.id);
+  const gj = cg.jobs.find((j) => j.agent === "grok" && j.files.includes("cover.txt") && j.goal === cg.goal.id);
+  assert.ok(dj && gj, "both jobs ran: " + JSON.stringify(cg.jobs.map((j) => [j.id, j.agent, j.task, j.status])));
+  assert.ok(dj.copy && dj.branch, "the devin job was a copy with its own worktree");
+  assert.ok(dj.guardViolation && dj.guardViolation.some((v) => v.includes("cover.txt")),
+    "the copy's out-of-list commit is flagged even though the grok job's list covers it: " + JSON.stringify(dj.guardViolation));
+  assert.ok(!gj.guardViolation, "the shared-folder job stayed inside its list");
+  assert.equal(gj.status, "accepted");
+  assert.equal(dj.status, "sent back");
+  assert.equal(fs.readFileSync(path.join(repo, "cover.txt"), "utf8"), "x\n", "only the grok job's cover.txt is in the repo");
 }
 // Every finished or stopped job removed its own sandbox /tmp.
 {
