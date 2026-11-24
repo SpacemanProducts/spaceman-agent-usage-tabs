@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.30.0 - 2026-11-23
+- **Start launches agents with permission prompts off:** the default agent gets its own skip-permissions flag (Claude `--dangerously-skip-permissions`, Copilot `--allow-all`, Devin `--permission-mode dangerous`, Cursor `--yolo --trust`, Grok `bypassPermissions`, Codex `--dangerously-bypass-approvals-and-sandbox`, Antigravity `--dangerously-skip-permissions`, OpenCode `--auto`, Kimi `--auto`, Kiro `chat --trust-all-tools --trust-workspace`, Amp `--dangerously-allow-all`, Qwen `--yolo`, DeepSeek Harness `DSH_PERMISSION_MODE=danger-full-access`). A new "Skip permission prompts" switch in Settings (on by default) turns them all off, and the Start button shows a "no prompts" mark while it's on. Agents without a known flag still go through `omarchy-agent` unchanged.
+
 ## 1.29.2 - 2026-11-23
 - The agent detail usage line gets a fixed height and hides when empty, so it no longer leaves a blank gap.
 

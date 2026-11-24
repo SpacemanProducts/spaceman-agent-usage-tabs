@@ -142,6 +142,9 @@ Panel {
   Timer { id: testAngryTimer; interval: 8000; onTriggered: root.testAngry = false }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
+  // Start launches the default agent with its skip-permissions flag (on by default).
+  readonly property bool skipPermissions: userSettings.skipPermissions !== undefined
+    ? userSettings.skipPermissions !== false : root.setting("skipPermissions", true) !== false
   // Settings (the gear), + (add an account), >_ (start the default agent) and CS (Claude Squad) each open as their own screen: the chips and usage are
   // hidden and the header has a Back button. Only one is open at a time.
   readonly property bool subView: squadOpen || addOpen || settingsOpen || agentHereOpen
@@ -1914,15 +1917,26 @@ Panel {
               radius: Style.cornerRadius
               opacity: ready ? 1 : 0.4
               color: startArea.containsMouse && ready ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
-              Text {
-                id: startLabel
+              Column {
                 anchors.centerIn: parent
-                textFormat: Text.PlainText
-                text: (root.agentHereStarting ? "Starting " : "Start ") + root.defaultAgentName
-                color: Color.accent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
+                spacing: 0
+                Text {
+                  id: startLabel
+                  textFormat: Text.PlainText
+                  text: (root.agentHereStarting ? "Starting " : "Start ") + root.defaultAgentName
+                  color: Color.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+                Text {
+                  visible: root.skipPermissions
+                  textFormat: Text.PlainText
+                  text: "no prompts"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
               }
               MouseArea { id: startArea; anchors.fill: parent; enabled: startTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.launchAgentHere() }
               PanelToolTip { visible: startArea.containsMouse; text: "Opens the default agent in a tiled terminal in this folder"; fontFamily: root.fontFamily }
@@ -2284,6 +2298,14 @@ Panel {
             visible: root.settingsOpen
             width: parent.width
             spacing: Style.space(8)
+
+            PanelSectionHeader { width: parent.width; text: "START" }
+            SettingSwitch {
+              width: parent.width
+              label: "Skip permission prompts"
+              checked: root.skipPermissions
+              onToggled: root.writeSetting(["skipPermissions", String(!root.skipPermissions)])
+            }
 
             PanelSectionHeader { width: parent.width; text: "DISPLAY" }
             SettingSwitch {

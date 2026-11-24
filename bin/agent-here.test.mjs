@@ -59,5 +59,39 @@ assert.match(qml, /squadRepos\.indexOf\(squadRepo\) >= 0 \|\| folderPickerByFold
 const picks = fs.readFileSync(path.join(home, ".local/state/omarchy/agent-usage-tabs/start-picks"), "utf8").trim().split("\n");
 assert.ok(picks.includes(plain), "a folder started from the picker is remembered even without git");
 assert.ok(!picks.includes(home), "the home-folder entry is not remembered as a pick");
+
+// With a default agent set, Start launches it directly with its skip-permissions flag (on by default).
+const defaultsDir = path.join(home, ".config", "omarchy", "defaults");
+fs.mkdirSync(defaultsDir, { recursive: true });
+fs.writeFileSync(path.join(bin, "claude"), '#!/bin/bash\necho "claude $* in $PWD"\n', { mode: 0o755 });
+fs.writeFileSync(path.join(bin, "kiro-cli"), '#!/bin/bash\necho "kiro-cli $* in $PWD"\n', { mode: 0o755 });
+fs.writeFileSync(path.join(defaultsDir, "agent"), "claude\n");
+r = run({ AGENT_DIR: path.join(proj, "alpha") });
+assert.equal(r.stdout.trim(), `claude --dangerously-skip-permissions in ${real(path.join(proj, "alpha"))}`, r.stdout + r.stderr);
+
+// The settings.json toggle turns the flags off: the agent launches bare.
+const settingsDir = path.join(home, ".local", "state", "omarchy", "agent-usage-tabs");
+fs.mkdirSync(settingsDir, { recursive: true });
+fs.writeFileSync(path.join(settingsDir, "settings.json"), JSON.stringify({ skipPermissions: false }));
+r = run({ AGENT_DIR: path.join(proj, "alpha") });
+assert.equal(r.stdout.trim().replace(/ +/g, " "), `claude in ${real(path.join(proj, "alpha"))}`, "skipPermissions=false launches with no flags");
+fs.writeFileSync(path.join(settingsDir, "settings.json"), JSON.stringify({ skipPermissions: true }));
+r = run({ AGENT_DIR: path.join(proj, "alpha") });
+assert.equal(r.stdout.trim(), `claude --dangerously-skip-permissions in ${real(path.join(proj, "alpha"))}`, "skipPermissions=true restores the flag");
+
+// Agents with a required subcommand keep it; kiro-cli launches `chat` with its trust flags.
+fs.writeFileSync(path.join(defaultsDir, "agent"), "kiro-cli\n");
+r = run({ AGENT_DIR: path.join(proj, "alpha") });
+assert.equal(r.stdout.trim(), `kiro-cli chat --trust-all-tools --trust-workspace in ${real(path.join(proj, "alpha"))}`, r.stdout + r.stderr);
+
+// An agent the plugin doesn't know still goes through omarchy-agent unchanged.
+fs.writeFileSync(path.join(defaultsDir, "agent"), "mcode\n");
+r = run({ AGENT_DIR: path.join(proj, "alpha") });
+assert.equal(r.stdout.trim(), `agent --inline --pick in ${real(path.join(proj, "alpha"))}`, "unknown agents keep the omarchy-agent path");
+
+// The panel exposes the toggle and marks the Start button while it is on.
+assert.match(qml, /skipPermissions: userSettings\.skipPermissions !== undefined/, "the panel reads the skipPermissions setting");
+assert.match(qml, /writeSetting\(\["skipPermissions", String\(!root\.skipPermissions\)\]\)/, "the settings switch writes skipPermissions");
+assert.match(qml, /visible: root\.skipPermissions[\s\S]*?text: "no prompts"/, "the Start button shows the no-prompts mark");
 fs.rmSync(tmp, { recursive: true });
 console.log("agent-here: all tests passed");

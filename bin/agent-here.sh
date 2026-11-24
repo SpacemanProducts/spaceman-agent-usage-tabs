@@ -28,5 +28,80 @@ if is_repo "$dir"; then
 fi
 
 cd "$dir" || { echo "Couldn't open $dir"; pause; exit 1; }
+
+# Skip-permission flags, verified against each agent's own --help. The panel's
+# skipPermissions setting (settings.json, on by default) decides whether they
+# are added; off launches the agent bare, so its own prompts come back.
+agent_base_args() {
+  case "$1" in
+    kiro-cli) echo "chat" ;;
+    dsh) echo "web" ;;
+    *) echo "" ;;
+  esac
+}
+agent_skip_args() {
+  case "$1" in
+    claude) echo "--dangerously-skip-permissions" ;;
+    copilot) echo "--allow-all" ;;
+    agy|antigravity) echo "--dangerously-skip-permissions" ;;
+    codex) echo "--dangerously-bypass-approvals-and-sandbox" ;;
+    cursor-agent) echo "--yolo --trust" ;;
+    grok) echo "--permission-mode bypassPermissions" ;;
+    devin) echo "--permission-mode dangerous --respect-workspace-trust false" ;;
+    opencode) echo "--auto" ;;
+    kimi) echo "--auto" ;;
+    kiro-cli) echo "--trust-all-tools --trust-workspace" ;;
+    amp) echo "--dangerously-allow-all" ;;
+    qwen) echo "--yolo" ;;
+    dsh) echo "" ;;
+    *) echo "" ;;
+  esac
+}
+agent_known() {
+  case "$1" in
+    claude|copilot|agy|antigravity|codex|cursor-agent|grok|devin|opencode|kimi|kiro-cli|amp|qwen|dsh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+settings_json="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agent-usage-tabs/settings.json"
+skip_on=1
+if [[ -f $settings_json ]]; then
+  skip_on=$(python3 -c 'import json,sys
+try: v=json.load(open(sys.argv[1])).get("skipPermissions")
+except Exception: v=None
+print("0" if v is False else "1")' "$settings_json" 2>/dev/null || echo 1)
+fi
+
+agent=$(omarchy-default-agent 2>/dev/null || true)
+if [[ -n $agent ]] && agent_known "$agent" && ! omarchy-cmd-missing "$agent" 2>/dev/null; then
+  # Same account pinning omarchy-agent applies for these three (a new session
+  # uses the current selection rather than its parent's account pin).
+  account_env=()
+  case "$agent" in
+    claude) home_env="CLAUDE_CONFIG_DIR" ;;
+    codex) home_env="CODEX_HOME" ;;
+    grok) home_env="GROK_HOME" ;;
+    *) home_env="" ;;
+  esac
+  if [[ -n $home_env ]]; then
+    account_pin="OMARCHY_AGENT_${agent^^}_HOME"
+    if [[ -v $account_pin && ${!home_env:-} == "${!account_pin}" ]]; then unset "$home_env"; fi
+    unset "$account_pin"
+    if [[ -z ${!home_env:-} ]]; then
+      home=$(omarchy-agent-account-home "$agent" 2>/dev/null || true)
+      account_env=(env -u "$home_env" "OMARCHY_AGENT_${agent^^}_HOME=$home")
+      [[ -n $home ]] && account_env+=("$home_env=$home")
+    fi
+  fi
+  base=(); skip=()
+  [[ -n $(agent_base_args "$agent") ]] && read -ra base <<< "$(agent_base_args "$agent")"
+  if [[ $skip_on == 1 && -n $(agent_skip_args "$agent") ]]; then
+    read -ra skip <<< "$(agent_skip_args "$agent")"
+    [[ $agent == dsh ]] && account_env=(env "DSH_PERMISSION_MODE=danger-full-access" "${account_env[@]}")
+  fi
+  exec "${account_env[@]}" "$agent" "${base[@]}" "${skip[@]}"
+fi
+
 # --inline: this terminal is the agent's window. --pick: with no default agent set, offer the choice instead of an error.
 exec omarchy-agent --inline --pick
