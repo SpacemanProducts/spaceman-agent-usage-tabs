@@ -101,7 +101,7 @@ Panel {
     var shown = false
     for (var i = 0; i < agents.length; i++) if (agents[i].id === id) shown = true
     if (!shown) return                               // that tab is hidden: respect it
-    selectedId = id; daysOpen = false; modelsExpanded = false; settingsOpen = false
+    selectedId = id; daysOpen = false; modelsExpanded = false; settingsOpen = false; welcomeOpen = false
     if (opened) return                               // the user's own panel: leave it open
     autoOpened = true
     open()
@@ -145,11 +145,23 @@ Panel {
   // Start launches the default agent with its skip-permissions flag (on by default).
   readonly property bool skipPermissions: userSettings.skipPermissions !== undefined
     ? userSettings.skipPermissions !== false : root.setting("skipPermissions", true) !== false
-  // Settings (the gear), + (add an account), >_ (start the default agent) and CS (Claude Squad) each open as their own screen: the chips and usage are
-  // hidden and the header has a Back button. Only one is open at a time.
-  readonly property bool subView: squadOpen || addOpen || settingsOpen || agentHereOpen || constanceOpen
-  function leaveSubView() { squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false }
-  function openSettings() { settingsOpen = true; squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false }
+  // Settings (the gear), + (add an account), >_ (start the default agent), CS (Claude Squad), C (Constance)
+  // and the first-run welcome each open as their own screen: the chips and usage are hidden and the header has a
+  // Back button. Only one is open at a time.
+  property bool welcomeOpen: false
+  property bool settingsLoaded: false
+  readonly property bool subView: squadOpen || addOpen || settingsOpen || agentHereOpen || constanceOpen || welcomeOpen
+  function leaveSubView() { squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false }
+  function openSettings() { settingsOpen = true; squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false }
+  // The welcome screen opens on the first panel open after install (and again on later opens until its
+  // "Got it" button writes welcomeDismissed). Auto-opened reset panels never trigger it.
+  function maybeShowWelcome() {
+    if (!settingsLoaded || userSettings.welcomeDismissed === true) return
+    if (!opened || autoOpened || subView) return
+    squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false
+    welcomeOpen = true
+  }
+  function dismissWelcome() { writeSetting(["welcomeDismissed", "true"]); welcomeOpen = false }
   readonly property bool showDetail: !!agent && !settingsOpen && !subView
   // An agent with two or more accounts lists each one instead of a single set of limits.
   readonly property bool hasAccounts: !!agent && Array.isArray(agent.accounts) && agent.accounts.length > 1
@@ -311,7 +323,7 @@ Panel {
     if (!s || Number(s.at) !== at || Number(s.playedAt) === at) return
     if (!fromClick && (!opened || detectedSurpriseAt !== at || !detectedSurpriseWhileOpen)) return
     selectedId = "antigravity"
-    daysOpen = false; modelsExpanded = false; settingsOpen = false
+    daysOpen = false; modelsExpanded = false; settingsOpen = false; welcomeOpen = false
     if (fromClick && !opened) {
       autoOpened = true
       open()
@@ -444,6 +456,7 @@ Panel {
     daysOpen = false
     modelsExpanded = false
     settingsOpen = false
+    welcomeOpen = false
   }
 
   // Header buttons, as in the stock panel's hero corner.
@@ -453,7 +466,7 @@ Panel {
   // add-account flow for it in a terminal. (It used to jump straight to the selected tab's provider.)
   property bool addOpen: false
   readonly property var addProviders: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "grok", name: "Grok" }]
-  function toggleAdd() { addOpen = !addOpen; if (addOpen) { squadOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false } }
+  function toggleAdd() { addOpen = !addOpen; if (addOpen) { squadOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false } }
   function addSubscription(provider) {
     if (!root.bar || !provider) return
     root.bar.run("omarchy-launch-floating-terminal-with-presentation bash " + pluginDir + "/bin/add-account.sh " + provider)
@@ -625,7 +638,7 @@ Panel {
   function toggleAgentHere() {
     agentHereOpen = !agentHereOpen
     if (agentHereOpen) {
-      squadOpen = false; addOpen = false; settingsOpen = false; constanceOpen = false
+      squadOpen = false; addOpen = false; settingsOpen = false; constanceOpen = false; welcomeOpen = false
       squadRepo = ""; squadNewName = ""
       if (!repoLister.running) repoLister.running = true
       if (!zenityCheck.running) zenityCheck.running = true
@@ -843,7 +856,7 @@ Panel {
   }
   function toggleSquad() {
     squadOpen = !squadOpen
-    if (squadOpen) { addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false }
+    if (squadOpen) { addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false }
     if (squadOpen) {
       squadRepo = ""; squadNewName = ""
       if (!repoLister.running) repoLister.running = true
@@ -905,7 +918,7 @@ Panel {
   function toggleConstance() {
     constanceOpen = !constanceOpen
     if (constanceOpen) {
-      squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false
+      squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; welcomeOpen = false
       constanceError = ""
       if (!repoLister.running) repoLister.running = true
       if (!zenityCheck.running) zenityCheck.running = true
@@ -1063,13 +1076,14 @@ Panel {
     onTriggered: if (root.autoOpened && root.opened) root.close()
   }
 
-  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false } else {
+  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false; settingsLoaded = false } else {
     daysOpen = false
     modelsExpanded = false
     settingsOpen = false
     nowMs = Date.now()
     refreshNow()
     Qt.callLater(function() { if (!root.autoOpened) keyCatcher.forceActiveFocus() })
+    Qt.callLater(root.maybeShowWelcome)
   }
 
   // ------------------------------------------------------------------ data
@@ -1130,8 +1144,10 @@ Panel {
     onLoaded: {
       try { var d = JSON.parse(String(text() || "")); root.userSettings = d && typeof d === "object" && !Array.isArray(d) ? d : ({}); root.pendingOrder = null }
       catch (e) { root.userSettings = ({}) }
+      root.settingsLoaded = true
+      Qt.callLater(root.maybeShowWelcome)
     }
-    onLoadFailed: root.userSettings = ({})
+    onLoadFailed: { root.userSettings = ({}); root.settingsLoaded = true; Qt.callLater(root.maybeShowWelcome) }
   }
 
   Process {
@@ -1215,7 +1231,7 @@ Panel {
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
     // Test hook: show exactly one screen: "main", "settings", "add", "squad" or "agent" (used to retake the README screenshots).
-    function view(name: string): string { root.leaveSubView(); if (name === "settings") root.openSettings(); else if (name === "add") root.toggleAdd(); else if (name === "squad") root.toggleSquad(); else if (name === "agent") root.toggleAgentHere(); else if (name === "constance") root.toggleConstance(); return name }
+    function view(name: string): string { root.leaveSubView(); if (name === "settings") root.openSettings(); else if (name === "add") root.toggleAdd(); else if (name === "squad") root.toggleSquad(); else if (name === "agent") root.toggleAgentHere(); else if (name === "constance") root.toggleConstance(); else if (name === "welcome") root.welcomeOpen = true; return name }
     function settings(): string { if (root.settingsOpen) root.settingsOpen = false; else root.openSettings(); return root.settingsOpen ? "open" : "closed" }
     // Test hook: show the picker as if cs were missing (or present) without running the check.
     function squadPreview(state: string): string { root.squadOpen = true; root.squadHasCs = state; return state }
@@ -1950,7 +1966,7 @@ Panel {
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
-                text: root.addOpen ? "Add an account" : (root.settingsOpen ? "Settings" : (root.agentHereOpen ? "Start " + root.defaultAgentName : (root.constanceOpen ? "Constance" : "Claude Squad")))
+                text: root.welcomeOpen ? "Welcome" : (root.addOpen ? "Add an account" : (root.settingsOpen ? "Settings" : (root.agentHereOpen ? "Start " + root.defaultAgentName : (root.constanceOpen ? "Constance" : "Claude Squad"))))
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -2793,6 +2809,98 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
               font.bold: true
+            }
+          }
+
+          // ---------------- Welcome view: the first-run screen, three tips and a dismiss button.
+          // Shows on the first panel open after install until "Got it" writes welcomeDismissed.
+          Column {
+            id: welcomeView
+            visible: root.welcomeOpen
+            width: parent.width
+            spacing: Style.space(14)
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+              Text {
+                textFormat: Text.PlainText
+                text: "Cook Meter watches your AI coding agents so you know exactly when you can go cook."
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                wrapMode: Text.WordWrap
+                width: parent.width
+              }
+              Text {
+                textFormat: Text.PlainText
+                text: "Three things worth knowing:"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+            Repeater {
+              model: [
+                { n: "1", t: "One glance is enough — the bar number and each tab's chip colors are the session and weekly meters: green under 60%, amber to 85%, red above. A reset plays a cha-ching and flashes the chip." },
+                { n: "2", t: "Click any tab for its limits, models and tokens by day. Drag chips to reorder; the gear holds the switches, and CS / C run Claude Squad and Constance." },
+                { n: "3", t: "Only installed agents get a tab, and only plan limits, usage and resets are shown — never credit balances or spend. Logins are read-only; nothing is sent anywhere but each vendor's own endpoint." }
+              ]
+              delegate: Rectangle {
+                required property var modelData
+                width: parent.width
+                height: welcomeTipText.implicitHeight + Style.space(20)
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+                Row {
+                  anchors.fill: parent
+                  anchors.margins: Style.space(10)
+                  spacing: Style.space(10)
+                  Rectangle {
+                    width: Style.space(22); height: width; radius: width / 2
+                    color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.2)
+                    border.width: 1; border.color: root.soft(Color.accent, 0.6)
+                    Text {
+                      anchors.centerIn: parent
+                      textFormat: Text.PlainText
+                      text: modelData.n
+                      color: Color.accent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                    }
+                  }
+                  Text {
+                    id: welcomeTipText
+                    width: parent.width - Style.space(52)
+                    textFormat: Text.PlainText
+                    text: modelData.t
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                }
+              }
+            }
+            Rectangle {
+              width: parent.width
+              height: welcomeGoLabel.implicitHeight + Style.space(20)
+              radius: Style.cornerRadius
+              color: welcomeGoArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+              border.width: 1
+              border.color: root.soft(Color.accent, 0.9)
+              Text {
+                id: welcomeGoLabel
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Got it"
+                color: Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+              MouseArea { id: welcomeGoArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.dismissWelcome() }
             }
           }
 
