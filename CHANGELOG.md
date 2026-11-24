@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.29.2 - 2026-11-23
+- The agent detail usage line gets a fixed height and hides when empty, so it no longer leaves a blank gap.
+
 ## 1.29.1 - 2026-11-23
 - **Kiro shows an honest "can't read" note:** `kiro-cli` has no headless usage command (`/usage` is interactive-only), so the guessed collector is removed rather than showing stale or invented numbers.
 

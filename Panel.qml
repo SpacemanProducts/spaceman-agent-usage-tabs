@@ -1281,6 +1281,8 @@ Panel {
     Text {
       y: 0
       width: usageLine.width
+      height: usageLine.lineHeight
+      visible: usageLine.entries.length > 0
       textFormat: Text.PlainText
       text: usageLine.entries.length ? usageLine.entries[0].text : ""
       color: root.dim
