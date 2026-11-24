@@ -34,6 +34,16 @@ assert.deepEqual(r.map((x) => [x.name, x.state]), [["big-pickle", "zero"]]);
 r = buildModels({ plan: "Free", used: [U("claude-opus-4-6", 9)], live: [{ id: "x", name: "x" }], config: [{ name: "Claude Opus 4.6" }] });
 assert.equal(states(r)["Claude Opus 4.6"], "used");
 
+// Devin: swe-2-flash-medium is one model; it must not count under both swe-2 and swe-2-flash.
+const devinLive = [{ id: "swe-2", name: "SWE-2" }, { id: "swe-2-flash", name: "SWE-2 Flash" }, { id: "swe-1.7", name: "SWE-1.7" }];
+r = buildModels({ plan: "", used: [U("swe-2-flash-medium", 98603465), U("compactor", 248840)], live: devinLive, config: [] });
+assert.deepEqual(r.map((x) => [x.name, x.state, x.total]), [
+  ["SWE-2 Flash", "used", 98603465], ["compactor", "used", 248840], ["SWE-2", "zero", 0], ["SWE-1.7", "zero", 0],
+]);
+// A used record counts once even when a config entry and live entries could match it.
+r = buildModels({ plan: "", used: [U("gemini-3.8-flash-high", 50)], live: devinLive, config: [{ name: "Gemini 3.8 Flash" }] });
+assert.equal(r.find((x) => x.name === "Gemini 3.8 Flash").total, 50, "one record counts once, on its best-matching row");
+
 // Junk in, no crash.
 assert.deepEqual(buildModels({}), []); assert.deepEqual(buildModels({ config: [null, {}, { name: "A" }] }).map((x) => x.name), ["A"]);
 console.log("models: all tests passed");

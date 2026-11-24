@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.30.1 - 2026-11-23
+- **Models no longer double-count:** a used record went to every row whose name prefix-matched it, so Devin's `swe-2-flash-medium` showed the same total under both SWE-2 and SWE-2 Flash. Each record now belongs to the single best-matching row (SWE-2 Flash), and compactor stays its own line.
+
 ## 1.30.0 - 2026-11-23
 - **Start launches agents with permission prompts off:** the default agent gets its own skip-permissions flag (Claude `--dangerously-skip-permissions`, Copilot `--allow-all`, Devin `--permission-mode dangerous`, Cursor `--yolo --trust`, Grok `bypassPermissions`, Codex `--dangerously-bypass-approvals-and-sandbox`, Antigravity `--dangerously-skip-permissions`, OpenCode `--auto`, Kimi `--auto`, Kiro `chat --trust-all-tools --trust-workspace`, Amp `--dangerously-allow-all`, Qwen `--yolo`, DeepSeek Harness `DSH_PERMISSION_MODE=danger-full-access`). A new "Skip permission prompts" switch in Settings (on by default) turns them all off, and the Start button shows a "no prompts" mark while it's on. Agents without a known flag still go through `omarchy-agent` unchanged.
 
