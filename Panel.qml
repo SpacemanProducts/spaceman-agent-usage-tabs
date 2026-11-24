@@ -944,6 +944,15 @@ Panel {
     constanceStarter.running = true
   }
   function stopConstance() { constanceStopper.running = true }
+  // Her state dir (same one constance.mjs uses): the Keep going button drops keep-going.json here,
+  // naming the window that paused her; pace() honors it until that window resets.
+  readonly property string constanceDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agent-usage-tabs/constance"
+  function keepConstanceGoing() {
+    var p = constance.pace
+    if (!p || p.mode !== "stop" || !p.title) return
+    var payload = JSON.stringify({ title: p.title, resetsAt: p.until === undefined ? null : p.until, at: Date.now() })
+    Quickshell.execDetached(["bash", "-c", 'mkdir -p "$1" && printf "%s" "$2" > "$1/keep-going.json"', "_", constanceDir, payload])
+  }
   function constanceAgentName(id) {
     for (var i = 0; i < rawAgents.length; i++) if (rawAgents[i].id === id) return rawAgents[i].name || id
     return id
@@ -2507,11 +2516,11 @@ Panel {
               spacing: Style.space(6)
               Item {
                 width: parent.width
-                height: Math.max(goalLine.implicitHeight, stopTile.visible ? stopTile.height : 0)
+                height: Math.max(goalLine.implicitHeight, Math.max(keepTile.visible ? keepTile.height : 0, stopTile.visible ? stopTile.height : 0))
                 Text {
                   id: goalLine
                   anchors.left: parent.left
-                  anchors.right: stopTile.visible ? stopTile.left : parent.right
+                  anchors.right: actRow.left
                   anchors.rightMargin: Style.space(10)
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
@@ -2524,27 +2533,51 @@ Panel {
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true
                 }
-                Rectangle {
-                  id: stopTile
-                  visible: root.constanceActive
+                Row {
+                  id: actRow
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
-                  width: stopLabel.implicitWidth + Style.space(24)
-                  height: stopLabel.implicitHeight + Style.space(14)
-                  radius: Style.cornerRadius
-                  color: root.soft(root.red, stopArea.containsMouse ? 0.3 : 0.15)
-                  Text {
-                    id: stopLabel
-                    anchors.centerIn: parent
-                    textFormat: Text.PlainText
-                    text: constanceStopper.running ? "Stopping..." : "Stop"
-                    color: root.red
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: true
+                  spacing: Style.space(8)
+                  Rectangle {
+                    id: keepTile
+                    visible: !!root.constance.goal && root.constance.goal.status === "paused" && !!root.constance.pace && root.constance.pace.mode === "stop" && !!root.constance.pace.title
+                    width: keepLabel.implicitWidth + Style.space(24)
+                    height: keepLabel.implicitHeight + Style.space(14)
+                    radius: Style.cornerRadius
+                    color: root.soft(root.green, keepArea.containsMouse ? 0.3 : 0.15)
+                    Text {
+                      id: keepLabel
+                      anchors.centerIn: parent
+                      textFormat: Text.PlainText
+                      text: "Keep going"
+                      color: root.green
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                    }
+                    MouseArea { id: keepArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.keepConstanceGoing() }
+                    PanelToolTip { visible: keepArea.containsMouse; text: "Resume her now even though a limit paused her; she keeps delegating and only stops at the last few percent before the reset, until that window resets"; fontFamily: root.fontFamily }
                   }
-                  MouseArea { id: stopArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.stopConstance() }
-                  PanelToolTip { visible: stopArea.containsMouse; text: "Halts Constance and every job she handed out, at once"; fontFamily: root.fontFamily }
+                  Rectangle {
+                    id: stopTile
+                    visible: root.constanceActive
+                    width: stopLabel.implicitWidth + Style.space(24)
+                    height: stopLabel.implicitHeight + Style.space(14)
+                    radius: Style.cornerRadius
+                    color: root.soft(root.red, stopArea.containsMouse ? 0.3 : 0.15)
+                    Text {
+                      id: stopLabel
+                      anchors.centerIn: parent
+                      textFormat: Text.PlainText
+                      text: constanceStopper.running ? "Stopping..." : "Stop"
+                      color: root.red
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                    }
+                    MouseArea { id: stopArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.stopConstance() }
+                    PanelToolTip { visible: stopArea.containsMouse; text: "Halts Constance and every job she handed out, at once"; fontFamily: root.fontFamily }
+                  }
                 }
               }
               Text {

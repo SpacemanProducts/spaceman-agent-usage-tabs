@@ -3,6 +3,10 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.46.0 - 2026-11-24
+- **Constance's pause follows the reset:** in the last fifth of a session or weekly window she no longer stops at 90% — she stays on delegate pace (planning, review and merges only, editing and testing go to the free agents) and stops only at 97%, so she never runs out before the reset. Far from a reset the 90% pause is unchanged. `bin/constance-pace.mjs` picks the stop line per window from its `resetsAt`.
+- **Keep going button:** while Constance is paused, her panel shows a green **Keep going** next to Stop. It drops a `keep-going.json` in her state dir naming the window that paused her; until that window resets she can't be auto-paused for it (the owner takes the risk). The file expires by itself — a reset changes `resetsAt`, and a window with no reset time honors it for one window length only.
+
 ## 1.45.0 - 2026-11-24
 - **Copyable Constance log:** every log entry is selectable text (drag to select, Ctrl+C copies, Escape gives the panel its keys back) with its own Copy button, and **Copy all** copies the whole log (every entry in `log.jsonl`, not just the ones shown) with practice prompts in full, through the new `constance.mjs log` command (`bin/constance-logtext.mjs` + test). Long entries show their first lines with "Show all"; mouse drags over the log select instead of scrolling the panel.
 - **Practice matches real Devin copies:** a practice handoff to a multi-copy agent now gets the prompt a real copy would, naming its worktree under `/var/tmp/constance-worktrees/` for the `pwd` check and the done file, and the log and delegate reply show that path. Nothing is created: the path is kept as `practiceWorktree`, so no merge or cleanup ever acts on it. The end-to-end test's fake Devin now runs the prompt's `pwd` check and only writes its done file inside its worktree; the test checks she read it from there and that the main folder's `.constance/` got nothing.
