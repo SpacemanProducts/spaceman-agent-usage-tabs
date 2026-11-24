@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.32.0 - 2026-11-23
+- **One severity rule for the bar icon, every agent:** the robot is colored and labeled from the worst limit the agent reports (the fullest bar in its tab) through a single shared table — green under 60%, amber 60–89%, red 90% and up with the percentage shown (so Antigravity 99% and Copilot 94% now show their number, and Cursor/Codex at 100% are always red). The tooltip names the agent the bar represents and the limit behind the color.
+
 ## 1.31.1 - 2026-11-23
 - **One severity system on the bar:** the robot now falls back to the fullest real meter when the agent reports no weekly limit, so Copilot at 94% shows red instead of neutral, and Cursor at its cap shows red instead of nothing. The percentage still only appears for a real session limit. Copilot's editor-autocomplete meter is gone — the CLI never uses it, so it could never be the right number to show.
 

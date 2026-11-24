@@ -48,6 +48,8 @@ Panel {
   function soft(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
   function meterColorFor(p, light) { return p > 0.85 ? redFor(light) : (p >= 0.6 ? amberFor(light) : greenFor(light)) }
   function meterColor(p) { return meterColorFor(p, lightPanel) }
+  // The bar icon's color for a BAR_LEVELS entry (chip-meters.js owns the table).
+  function barLevelColorFor(name) { return name === "red" ? redFor(lightBar) : name === "amber" ? amberFor(lightBar) : greenFor(lightBar) }
   // A reading the collector couldn't confirm is current and complete never shows green: it shows gray
   // ("unsure"). Amber and red still show, since a high reading is a real warning either way.
   readonly property color unsureColor: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.45)
@@ -138,7 +140,7 @@ Panel {
   readonly property bool angryRobot: userSettings.angryRobot !== undefined
     ? userSettings.angryRobot !== false : root.setting("angryRobot", true) !== false
   property bool testAngry: false   // set for 8 s by the testAngry IPC hook, to check the look in the real bar
-  readonly property bool robotAngry: angryRobot && (barRobot >= 1 || testAngry)
+  readonly property bool robotAngry: angryRobot && (barWorst >= 1 || testAngry)
   Timer { id: testAngryTimer; interval: 8000; onTriggered: root.testAngry = false }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
@@ -222,27 +224,24 @@ Panel {
     return agents.length > 0 ? agents[0] : null
   }
   readonly property string defaultAgentName: barAgent && barAgent.name ? barAgent.name : "the default agent"
-  // The bar shows two readings of the default agent: the percentage is its
-  // session limit, the robot its usage severity. -1 means the agent doesn't
-  // report that kind of limit — nothing is invented for it.
-  readonly property var barReadings: ChipMeters.barMeters(barAgent)
-  readonly property real barSession: barReadings.session
-  readonly property real barWeekly: barReadings.weekly
-  readonly property real barOther: barReadings.other
-  readonly property string barOtherTitle: barReadings.otherTitle || ""
-  // Robot severity: the weekly meter when the agent reports one, else the
-  // fullest real meter it does report (session or other) — one color system.
-  readonly property real barRobot: barWeekly >= 0 ? barWeekly : Math.max(barSession, barOther)
-  readonly property bool barHasData: barSession >= 0 || barWeekly >= 0 || barOther >= 0
-  // What the bar tooltip says: which reading is which, for this agent.
-  readonly property string barTooltip: {
-    var name = defaultAgentName
-    var parts = []
-    if (barSession >= 0) parts.push("session " + Math.round(barSession * 100) + "%")
-    if (barWeekly >= 0) parts.push("weekly " + Math.round(barWeekly * 100) + "%")
-    if (barOther >= 0) parts.push((barOtherTitle || "other") + " " + Math.round(barOther * 100) + "%")
-    return name + " — " + (parts.length ? parts.join(" · ") : "no limits reported")
-  }
+  // The bar icon is one severity readout of the agent it represents (the
+  // default agent, or the first tab when none is set): the color and the
+  // percentage label both come from the worst limit that agent reports,
+  // through the shared BAR_LEVELS table — the same worst bar its tab shows.
+  readonly property var barWorstReading: ChipMeters.barWorst(barAgent)
+  readonly property real barWorst: barWorstReading.percent
+  readonly property string barWorstTitle: barWorstReading.title || ""
+  readonly property var barLevel: ChipMeters.barLevel(barWorst)
+  readonly property bool barHasData: barWorst >= 0
+  readonly property bool barShowPercent: !!barLevel && barLevel.showPercent === true
+  readonly property color barIconColor: root.barHasData
+    ? (root.robotAngry ? Color.urgent : root.barLevelColorFor(root.barLevel.color))
+    : root.barForeground
+  // The tooltip names the agent the bar represents and the limit behind the color.
+  readonly property string barTooltip: !barAgent ? "No agent selected"
+    : "Bar shows " + defaultAgentName + (barWorst >= 0
+      ? " — " + (barWorstTitle || "usage") + " " + Math.round(barWorst * 100) + "%"
+      : " — no limits reported")
   onFirstIdChanged: applyDefault()
   onFirstInstalledChanged: applyDefault()
   function applyDefault() {
@@ -1672,8 +1671,9 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // The robot is the usage-severity meter: weekly when reported, else the
-    // fullest real meter. Angry eyes when a limit is used up. Neutral with none.
+    // One severity readout for every agent: the shared BAR_LEVELS table colors
+    // the robot from the worst reported limit; angry eyes when a limit is used
+    // up. Neutral when the agent reports nothing.
     iconComponent: Component {
       OpticalGlyph {
         implicitWidth: Style.bar.iconCanvas
@@ -1682,16 +1682,14 @@ Panel {
         fontFamily: root.fontFamily
         fontSize: Style.bar.iconFont
         paintedSize: Style.bar.iconSize
-        color: root.barRobot >= 0
-          ? (root.robotAngry ? Color.urgent : root.meterColorFor(root.barRobot, root.lightBar))
-          : root.barForeground
+        color: root.barIconColor
       }
     }
-    // The percentage beside it is the session meter, colored by session usage.
-    labelText: root.barSession >= 0 ? Math.round(root.barSession * 100) + "%" : ""
+    // The percentage shows only in the red zone (>= 90%), from the same reading.
+    labelText: root.barShowPercent ? Math.round(root.barWorst * 100) + "%" : ""
     slotSize: Style.bar.iconSlot * (root.barHasData ? 2 : 1)
     active: root.barHasData
-    activeColor: root.barSession >= 0 ? root.meterColorFor(root.barSession, root.lightBar) : root.barForeground
+    activeColor: root.barIconColor
     tooltipText: root.barTooltip
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) root.selectIndex(root.selectedIndex + 1)
