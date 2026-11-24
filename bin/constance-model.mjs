@@ -5,7 +5,11 @@
 // (network, limits, crashes) never match, so they can't downgrade her by accident.
 export const MODELS = ["opus", "sonnet", "haiku"];
 
-const REJECTED = /issue with the selected model|may not exist|not have access to it|invalid model|unrecognized_model|model\b[^\n]{0,60}\bnot (allowed|available|supported|enabled)/i;
+// Only Claude Code's exact rejection counts: "There's an issue with the selected model (name)?"
+// followed within ~200 chars of the same message by "may not exist" or "may not have access to it".
+// Straight or curly apostrophe, any case. Anything else (a stray "may not exist", "invalid model",
+// an unrelated API error) is not a model rejection and must never downgrade her.
+const REJECTED = /there['’]s an issue with the selected model[\s\S]{0,200}?(?:may not have access to it|may not exist)/i;
 
 export function modelRejected(report) {
   return REJECTED.test(String(report || ""));
