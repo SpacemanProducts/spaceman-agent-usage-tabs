@@ -1031,6 +1031,10 @@ Panel {
   // the checklist, the goal queue, one card per job, the Now line, history, and the log folded away.
   readonly property var constanceBoard: constance.board || ({ checklist: { items: [], done: 0, total: 0, line: "" }, cards: [], now: "", history: [], goalQueue: { goals: [], paused: "" } })
   readonly property var constanceGoalQueue: constanceBoard.goalQueue || ({ goals: [], paused: "" })
+  // Scorecard: per-agent reviewed-job stats and the "use it or lose it" spare line (absent on older data).
+  readonly property var constanceScorecard: constanceBoard.scorecard || ({ rows: [], spareOn: true, spare: "" })
+  readonly property bool constanceSpareOn: userSettings.constanceUseItOrLoseIt !== undefined
+    ? userSettings.constanceUseItOrLoseIt !== false : root.setting("constanceUseItOrLoseIt", true) !== false
   // Live clock for running cards' elapsed time (ticks only while her screen is open).
   property real constanceNow: Date.now()
   Timer { interval: 1000; running: root.constanceOpen && root.opened; repeat: true; triggeredOnStart: true; onTriggered: root.constanceNow = Date.now() }
@@ -3117,6 +3121,100 @@ Panel {
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
                 text: (root.constance.tokens && root.constance.tokens.line) ? "Tokens: " + root.constance.tokens.line : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            // Scorecard: how each worker's reviewed jobs went, and the "use it or lose it" spare switch.
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+              PanelSectionHeader { width: parent.width; text: "SCORECARD" }
+              Repeater {
+                model: root.constanceScorecard.rows || []
+                delegate: Column {
+                  required property var modelData
+                  width: parent.width
+                  spacing: Style.space(1)
+                  Text {
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    text: modelData.line || ""
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    text: modelData.hint || ""
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+              Text {
+                visible: (root.constanceScorecard.rows || []).length === 0
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: "No reviewed jobs yet."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Item {
+                id: spareToggle
+                width: spareText.implicitWidth + Style.space(10) + Style.space(38)
+                height: Math.max(spareText.implicitHeight + Style.space(8), Style.space(24))
+                Text {
+                  id: spareText
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: "Use it or lose it"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Rectangle {
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(38)
+                  height: Style.space(20)
+                  radius: height / 2
+                  color: root.constanceSpareOn ? root.green : root.track
+                  border.width: 1
+                  border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
+                  Rectangle {
+                    width: parent.height - Style.space(6)
+                    height: width
+                    radius: width / 2
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: root.constanceSpareOn ? parent.width - width - Style.space(3) : Style.space(3)
+                    color: root.foreground
+                  }
+                }
+                MouseArea {
+                  id: spareArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.writeSetting(["constanceUseItOrLoseIt", String(!root.constanceSpareOn)])
+                }
+                PanelToolTip { visible: spareArea.containsMouse; text: "When a reset is close and an agent has room it won't use in time, she spends it on worthwhile work from the project's backlog (.constance/backlog.md), never just to burn it. Off: leftover room is left alone."; fontFamily: root.fontFamily }
+              }
+              Text {
+                visible: text !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: root.constanceScorecard.spare || ""
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
