@@ -114,6 +114,8 @@ so in one line. These need a login first:
   "N more models" toggle.
 - **Tokens by day:** a collapsible section, closed by default, with today's total always
   visible.
+- **Last 30 days:** a small bar chart of the agent's daily tokens over the last month, in the
+  tab chip's own meter color; days with no reading stay empty.
 - **Plan and free-tier notes** from what each tool itself reports (see below).
 - **One calm status line** instead of an error card when a tool has no data. If a tab can't
   read its data, or the data doesn't look right, it says **"Data looks wrong"** and the
@@ -161,11 +163,12 @@ so in one line. These need a login first:
   previous reset time, and other agents never get one (an early drop on them is more likely
   you spending a banked reset yourself).
 
-**The gear icon** in the panel header opens a short settings view (shown below), grouped under four headings:
+**The gear icon** in the panel header opens a short settings view (shown below), grouped under five headings:
 **Display** (hide uninstalled agents, show unused models), **Alerts** (write a handoff note near the limit, angry robot when the default agent is out),
 **Reset celebration** (the animation, opening the panel on
 reset, the sound and its volume, and **Test session reset**, **Test weekly reset** and **Test surprise reset** buttons
-that replay each celebration any time) and **Tabs** (a switch per agent, plus **Reset order**).
+that replay each celebration any time), **Tabs** (a switch per agent, plus **Reset order**) and **DATA**
+(export the usage history as a CSV file).
 
 ![The gear settings view](docs/settings.png)
 
@@ -320,6 +323,14 @@ borders come from the theme's popup colors and icons from its accent. The green,
 celebration colors, switch to deeper variants on a light theme so they stay readable. The chrome is kept quiet so the usage bars stand
 out: chip borders are soft and thin, the buttons are faint theme-colored tints, and the chips keep their green/amber/red meter
 color (the point of a chip) at a lower volume.
+
+### Week view, 30-day history and CSV export
+
+The **Week** header button opens a summary of the current week across every agent: tokens per
+agent, the busiest day and how many resets hit. Each tab's detail view also ends with a
+**Last 30 days** bar chart of that agent's daily tokens. Under **DATA** in the gear settings,
+**Export usage history (CSV)** writes the shared history to a CSV file (your Downloads folder
+by default) and shows the path underneath the button.
 
 ## Known gap: banked limit resets can't be read
 

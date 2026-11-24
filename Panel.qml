@@ -48,6 +48,13 @@ Panel {
   function soft(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
   function meterColorFor(p, pal) { return UsageColors.forLevel(p, pal || panelUsage) }
   function meterColor(p) { return meterColorFor(p, panelUsage) }
+  // The 30-day chart's bars take the tab chip's own session-meter color (same tintFor rule).
+  function historyBarColor(a) {
+    var m = ChipMeters.chipMeters(a)
+    var p = m.session >= 0 ? m.session : m.weekly
+    if (p < 0) return dim
+    return tintFor(p, unsureReason(a) !== "")
+  }
   // A reading the collector couldn't confirm is current and complete never shows green: it shows gray
   // ("unsure"). Amber and red still show, since a high reading is a real warning either way.
   readonly property color unsureColor: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.45)
@@ -76,6 +83,8 @@ Panel {
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
 
   property var rawAgents: []
+  // The collector's top-level `weekly` summary (bin/weekly-summary.mjs), shown by the Week view.
+  property var weekly: ({})
   // The panel's own settings.json (written by the gear switches) overrides the
   // matching shell.json setting. Missing -> the shell.json value -> the default.
   property var userSettings: ({})
@@ -83,6 +92,7 @@ Panel {
     ? userSettings.hideUninstalledAgents !== false : root.setting("hideUninstalledAgents", true) !== false
   readonly property var hiddenAgents: Array.isArray(userSettings.hiddenAgents) ? userSettings.hiddenAgents : []
   property bool settingsOpen: false
+  property bool weeklyOpen: false
   property string pluginVersion: ""
   readonly property bool autoOpenOnReset: userSettings.autoOpenOnReset !== undefined
     ? userSettings.autoOpenOnReset !== false : root.setting("autoOpenOnReset", true) !== false
@@ -101,7 +111,7 @@ Panel {
     var shown = false
     for (var i = 0; i < agents.length; i++) if (agents[i].id === id) shown = true
     if (!shown) return                               // that tab is hidden: respect it
-    selectedId = id; daysOpen = false; modelsExpanded = false; settingsOpen = false; welcomeOpen = false
+    selectedId = id; daysOpen = false; modelsExpanded = false; settingsOpen = false; welcomeOpen = false; weeklyOpen = false
     if (opened) return                               // the user's own panel: leave it open
     autoOpened = true
     open()
@@ -150,15 +160,19 @@ Panel {
   // Back button. Only one is open at a time.
   property bool welcomeOpen: false
   property bool settingsLoaded: false
-  readonly property bool subView: squadOpen || addOpen || settingsOpen || agentHereOpen || constanceOpen || welcomeOpen
-  function leaveSubView() { squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false }
-  function openSettings() { settingsOpen = true; squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false }
+  readonly property bool subView: squadOpen || addOpen || settingsOpen || agentHereOpen || constanceOpen || welcomeOpen || weeklyOpen
+  function leaveSubView() { squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false; weeklyOpen = false }
+  function openSettings() { settingsOpen = true; squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false; weeklyOpen = false }
+  function toggleWeekly() {
+    weeklyOpen = !weeklyOpen
+    if (weeklyOpen) { squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false }
+  }
   // The welcome screen opens on the first panel open after install (and again on later opens until its
   // "Got it" button writes welcomeDismissed). Auto-opened reset panels never trigger it.
   function maybeShowWelcome() {
     if (!settingsLoaded || userSettings.welcomeDismissed === true) return
     if (!opened || autoOpened || subView) return
-    squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false
+    squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; weeklyOpen = false
     welcomeOpen = true
   }
   function dismissWelcome() { writeSetting(["welcomeDismissed", "true"]); welcomeOpen = false }
@@ -175,6 +189,14 @@ Panel {
   function writeSetting(args) {
     settingsWriter.command = ["node", root.pluginDir + "/bin/settings-set.mjs"].concat(args)
     settingsWriter.running = true
+  }
+  // Settings' CSV export: bin/export-csv.mjs prints the written path on stdout or one stderr line.
+  property string csvExportStatus: ""
+  function runCsvExport() {
+    if (csvExporter.running) return
+    csvExportStatus = ""
+    csvExporter.command = ["node", root.pluginDir + "/bin/export-csv.mjs"]
+    csvExporter.running = true
   }
   readonly property var defaultOrder: ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp"]
   // The tab order: the one you saved (drag a chip), else `tabOrder` from
@@ -323,7 +345,7 @@ Panel {
     if (!s || Number(s.at) !== at || Number(s.playedAt) === at) return
     if (!fromClick && (!opened || detectedSurpriseAt !== at || !detectedSurpriseWhileOpen)) return
     selectedId = "antigravity"
-    daysOpen = false; modelsExpanded = false; settingsOpen = false; welcomeOpen = false
+    daysOpen = false; modelsExpanded = false; settingsOpen = false; welcomeOpen = false; weeklyOpen = false
     if (fromClick && !opened) {
       autoOpened = true
       open()
@@ -457,6 +479,7 @@ Panel {
     modelsExpanded = false
     settingsOpen = false
     welcomeOpen = false
+    weeklyOpen = false
   }
 
   // Header buttons, as in the stock panel's hero corner.
@@ -466,7 +489,7 @@ Panel {
   // add-account flow for it in a terminal. (It used to jump straight to the selected tab's provider.)
   property bool addOpen: false
   readonly property var addProviders: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "grok", name: "Grok" }]
-  function toggleAdd() { addOpen = !addOpen; if (addOpen) { squadOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false } }
+  function toggleAdd() { addOpen = !addOpen; if (addOpen) { squadOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false; weeklyOpen = false } }
   function addSubscription(provider) {
     if (!root.bar || !provider) return
     root.bar.run("omarchy-launch-floating-terminal-with-presentation bash " + pluginDir + "/bin/add-account.sh " + provider)
@@ -638,7 +661,7 @@ Panel {
   function toggleAgentHere() {
     agentHereOpen = !agentHereOpen
     if (agentHereOpen) {
-      squadOpen = false; addOpen = false; settingsOpen = false; constanceOpen = false; welcomeOpen = false
+      squadOpen = false; addOpen = false; settingsOpen = false; constanceOpen = false; welcomeOpen = false; weeklyOpen = false
       squadRepo = ""; squadNewName = ""
       if (!repoLister.running) repoLister.running = true
       if (!zenityCheck.running) zenityCheck.running = true
@@ -856,7 +879,7 @@ Panel {
   }
   function toggleSquad() {
     squadOpen = !squadOpen
-    if (squadOpen) { addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false }
+    if (squadOpen) { addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false; weeklyOpen = false }
     if (squadOpen) {
       squadRepo = ""; squadNewName = ""
       if (!repoLister.running) repoLister.running = true
@@ -927,7 +950,7 @@ Panel {
   function toggleConstance() {
     constanceOpen = !constanceOpen
     if (constanceOpen) {
-      squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; welcomeOpen = false
+      squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; welcomeOpen = false; weeklyOpen = false
       constanceError = ""
       if (!repoLister.running) repoLister.running = true
       if (!zenityCheck.running) zenityCheck.running = true
@@ -1250,10 +1273,11 @@ Panel {
     onTriggered: if (root.autoOpened && root.opened) root.close()
   }
 
-  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false; settingsLoaded = false; goalArea.focus = false; constanceTyping = false } else {
+  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false; weeklyOpen = false; settingsLoaded = false; goalArea.focus = false; constanceTyping = false } else {
     daysOpen = false
     modelsExpanded = false
     settingsOpen = false
+    weeklyOpen = false
     nowMs = Date.now()
     refreshNow()
     Qt.callLater(function() { if (!root.autoOpened) keyCatcher.forceActiveFocus() })
@@ -1272,6 +1296,7 @@ Panel {
         root.flashNow = Date.now()
         root.pluginVersion = d && d.version ? String(d.version) : ""
         root.rawAgents = d && Array.isArray(d.agents) ? d.agents : []
+        root.weekly = d && d.weekly && typeof d.weekly === "object" ? d.weekly : ({})
         root.dataGeneratedAt = d && Number(d.generatedAt) > 0 ? Number(d.generatedAt) : 0
         root.expireResets()
         // A reset the collector flagged since the last load -> celebrate. The first
@@ -1292,9 +1317,9 @@ Panel {
         root.resetsPrimed = true
         if (root.detectedSurpriseAt > 0 && root.detectedSurpriseWhileOpen) Qt.callLater(root.checkAntigravitySurprise)
         if (firstOrdinaryReset !== "") Qt.callLater(function() { root.autoCelebrate(firstOrdinaryReset) })
-      } catch (e) { root.rawAgents = [] }
+      } catch (e) { root.rawAgents = []; root.weekly = ({}) }
     }
-    onLoadFailed: root.rawAgents = []
+    onLoadFailed: { root.rawAgents = []; root.weekly = ({}) }
   }
 
   FileView {
@@ -1327,6 +1352,17 @@ Panel {
   Process {
     id: settingsWriter
     running: false
+  }
+
+  Process {
+    id: csvExporter
+    running: false
+    stdout: StdioCollector { id: csvExporterOut }
+    stderr: StdioCollector { id: csvExporterErr }
+    onExited: function(code) {
+      var line = code === 0 ? String(csvExporterOut.text || "").trim() : String(csvExporterErr.text || "").trim()
+      root.csvExportStatus = line !== "" ? line : (code === 0 ? "Exported." : "Export failed.")
+    }
   }
 
   // Plays the cha-ching once at the chosen volume (the gear's play button).
@@ -1405,7 +1441,7 @@ Panel {
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
     // Test hook: show exactly one screen: "main", "settings", "add", "squad" or "agent" (used to retake the README screenshots).
-    function view(name: string): string { root.leaveSubView(); if (name === "settings") root.openSettings(); else if (name === "add") root.toggleAdd(); else if (name === "squad") root.toggleSquad(); else if (name === "agent") root.toggleAgentHere(); else if (name === "constance") root.toggleConstance(); else if (name === "welcome") root.welcomeOpen = true; return name }
+    function view(name: string): string { root.leaveSubView(); if (name === "settings") root.openSettings(); else if (name === "add") root.toggleAdd(); else if (name === "squad") root.toggleSquad(); else if (name === "agent") root.toggleAgentHere(); else if (name === "constance") root.toggleConstance(); else if (name === "week") root.toggleWeekly(); else if (name === "welcome") root.welcomeOpen = true; return name }
     function settings(): string { if (root.settingsOpen) root.settingsOpen = false; else root.openSettings(); return root.settingsOpen ? "open" : "closed" }
     // Test hook: show the picker as if cs were missing (or present) without running the check.
     function squadPreview(state: string): string { root.squadOpen = true; root.squadHasCs = state; return state }
@@ -2087,9 +2123,10 @@ Panel {
     property string tip: ""
     property bool bold: false
     property bool lit: false     // something is running behind it (Constance on a goal): the glyph shows in the accent
+    property bool wide: false    // a word-length label ("Week") instead of a one/two-letter glyph
     signal clicked()
-    implicitWidth: Style.space(34)
-    implicitHeight: implicitWidth
+    implicitWidth: wide ? Style.space(58) : Style.space(34)
+    implicitHeight: Style.space(34)
     radius: Style.cornerRadius
     color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, hbArea.containsMouse ? 0.12 : 0.05)
     border.width: hbArea.containsMouse ? Math.max(1, Style.hoverBorderWidth) : 0
@@ -2211,7 +2248,7 @@ Panel {
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
-                text: root.welcomeOpen ? "Welcome" : (root.addOpen ? "Add an account" : (root.settingsOpen ? "Settings" : (root.agentHereOpen ? "Start " + root.defaultAgentName : (root.constanceOpen ? "Constance" : "Claude Squad"))))
+                text: root.welcomeOpen ? "Welcome" : (root.addOpen ? "Add an account" : (root.settingsOpen ? "Settings" : (root.weeklyOpen ? "This week" : (root.agentHereOpen ? "Start " + root.defaultAgentName : (root.constanceOpen ? "Constance" : "Claude Squad")))))
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -2237,6 +2274,7 @@ Panel {
               HeaderButton { glyph: "\u{f07b7}"; tip: "Start the default agent in a folder"; onClicked: root.toggleAgentHere() }
               HeaderButton { glyph: "CS"; tip: "Claude Squad"; onClicked: root.toggleSquad() }
               HeaderButton { glyph: "C"; bold: true; tip: root.constanceActive ? "Constance (working)" : "Constance: give her a goal"; lit: root.constanceActive; onClicked: root.toggleConstance() }
+              HeaderButton { wide: true; glyph: "Week"; tip: "This week's usage across all agents"; onClicked: root.toggleWeekly() }
               Rectangle {
               id: gearButton
               width: Style.space(34)
@@ -3398,6 +3436,23 @@ Panel {
             }
           }
 
+          // ---------------- Week view (the Week header button): the collector's weekly summary from
+          // data.json — this week's tokens per agent, busiest day and resets hit.
+          Column {
+            id: weeklyView
+            visible: root.weeklyOpen
+            width: parent.width
+            spacing: Style.space(8)
+            WeeklySummary {
+              width: parent.width
+              summary: root.weekly && Array.isArray(root.weekly.agents) ? root.weekly : ({ agents: [] })
+              textColor: root.foreground
+              mutedColor: root.dim
+              barColor: Color.accent
+              fontFamily: root.fontFamily
+            }
+          }
+
           // ---------------- Tabs: full names, wrap rather than truncate
           Flow {
             visible: !root.subView
@@ -3863,6 +3918,64 @@ Panel {
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
+            PanelSectionHeader { width: parent.width; text: "DATA" }
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+              Item {
+                width: parent.width
+                height: Math.max(exportLabel.implicitHeight, exportBtn.implicitHeight)
+                Text {
+                  id: exportLabel
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - exportBtn.width - Style.space(12)
+                  textFormat: Text.PlainText
+                  text: "Export usage history (CSV)"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                Rectangle {
+                  id: exportBtn
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: exportBtnLabel.implicitWidth + Style.space(24)
+                  height: exportBtnLabel.implicitHeight + Style.space(12)
+                  radius: Style.cornerRadius
+                  color: exportArea.containsMouse && !csvExporter.running ? root.track : "transparent"
+                  border.width: 1
+                  border.color: root.foreground
+                  Text {
+                    id: exportBtnLabel
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: csvExporter.running ? "Exporting…" : "Export"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  MouseArea {
+                    id: exportArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    enabled: !csvExporter.running
+                    onClicked: root.runCsvExport()
+                  }
+                }
+              }
+              Text {
+                visible: root.csvExportStatus !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: root.csvExportStatus
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
             Text {
               visible: root.pluginVersion !== ""
               width: parent.width
@@ -4280,6 +4393,30 @@ Panel {
                   }
                 }
               }
+            }
+          }
+
+          // ---------------- 30-day history: daily tokens for the last month in the tab chip's meter
+          // color. Days the source didn't report stay empty; the whole block hides when there's no data.
+          Column {
+            id: historySection
+            visible: root.showDetail && historyChart.hasData
+            width: parent.width
+            spacing: Style.space(4)
+
+            Text {
+              textFormat: Text.PlainText
+              text: "Last 30 days"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            UsageChart {
+              id: historyChart
+              series: root.agent ? (root.agent.history || []) : []
+              barColor: root.historyBarColor(root.agent)
+              emptyColor: root.dim
+              fontFamily: root.fontFamily
             }
           }
         }
