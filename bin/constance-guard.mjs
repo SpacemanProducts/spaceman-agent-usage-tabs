@@ -1,7 +1,8 @@
 // Constance's guardrails, checked after every delegated run: the job's diff may
-// touch only its allowed files, and the home folder and project list must match
-// the snapshot taken before the run. A violation restores what can be restored,
-// logs a lesson, and gives that agent smaller tasks from then on.
+// touch only its allowed files. Home/projects differences are only noted — the
+// agent runs sandboxed with an empty tmpfs home, so those folders are the
+// owner's own. A violation restores what can be restored, logs a lesson, and
+// gives that agent smaller tasks from then on.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -60,15 +61,31 @@ export function commitFromRun(dir, commit, baseHead) {
   return git(dir, "merge-base", "--is-ancestor", baseHead, commit).status === 0;
 }
 
+const commitFiles = (dir, commit) => {
+  const out = [];
+  const r = git(dir, "show", "--name-only", "--format=", commit);
+  if (r.status === 0) r.stdout.split("\n").filter(Boolean).forEach((p) => out.push(p));
+  return out;
+};
+
+// Every commit the run made: baseHead..HEAD, oldest first. A missing or
+// unresolvable base means "can't tell which commits are the run's", so the
+// list is empty rather than guessed.
+export function newCommits(dir, baseHead) {
+  if (!baseHead) return [];
+  const base = git(dir, "rev-parse", "--verify", "--quiet", baseHead + "^{commit}");
+  if (base.status !== 0) return [];
+  const r = git(dir, "rev-list", "--reverse", base.stdout.trim() + "..HEAD");
+  if (r.status !== 0) return [];
+  return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
 // Paths the run changed: its own commit's files plus anything dirty now that
 // wasn't dirty before the run (an agent that forgot to commit still shows up;
 // the owner's earlier uncommitted work never does).
 export function changedPaths(dir, commit, before = null) {
   const out = new Set();
-  if (isHash(commit)) {
-    const r = git(dir, "show", "--name-only", "--format=", commit);
-    if (r.status === 0) r.stdout.split("\n").filter(Boolean).forEach((p) => out.add(p));
-  }
+  if (isHash(commit)) commitFiles(dir, commit).forEach((p) => out.add(p));
   const already = new Set((before && before.dirty) || []);
   for (const p of dirtyPaths(dir)) if (!already.has(p)) out.add(p);
   return [...out];
@@ -86,14 +103,23 @@ const visible = (names) => names.filter((n) => !n.startsWith("."));
 // (empty = read-only: any change at all is a violation, .constance/ aside).
 export function checkRun({ dir, files = [], commit = "", before = null, env = process.env } = {}) {
   const violations = [];
-  if (!before) return { ok: true, violations };
+  const notices = [];
+  if (!before) return { ok: true, violations, notices };
   const allowed = [...files, ".constance/"];
-  // An old snapshot without a recorded HEAD can't tell the run's commit from
+  // An old snapshot without a recorded HEAD can't tell the run's commits from
   // anyone else's: judge the dirty paths only.
   const own = before.head !== undefined ? commitFromRun(dir, commit, before.head) : false;
   if (isHash(commit) && before.head !== undefined && !own) violations.push(`reported commit ${commit.slice(0, 9)} is not a new commit from this run`);
-  const bad = changedPaths(dir, own ? commit : "", before).filter((p) => !inside(p, allowed));
+  // Every commit since the pre-run HEAD is the run's, reported or not: an agent
+  // that commits but reports nothing still gets diff-checked.
+  const ownCommits = before.head !== undefined ? newCommits(dir, before.head) : [];
+  const paths = new Set();
+  for (const c of ownCommits) commitFiles(dir, c).forEach((p) => paths.add(p));
+  const already = new Set(before.dirty || []);
+  for (const p of dirtyPaths(dir)) if (!already.has(p)) paths.add(p);
+  const bad = [...paths].filter((p) => !inside(p, allowed));
   if (bad.length) violations.push(`changed files outside its list: ${bad.join(", ")}`);
+  const badCommits = ownCommits.filter((c) => commitFiles(dir, c).some((p) => !inside(p, allowed))).reverse();
   const after = snapshot(env);
   const homeAfter = visible(after.home), homeBefore = visible(before.home || []);
   const projAfter = visible(after.projects), projBefore = visible(before.projects || []);
@@ -101,11 +127,14 @@ export function checkRun({ dir, files = [], commit = "", before = null, env = pr
   const removedHome = homeBefore.filter((n) => !homeAfter.includes(n));
   const addedProjects = projAfter.filter((n) => !projBefore.includes(n));
   const removedProjects = projBefore.filter((n) => !projAfter.includes(n));
-  if (addedHome.length) violations.push(`created entries in the home folder: ${addedHome.join(", ")}`);
-  if (removedHome.length) violations.push(`removed entries from the home folder: ${removedHome.join(", ")}`);
-  if (addedProjects.length) violations.push(`created projects outside the folder: ${addedProjects.join(", ")}`);
-  if (removedProjects.length) violations.push(`removed projects: ${removedProjects.join(", ")}`);
-  return { ok: violations.length === 0, violations, badPaths: bad, ownCommit: own ? commit : "", addedProjects, addedHome, removedHome, removedProjects, projectsDir: after.projectsDir };
+  // The agent's home is an empty tmpfs, so home/projects differences are the
+  // owner's own folders: noted for the record, never a violation.
+  if (addedHome.length) notices.push(`created entries in the home folder: ${addedHome.join(", ")}`);
+  if (removedHome.length) notices.push(`removed entries from the home folder: ${removedHome.join(", ")}`);
+  if (addedProjects.length) notices.push(`created projects outside the folder: ${addedProjects.join(", ")}`);
+  if (removedProjects.length) notices.push(`removed projects: ${removedProjects.join(", ")}`);
+  const ownCommit = own ? commit : ownCommits[ownCommits.length - 1] || "";
+  return { ok: violations.length === 0, violations, notices, badPaths: bad, ownCommit, ownCommits, badCommits, addedProjects, addedHome, removedHome, removedProjects, projectsDir: after.projectsDir };
 }
 
 // Undo what can be undone, and nothing else. The guard never deletes, moves,
@@ -114,13 +143,21 @@ export function checkRun({ dir, files = [], commit = "", before = null, env = pr
 // `git revert` of the run's own verified commit (a new commit, never a reset);
 // if that revert can't apply cleanly it is aborted, leaving the tree as it was.
 // Everything else is reported for the owner to look at.
-export function restoreRun({ dir, commit = "", badPaths = [], addedProjects = [], addedHome = [], removedHome = [], removedProjects = [] } = {}) {
+export function restoreRun({ dir, commit = "", commits = [], badPaths = [], addedProjects = [], addedHome = [], removedHome = [], removedProjects = [] } = {}) {
   const did = [];
-  if (isHash(commit)) {
-    const r = git(dir, "revert", "--no-edit", commit);
-    if (r.status === 0) did.push(`reverted commit ${commit.slice(0, 9)}`);
-    else { git(dir, "revert", "--abort"); did.push(`could not revert commit ${commit.slice(0, 9)} cleanly; left it for you`); }
-  }
+  const seen = new Set();
+  const revert = (c) => {
+    const full = git(dir, "rev-parse", c + "^{commit}");
+    const key = full.status === 0 ? full.stdout.trim() : c;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const r = git(dir, "revert", "--no-edit", c);
+    if (r.status === 0) did.push(`reverted commit ${c.slice(0, 9)}`);
+    else { git(dir, "revert", "--abort"); did.push(`could not revert commit ${c.slice(0, 9)} cleanly; left it for you`); }
+  };
+  if (isHash(commit)) revert(commit);
+  // `commits` is newest first (badCommits order); each reverts independently.
+  for (const c of commits) if (isHash(c)) revert(c);
   const left = [...badPaths.map((p) => `${p} (in the project)`), ...addedProjects.map((n) => `${n} (new in Projects)`), ...addedHome.map((n) => `${n} (new in home)`)];
   if (left.length) did.push(`left in place for you to check: ${left.join(", ")}`);
   const gone = [...removedProjects, ...removedHome];
