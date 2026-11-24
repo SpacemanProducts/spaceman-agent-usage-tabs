@@ -26,12 +26,13 @@ function writeAll(dir, data) {
 
 // Add a ready task for a project. agent is optional: empty means "whoever
 // finishes the current job". Returns the stored task.
-export function addTask(projectDir, { task, files = [], agent = "" }, dir = stateDir()) {
+export function addTask(projectDir, { task, files = [], agent = "", items = [], title = "" }, dir = stateDir()) {
   const text = String(task || "").trim();
   if (!text) throw new Error("queue needs a task");
   const data = readAll(dir);
   const list = (data.projects[projectDir] ||= []);
-  const item = { id: data.next++, task: text, files: files.filter(Boolean), agent: String(agent || ""), status: "pending", createdAt: Date.now() };
+  const item = { id: data.next++, task: text, files: files.filter(Boolean), agent: String(agent || ""), status: "pending", createdAt: Date.now(),
+    ...(items.length ? { items } : {}), ...(title ? { title: String(title) } : {}) };
   list.push(item);
   writeAll(dir, data);
   return item;

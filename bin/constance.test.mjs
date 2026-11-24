@@ -101,6 +101,8 @@ echo "Report: b added by grok."
 // ever listens to the real session bus (the owner's own notifications).
 const fakeHome = path.join(root, "home"); fs.mkdirSync(path.join(fakeHome, "Projects"), { recursive: true });
 fs.writeFileSync(path.join(bin, "busctl"), "#!/bin/bash\nsleep 30\n", { mode: 0o755 });
+// A fake notify-send: "she stops the queue and tells me" must never pop a real notification in a test.
+fs.writeFileSync(path.join(bin, "notify-send"), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${root}/notified.txt"\n`, { mode: 0o755 });
 fs.writeFileSync(path.join(fakeHome, "home-marker"), "the real (fake) home is visible\n");
 // A fake /proc for the copy ramp: a calm machine by default (the busy one is set
 // for the held-copy test), and no gap between copy starts so tests stay quick.
@@ -701,6 +703,89 @@ watcher.kill("SIGKILL");
   // The unrelated chat message in the same stream never reached any file.
   const files = [notifyJsonl, path.join(tabs, "constance", "log.jsonl")].map((f) => fs.readFileSync(f, "utf8")).join("");
   assert.ok(!/lunch|Slack/.test(files), "an unrelated notification is never written anywhere");
+}
+// The goal queue: a goal added while she is free starts at once; goals added while she works wait
+// their turn (reordered and edited meanwhile) and start by themselves when the one before ends well.
+// A goal that ends needing the owner stops the queue and tells them; "goals next" starts it again.
+{
+  fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
+  writeData();
+  try { fs.rmSync(path.join(root, "go")); } catch {}
+  try { fs.rmSync(path.join(root, "notified.txt")); } catch {}
+  // Fake Constance for queued goals: the goal text is in her first message. "build q1" delegates one
+  // tagged job and waits for it; "ask owner" flags a question; anything else just reports.
+  fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+p="\${@: -1}"; C="node ${CLI}"
+echo "$p" | head -1 >> "${root}/queue-goals.txt"
+while [[ ! -e "${root}/qgo" ]]; do sleep 0.2; done
+if grep -q "build q1" <<<"$p"; then
+  $C delegate --agent grok --files q1.txt --item 1 --title "building q1" --task "add q1" >> "${root}/brain.out" 2>&1
+  touch "${root}/go"
+  $C wait --timeout 30 > /dev/null
+  $C review $($C jobs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d).jobs.at(-1);console.log(j.id)})') accept --note "q1 is in"
+elif grep -q "ask owner" <<<"$p"; then
+  $C needs-owner "Pick a color for the button before I go on."
+fi
+echo "Report: done."
+`, { mode: 0o755 });
+  const r1 = run("goals", "add", "--goal", "build q1", "--dir", repo);
+  assert.equal(r1.status, 0, r1.stderr); assert.match(r1.stdout, /on it: build q1/, "free: the first goal starts at once");
+  assert.equal(status().goal.text, "build q1");
+  assert.equal(run("goals", "add", "--goal", "ask owner", "--dir", repo).status, 0);
+  assert.equal(run("goals", "add", "--goal", "third goal", "--dir", repo).status, 0);
+  assert.notEqual(run("goals", "add", "--goal", "nowhere", "--dir", path.join(root, "missing")).status, 0, "a missing folder is refused");
+  assert.notEqual(run("goals", "add", "--goal", "home", "--dir", fakeHome).status, 0, "never the home folder");
+  let q = status().board.goalQueue.goals;
+  assert.deepEqual(q.map((g) => g.text), ["ask owner", "third goal"]);
+  run("goals", "move", q[1].id, "up");
+  assert.deepEqual(status().board.goalQueue.goals.map((g) => g.text), ["third goal", "ask owner"], "reordered");
+  run("goals", "move", q[1].id, "down");
+  run("goals", "edit", q[1].id, "--goal", "third goal, edited");
+  q = status().board.goalQueue.goals;
+  assert.deepEqual(q.map((g) => g.text), ["ask owner", "third goal, edited"]);
+  const extra = run("goals", "add", "--goal", "dropped", "--dir", repo); assert.equal(extra.status, 0);
+  run("goals", "rm", status().board.goalQueue.goals.at(-1).id);
+  assert.equal(status().board.goalQueue.goals.length, 2, "removed");
+  assert.match(run("start", "--dir", repo, "--goal", "x").stderr, /goal queue/, "busy: start points at the queue");
+  // While q1's job runs: the card, the Now line and the checklist.
+  fs.writeFileSync(path.join(root, "qgo"), "");
+  assert.ok(await until(() => status().jobs.some((j) => j.status === "running" && j.title === "building q1")), "the tagged job runs");
+  {
+    const b = status().board;
+    assert.match(b.now, /^Grok is on building q1\. 2 goals queued\.$/, b.now);
+    const card = b.cards.find((c) => c.title === "building q1");
+    assert.equal(card.status, "running"); assert.deepEqual(card.files, ["q1.txt"]); assert.deepEqual(card.items, [1]);
+    assert.equal(b.checklist.line, "0 of 1 done");
+    // The card's full view: prompt and its own log lines.
+    const jv = JSON.parse(run("job", String(card.id)).stdout);
+    assert.match(jv.prompt, /add q1/); assert.equal(jv.guardBefore, undefined);
+    assert.ok(jv.log.some((l) => l.kind === "handoff"));
+  }
+  // q1 ends well -> "ask owner" starts by itself -> it flags the owner -> the queue stops there.
+  assert.ok(await until(() => { const g = status().goal; return g.text === "ask owner" && g.status === "done"; }, 30000), "the next goal started by itself and finished: " + JSON.stringify(status().goal));
+  await until(() => status().board.goalQueue.paused !== "", 5000);
+  const st = status();
+  assert.match(st.board.goalQueue.paused, /Pick a color/, "the queue stopped for the owner");
+  assert.deepEqual(st.board.goalQueue.goals.map((g) => g.text), ["third goal, edited"], "the third goal waits");
+  assert.match(st.board.now, /^She stopped: Pick a color.*The queue waits for you\.$/, st.board.now);
+  assert.ok(st.log.some((l) => l.kind === "needs-you"), "logged for the owner");
+  assert.match(fs.readFileSync(path.join(root, "notified.txt"), "utf8"), /Constance needs you/, "and told with a (silent) notification");
+  assert.match(fs.readFileSync(path.join(root, "notified.txt"), "utf8"), /suppress-sound:true/);
+  const hist = st.board.history;
+  const q1 = hist.find((h) => h.text === "build q1");
+  assert.equal(q1.outcome, "done"); assert.equal(q1.jobs, 1); assert.equal(q1.merged, 1); assert.equal(q1.itemsDone, 1);
+  assert.equal(hist.find((h) => h.text === "ask owner").outcome, "needs you");
+  assert.ok(fs.readFileSync(path.join(tabs, "constance", "history.jsonl"), "utf8").includes('"build q1"'), "kept in history.jsonl");
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(status().goal.text, "ask owner", "nothing moved on by itself");
+  // The owner's "Start next".
+  assert.equal(run("goals", "next").status, 0);
+  assert.ok(await until(() => { const g = status().goal; return g.text === "third goal, edited" && g.status === "done"; }, 30000), "the owner restarted the queue");
+  const sb = status().board;
+  assert.equal(sb.goalQueue.goals.length, 0); assert.equal(sb.goalQueue.paused, "");
+  assert.match(sb.now, /^Free\. Last goal finished\.$/);
+  assert.match(run("goals", "next").stderr, /empty/);
+  assert.deepEqual(fs.readFileSync(path.join(root, "queue-goals.txt"), "utf8").trim().split("\n").map((l) => l.replace(/^Goal from the owner: /, "")), ["build q1", "ask owner", "third goal, edited"]);
 }
 // Every finished or stopped job removed its own sandbox /tmp.
 {

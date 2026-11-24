@@ -974,8 +974,6 @@ Panel {
     }
     return rows
   }
-  // Token meter: shown while a worker runs or a goal is set (its total line also covers today).
-  readonly property bool constanceTokensShown: !!constance.tokens && (((constance.tokens.workers || []).length > 0) || !!constance.goal)
   // "Devin copies: 3 of 10 running · 2 held: machine busy: load 7.1 on 8 cores (starts under 6.4)".
   function constanceCopiesLine(c) {
     if (!c) return ""
@@ -1028,6 +1026,139 @@ Panel {
     return { me: me, ready: ready, waiting: waiting, cant: cant }
   }
   property bool constanceCantOpen: false   // "Can't use" starts collapsed with a count
+
+  // ---- The at-a-glance board (bin/constance-board.mjs, constance-checklist.mjs, constance-goalqueue.mjs):
+  // the checklist, the goal queue, one card per job, the Now line, history, and the log folded away.
+  readonly property var constanceBoard: constance.board || ({ checklist: { items: [], done: 0, total: 0, line: "" }, cards: [], now: "", history: [], goalQueue: { goals: [], paused: "" } })
+  readonly property var constanceGoalQueue: constanceBoard.goalQueue || ({ goals: [], paused: "" })
+  // Live clock for running cards' elapsed time (ticks only while her screen is open).
+  property real constanceNow: Date.now()
+  Timer { interval: 1000; running: root.constanceOpen && root.opened; repeat: true; triggeredOnStart: true; onTriggered: root.constanceNow = Date.now() }
+  function constanceTook(ms) {
+    if (typeof ms !== "number" || !(ms >= 0)) return ""
+    var s = Math.round(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24)
+    if (d) return d + "d " + (h % 24) + "h"
+    if (h) return h + "h " + (m % 60) + "m"
+    if (m) return m + "m"
+    return s + "s"
+  }
+  // A card's time: elapsed while running (live), how long it took once over, or how long it has waited.
+  function constanceCardTime(c) {
+    if (c.status === "running" && c.startedAt) return root.constanceTook(root.constanceNow - c.startedAt)
+    if (c.startedAt && c.endedAt) return root.constanceTook(c.endedAt - c.startedAt)
+    if ((c.status === "queued" || c.status === "held") && c.createdAt) return "waiting " + root.constanceTook(root.constanceNow - c.createdAt)
+    return ""
+  }
+  function constanceStatusColor(st) {
+    if (st === "running") return Color.accent
+    if (st === "in review") return root.amber
+    if (st === "merged" || st === "done") return root.green
+    if (st === "sent back" || st === "conflict" || st === "problem") return root.red
+    return root.dim
+  }
+  // Card / checklist detail: one card open at a time, its full prompt and report fetched on click.
+  property var constanceCardOpen: null
+  property var constanceJobDetail: null
+  function openConstanceCard(id) {
+    if (root.constanceCardOpen === id) { root.constanceCardOpen = null; root.constanceJobDetail = null; return }
+    root.constanceCardOpen = id; root.constanceJobDetail = null
+    if (id === null || id === undefined) return
+    constanceJobReader.command = ["node", root.pluginDir + "/bin/constance.mjs", "job", String(id)]
+    constanceJobReader.running = true
+  }
+  function constanceJobReport(d) {
+    if (!d) return "Loading…"
+    var parts = []
+    if (d.summary) parts.push("Report from " + (d.worker || root.constanceAgentName(d.agent)) + ":\n" + d.summary)
+    if (d.commit) parts.push("Commit: " + d.commit)
+    if (d.reviewNote) parts.push("Her review: " + d.reviewNote)
+    if (d.mergeError) parts.push("Merge: " + d.mergeError)
+    if (d.heldReason && d.status === "held") parts.push("Held: " + d.heldReason)
+    if (!parts.length) parts.push(d.status === "running" ? "No report yet: it is still running." : "No report.")
+    return parts.join("\n\n")
+  }
+  Process {
+    id: constanceJobReader
+    stdout: StdioCollector {
+      onStreamFinished: { try { var d = JSON.parse(String(text || "")); if (d && d.id === root.constanceCardOpen) root.constanceJobDetail = d } catch (e) {} }
+    }
+  }
+  // Goal queue commands (add, rm, edit, move, next). One at a time; any refusal shows as her error line.
+  property bool constanceAddingGoal: false   // the goal box while she works: "+ Add a goal"
+  property string constanceEditId: ""        // a queued goal being edited in the goal box
+  function constanceGoals(args) {
+    if (constanceGoalsRunner.running) return
+    root.constanceError = ""
+    constanceGoalsRunner.command = ["node", root.pluginDir + "/bin/constance.mjs", "goals"].concat(args)
+    constanceGoalsRunner.running = true
+  }
+  function constanceWhere() { return root.squadNewName !== "" ? ["--new", root.squadNewName] : ["--dir", root.squadRepo !== "" ? root.squadRepo : root.home] }
+  // The goal box's button: start now when she's free, queue it while she works, or save an edit.
+  function submitConstanceGoal() {
+    var text = String(goalArea.text || "").trim()
+    if (text === "") return
+    if (root.constanceEditId !== "") { root.constanceGoals(["edit", root.constanceEditId, "--goal", text].concat(root.constanceWhere())); return }
+    if (root.constanceActive) { root.constanceGoals(["add", "--goal", text].concat(root.constanceWhere())); return }
+    root.startConstance(text)
+  }
+  function editQueuedGoal(g) {
+    root.constanceEditId = g.id
+    root.constanceAddingGoal = true
+    goalArea.text = g.text
+    root.squadNewName = ""; root.squadRepo = g.dir
+  }
+  function cancelGoalEdit() { root.constanceEditId = ""; root.constanceAddingGoal = false; goalArea.text = "" }
+  Process {
+    id: constanceGoalsRunner
+    stderr: StdioCollector { id: constanceGoalsErr }
+    onExited: function(code) {
+      if (code !== 0) root.constanceError = String(constanceGoalsErr.text).trim() || ("That didn't work (exit " + code + ").")
+      else {
+        var sub = constanceGoalsRunner.command[3]
+        if (sub === "add" || sub === "edit") { goalArea.text = ""; root.constanceEditId = ""; root.constanceAddingGoal = false }
+      }
+      root.refreshConstance()
+    }
+  }
+  // The raw log: folded away by default, filtered by job, worker and kind.
+  property bool constanceLogOpen: false
+  property string constanceLogJob: ""
+  property string constanceLogWorker: ""
+  property string constanceLogKind: ""
+  property bool constanceHistoryAll: false
+  function constanceLogWho(e) { return e.agent ? (e.worker || root.constanceAgentName(e.agent)) : "" }
+  readonly property var constanceLogFilters: {
+    var jobs = [], workers = [], kinds = [], log = root.constance.log || []
+    for (var i = 0; i < log.length; i++) {
+      var e = log[i]
+      if (e.job !== undefined && e.job !== null && jobs.indexOf(String(e.job)) < 0) jobs.push(String(e.job))
+      var w = root.constanceLogWho(e)
+      if (w && workers.indexOf(w) < 0) workers.push(w)
+      if (e.kind && kinds.indexOf(e.kind) < 0) kinds.push(e.kind)
+    }
+    jobs.sort(function(a, b) { return Number(a) - Number(b) }); workers.sort(); kinds.sort()
+    return { jobs: jobs, workers: workers, kinds: kinds }
+  }
+  readonly property var constanceLogShown: {
+    var out = [], log = root.constance.log || []
+    for (var i = log.length - 1; i >= 0 && out.length < 40; i--) {
+      var e = log[i]
+      if (root.constanceLogJob !== "" && String(e.job) !== root.constanceLogJob) continue
+      if (root.constanceLogWorker !== "" && root.constanceLogWho(e) !== root.constanceLogWorker) continue
+      if (root.constanceLogKind !== "" && e.kind !== root.constanceLogKind) continue
+      out.push(e)
+    }
+    return out
+  }
+  function constanceHistoryLine(h) {
+    var when = h.startedAt ? Qt.formatDateTime(new Date(Number(h.startedAt)), "MMM d, h:mm AP") : ""
+    var parts = [when, h.outcome || "", (h.jobs || 0) + (h.jobs === 1 ? " job" : " jobs") + (h.merged ? " (" + h.merged + " merged)" : "")]
+    if (h.itemsTotal > 1) parts.push(h.itemsDone + " of " + h.itemsTotal + " items")
+    if (h.tokensText) parts.push(h.tokensText + " tokens")
+    if (h.took !== null && h.took !== undefined) parts.push(root.constanceTook(h.took))
+    if (h.practice) parts.push("practice")
+    return parts.filter(function(p) { return p !== "" }).join(" · ")
+  }
   Process {
     id: constanceReader
     command: ["node", root.pluginDir + "/bin/constance.mjs", "status"]
@@ -1332,6 +1463,50 @@ Panel {
     Timer { id: chipReset; interval: 1500; onTriggered: chip.done = false }
     MouseArea { id: chipArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { chip.copy(); chip.done = true; chipReset.restart() } }
     PanelToolTip { visible: chipArea.containsMouse; text: chip.tip; fontFamily: root.fontFamily }
+  }
+  // A small button on Constance's board (reorder, edit, remove, start next). `on` marks a picked filter.
+  component MiniChip: Rectangle {
+    id: mc
+    property string label: ""
+    property string tip: ""
+    property bool on: false
+    property color tint: root.foreground
+    signal clicked()
+    width: mcLabel.implicitWidth + Style.space(12)
+    height: mcLabel.implicitHeight + Style.space(6)
+    radius: Style.cornerRadius
+    color: mc.on ? root.soft(Color.accent, 0.22) : (mcArea.containsMouse ? root.soft(Color.accent, 0.1) : "transparent")
+    border.width: 1
+    border.color: mc.on ? root.soft(Color.accent, 0.8) : root.soft(root.foreground, 0.3)
+    Text {
+      id: mcLabel
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: mc.label
+      color: mc.on ? Color.accent : mc.tint
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+    MouseArea { id: mcArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: mc.clicked() }
+    PanelToolTip { visible: mcArea.containsMouse && mc.tip !== ""; text: mc.tip; fontFamily: root.fontFamily }
+  }
+  // One row of log filters: "Job: All 16 17 18".
+  component LogFilterRow: Flow {
+    id: lfr
+    property string title: ""
+    property var values: []
+    property string picked: ""
+    property var labelFor: function(v) { return v }
+    signal pick(string v)
+    width: parent.width
+    spacing: Style.space(6)
+    visible: values.length > 1
+    Text { textFormat: Text.PlainText; text: lfr.title; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; height: Style.font.caption * 1.25 + Style.space(6); verticalAlignment: Text.AlignVCenter }
+    MiniChip { label: "All"; on: lfr.picked === ""; onClicked: lfr.pick("") }
+    Repeater {
+      model: lfr.values
+      MiniChip { required property var modelData; label: lfr.labelFor(modelData); on: lfr.picked === String(modelData); onClicked: lfr.pick(lfr.picked === String(modelData) ? "" : String(modelData)) }
+    }
   }
   component SettingSwitch: Item {
     id: sw
@@ -2382,10 +2557,10 @@ Panel {
             spacing: Style.space(14)
 
             Column {
-              visible: !root.constanceActive
+              visible: !root.constanceActive || root.constanceAddingGoal || root.constanceEditId !== ""
               width: parent.width
               spacing: Style.space(10)
-              PanelSectionHeader { width: parent.width; text: "GOAL" }
+              PanelSectionHeader { width: parent.width; text: root.constanceEditId !== "" ? "EDIT A QUEUED GOAL" : (root.constanceActive ? "ADD A GOAL TO HER QUEUE" : "GOAL") }
               Rectangle {
                 id: goalBox
                 width: parent.width
@@ -2425,7 +2600,7 @@ Panel {
                     Keys.onPressed: function(event) { if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) { event.accepted = true; goalArea.paste() } }
                     Keys.onEscapePressed: { goalArea.focus = false; keyCatcher.forceActiveFocus() }
                     // Enter makes a new line; Ctrl+Enter hands it to her (the button always works).
-                    Keys.onReturnPressed: function(event) { if (event.modifiers & Qt.ControlModifier) { event.accepted = true; root.startConstance(goalArea.text) } }
+                    Keys.onReturnPressed: function(event) { if (event.modifiers & Qt.ControlModifier) { event.accepted = true; root.submitConstanceGoal() } }
                   }
                 }
                 TapHandler { acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton; onPressedChanged: if (pressed) goalArea.forceActiveFocus() }
@@ -2436,7 +2611,7 @@ Panel {
                 spacing: Style.space(10)
                 Rectangle {
                   id: goTile
-                  readonly property bool ready: goalArea.text.trim() !== "" && !constanceStarter.running
+                  readonly property bool ready: goalArea.text.trim() !== "" && !constanceStarter.running && !constanceGoalsRunner.running
                   width: parent.width - practiceToggle.width - parent.spacing
                   height: goLabel.implicitHeight + Style.space(20)
                   radius: Style.cornerRadius
@@ -2448,14 +2623,14 @@ Panel {
                     id: goLabel
                     anchors.centerIn: parent
                     textFormat: Text.PlainText
-                    text: constanceStarter.running ? "Starting..." : "Give it to Constance"
+                    text: constanceStarter.running ? "Starting..." : (root.constanceEditId !== "" ? "Save changes" : (root.constanceActive ? "Add to queue" : "Give it to Constance"))
                     color: Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     font.bold: true
                   }
-                  MouseArea { id: goArea; anchors.fill: parent; enabled: goTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.startConstance(goalArea.text) }
-                  PanelToolTip { visible: goArea.containsMouse; text: "She plans it, hands pieces to free agents under their limits, reviews everything and reports here. Ctrl+Enter works too."; fontFamily: root.fontFamily }
+                  MouseArea { id: goArea; anchors.fill: parent; enabled: goTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.submitConstanceGoal() }
+                  PanelToolTip { visible: goArea.containsMouse; text: root.constanceActive || root.constanceEditId !== "" ? "Queued goals start by themselves, in order, when the one before ends well. Ctrl+Enter works too." : "She plans it, hands pieces to free agents under their limits, reviews everything and reports here. Ctrl+Enter works too."; fontFamily: root.fontFamily }
                 }
                 Item {
                   id: practiceToggle
@@ -2500,15 +2675,24 @@ Panel {
                 }
               }
               Text {
-                visible: root.constanceError !== ""
-                width: parent.width
+                visible: root.constanceAddingGoal || root.constanceEditId !== ""
                 textFormat: Text.PlainText
-                wrapMode: Text.WordWrap
-                text: root.constanceError
-                color: root.red
+                text: "Cancel"
+                color: Color.accent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.cancelGoalEdit() }
               }
+            }
+            Text {
+              visible: root.constanceError !== ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: root.constanceError
+              color: root.red
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
 
             // The current (or last) goal: what she is on, her pace, and Stop.
@@ -2595,83 +2779,412 @@ Panel {
               }
             }
 
-            // Token meter (bin/constance-tokens.mjs): one line per worker she's running with the tokens
-            // its current job has used (live, from the agents' own usage records matched by folder and
-            // start time, "can't tell" when no single session matches), then one total line: this goal
-            // split by agent, and today.
-            PanelSectionHeader { width: parent.width; text: "TOKENS"; visible: root.constanceTokensShown }
-            Column {
-              visible: root.constanceTokensShown
+            // Now: one plain sentence of what is happening ("Devin 2 is on fixing the guard; 2 jobs waiting for review.").
+            Text {
+              visible: text !== ""
               width: parent.width
-              spacing: Style.space(4)
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: root.constanceBoard.now || ""
+              color: root.constance.goal && root.constance.goal.needsOwner && !root.constanceActive ? root.amber : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            // The goal checklist: its items, ticked as their jobs merge, with a progress bar.
+            Column {
+              visible: root.constanceBoard.checklist && root.constanceBoard.checklist.total > 0
+              width: parent.width
+              spacing: Style.space(6)
+              Item {
+                width: parent.width
+                height: checkHeader.implicitHeight
+                PanelSectionHeader { id: checkHeader; anchors.left: parent.left; text: "CHECKLIST" }
+                Text {
+                  anchors.right: parent.right
+                  anchors.verticalCenter: checkHeader.verticalCenter
+                  textFormat: Text.PlainText
+                  text: root.constanceBoard.checklist.line || ""
+                  color: root.constanceBoard.checklist.done === root.constanceBoard.checklist.total ? root.green : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+              }
+              Rectangle {
+                width: parent.width
+                height: Style.space(6)
+                radius: height / 2
+                color: root.track
+                Rectangle {
+                  width: parent.width * (root.constanceBoard.checklist.total ? root.constanceBoard.checklist.done / root.constanceBoard.checklist.total : 0)
+                  height: parent.height
+                  radius: height / 2
+                  color: root.green
+                  Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                }
+              }
               Repeater {
-                model: (root.constance.tokens && root.constance.tokens.workers) || []
+                model: root.constanceBoard.checklist.items || []
                 Item {
                   required property var modelData
+                  readonly property bool done: modelData.state === "done"
                   width: parent.width
-                  height: Math.max(tokName.implicitHeight, tokCount.implicitHeight)
-                  Text {
-                    id: tokName
+                  height: Math.max(checkBox.height, checkText.implicitHeight)
+                  Rectangle {
+                    id: checkBox
                     anchors.left: parent.left
-                    anchors.right: tokCount.left
-                    anchors.rightMargin: Style.space(8)
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    text: modelData.name
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
+                    anchors.top: parent.top
+                    anchors.topMargin: Style.space(1)
+                    width: Style.space(14); height: width
+                    radius: Style.space(3)
+                    color: parent.done ? root.green : "transparent"
+                    border.width: 1
+                    border.color: parent.done ? root.green : root.constanceStatusColor(modelData.state === "review" ? "in review" : modelData.state === "working" ? "running" : modelData.state)
+                    Text { anchors.centerIn: parent; visible: parent.parent.done; textFormat: Text.PlainText; text: "✓"; color: root.panelBackground; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
                   }
                   Text {
-                    id: tokCount
+                    id: checkText
+                    anchors.left: checkBox.right
+                    anchors.leftMargin: Style.space(8)
                     anchors.right: parent.right
                     textFormat: Text.PlainText
-                    text: modelData.count
-                    color: modelData.tokens === null ? root.dim : root.foreground
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 3
+                    elide: Text.ElideRight
+                    text: modelData.text + (({ working: "  · working", review: "  · in review", problem: "  · merge conflict" })[modelData.state] || "") + (modelData.by === "constance" ? "  · by Constance" : "")
+                    color: parent.done ? root.dim : root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                   }
                 }
               }
+            }
+
+            // The goal queue: goals waiting their turn, each with its folder. Reorder, edit, remove; she starts
+            // the next one by herself when a goal ends well, and stops here when one ends needing the owner.
+            Column {
+              visible: root.constanceGoalQueue.goals.length > 0 || root.constanceActive
+              width: parent.width
+              spacing: Style.space(6)
+              Item {
+                width: parent.width
+                height: Math.max(queueHeader.implicitHeight, queueActions.height)
+                PanelSectionHeader { id: queueHeader; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "GOAL QUEUE" + (root.constanceGoalQueue.goals.length ? " (" + root.constanceGoalQueue.goals.length + ")" : "") }
+                Row {
+                  id: queueActions
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(6)
+                  MiniChip {
+                    visible: !root.constanceActive && root.constanceGoalQueue.goals.length > 0
+                    label: "Start next"
+                    tint: root.green
+                    tip: "Start the first queued goal now" + (root.constanceGoalQueue.paused ? " (the queue stopped for you)" : "")
+                    onClicked: root.constanceGoals(["next"])
+                  }
+                  MiniChip {
+                    visible: root.constanceActive && !root.constanceAddingGoal && root.constanceEditId === ""
+                    label: "+ Add a goal"
+                    tip: "Line up another goal, with its own folder; it starts when this one ends well"
+                    onClicked: { root.constanceAddingGoal = true; goalArea.forceActiveFocus() }
+                  }
+                }
+              }
               Text {
+                visible: root.constanceGoalQueue.paused !== "" && root.constanceGoalQueue.goals.length > 0
                 width: parent.width
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                text: (root.constance.tokens && root.constance.tokens.line) || ""
+                text: "Stopped for you: " + root.constanceGoalQueue.paused + ". Start next when you're ready."
+                color: root.amber
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Text {
+                visible: root.constanceGoalQueue.goals.length === 0
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: "Nothing queued. Add goals while she works; each starts by itself when the one before ends well."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Repeater {
+                model: root.constanceGoalQueue.goals
+                Item {
+                  id: qRow
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  height: Math.max(qText.implicitHeight + qDir.implicitHeight + Style.space(2), qBtns.height)
+                  Text {
+                    id: qNum
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    width: Style.space(18)
+                    textFormat: Text.PlainText
+                    text: (qRow.index + 1) + "."
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    id: qText
+                    anchors.left: qNum.right
+                    anchors.right: qBtns.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.top: parent.top
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                    text: String(modelData.text).replace(/\s*\n\s*/g, "  ")
+                    color: root.constanceEditId === modelData.id ? Color.accent : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    id: qDir
+                    anchors.left: qText.left
+                    anchors.right: qText.right
+                    anchors.top: qText.bottom
+                    anchors.topMargin: Style.space(2)
+                    textFormat: Text.PlainText
+                    elide: Text.ElideMiddle
+                    text: root.shortPath(modelData.dir)
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Row {
+                    id: qBtns
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    spacing: Style.space(4)
+                    MiniChip { label: "↑"; tip: "Move up"; opacity: qRow.index > 0 ? 1 : 0.35; onClicked: if (qRow.index > 0) root.constanceGoals(["move", qRow.modelData.id, "up"]) }
+                    MiniChip { label: "↓"; tip: "Move down"; opacity: qRow.index < root.constanceGoalQueue.goals.length - 1 ? 1 : 0.35; onClicked: if (qRow.index < root.constanceGoalQueue.goals.length - 1) root.constanceGoals(["move", qRow.modelData.id, "down"]) }
+                    MiniChip { label: "Edit"; tip: "Change its text or folder in the goal box"; on: root.constanceEditId === qRow.modelData.id; onClicked: root.editQueuedGoal(qRow.modelData) }
+                    MiniChip { label: "✕"; tint: root.red; tip: "Remove it from the queue"; onClicked: { if (root.constanceEditId === qRow.modelData.id) root.cancelGoalEdit(); root.constanceGoals(["rm", qRow.modelData.id]) } }
+                  }
+                }
+              }
+            }
+
+            // The job board: one compact card per job (and per task she queued for this project). Click a card
+            // for its full prompt and report.
+            Column {
+              visible: (root.constanceBoard.cards || []).length > 0
+              width: parent.width
+              spacing: Style.space(6)
+              PanelSectionHeader { width: parent.width; text: "JOBS" }
+              Flow {
+                id: cardFlow
+                width: parent.width
+                spacing: Style.space(6)
+                readonly property real half: Math.floor((width - spacing) / 2)
+                Repeater {
+                  model: root.constanceBoard.cards || []
+                  Rectangle {
+                    id: jobCard
+                    required property var modelData
+                    readonly property bool open: modelData.id !== null && root.constanceCardOpen === modelData.id
+                    readonly property color tint: root.constanceStatusColor(modelData.status)
+                    width: open ? cardFlow.width : cardFlow.half
+                    height: cardCol.implicitHeight + Style.space(14)
+                    radius: Style.cornerRadius
+                    color: cardArea.containsMouse && modelData.id !== null ? root.soft(Color.accent, 0.08) : root.soft(root.foreground, 0.04)
+                    border.width: 1
+                    border.color: open ? root.soft(Color.accent, 0.7) : root.soft(jobCard.tint, modelData.status === "running" ? 0.7 : 0.3)
+                    MouseArea {
+                      id: cardArea
+                      anchors.fill: parent
+                      enabled: jobCard.modelData.id !== null
+                      hoverEnabled: true
+                      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: root.openConstanceCard(jobCard.modelData.id)
+                    }
+                    Column {
+                      id: cardCol
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.top: parent.top
+                      anchors.margins: Style.space(7)
+                      spacing: Style.space(3)
+                      Item {
+                        width: parent.width
+                        height: Math.max(cardWho.implicitHeight, cardPill.height)
+                        Text {
+                          id: cardWho
+                          anchors.left: parent.left
+                          anchors.right: cardPill.left
+                          anchors.rightMargin: Style.space(6)
+                          anchors.verticalCenter: parent.verticalCenter
+                          textFormat: Text.PlainText
+                          elide: Text.ElideRight
+                          text: (jobCard.modelData.id !== null ? "#" + jobCard.modelData.id + "  " : "") + jobCard.modelData.worker
+                          color: root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          font.bold: true
+                        }
+                        Rectangle {
+                          id: cardPill
+                          anchors.right: parent.right
+                          anchors.verticalCenter: parent.verticalCenter
+                          width: pillText.implicitWidth + Style.space(10)
+                          height: pillText.implicitHeight + Style.space(2)
+                          radius: height / 2
+                          color: root.soft(jobCard.tint, 0.18)
+                          Text { id: pillText; anchors.centerIn: parent; textFormat: Text.PlainText; text: jobCard.modelData.status; color: jobCard.tint; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                        }
+                      }
+                      Text {
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: jobCard.open ? 4 : 2
+                        elide: Text.ElideRight
+                        text: jobCard.modelData.title
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                      Text {
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        text: [root.constanceCardTime(jobCard.modelData), jobCard.modelData.tokensText,
+                               jobCard.modelData.items && jobCard.modelData.items.length ? "item " + jobCard.modelData.items.join(", ") : "",
+                               jobCard.modelData.files.length ? jobCard.modelData.files.join(", ") : "read-only"].filter(function(p) { return p !== "" }).join(" · ")
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                      Text {
+                        visible: text !== ""
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        text: jobCard.modelData.result || ""
+                        color: jobCard.modelData.status === "conflict" || jobCard.modelData.status === "sent back" ? root.red : root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                      // Opened: the full prompt and report, selectable, with Copy.
+                      Item {
+                        visible: jobCard.open
+                        width: parent.width
+                        height: visible ? detailText.contentHeight + Style.space(6) : 0
+                        TextEdit {
+                          id: detailText
+                          anchors.left: parent.left
+                          anchors.right: detailCopy.left
+                          anchors.rightMargin: Style.space(8)
+                          anchors.top: parent.top
+                          anchors.topMargin: Style.space(6)
+                          readOnly: true
+                          selectByMouse: true
+                          textFormat: TextEdit.PlainText
+                          wrapMode: TextEdit.Wrap
+                          text: jobCard.open ? root.constanceJobReport(root.constanceJobDetail) + (root.constanceJobDetail && root.constanceJobDetail.prompt ? "\n\nPrompt:\n" + root.constanceJobDetail.prompt : "") : ""
+                          color: root.foreground
+                          selectionColor: root.soft(Color.accent, 0.35)
+                          selectedTextColor: root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          onActiveFocusChanged: root.constanceTyping = activeFocus
+                          Keys.onEscapePressed: { detailText.deselect(); detailText.focus = false; keyCatcher.forceActiveFocus() }
+                        }
+                        CopyChip {
+                          id: detailCopy
+                          anchors.right: parent.right
+                          anchors.top: parent.top
+                          anchors.topMargin: Style.space(6)
+                          tip: "Copy the report and full prompt"
+                          onCopy: root.copyText(detailText.text)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              // Token totals (bin/constance-tokens.mjs): this goal by agent, and today.
+              Text {
+                visible: text !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: (root.constance.tokens && root.constance.tokens.line) ? "Tokens: " + root.constance.tokens.line : ""
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
               }
             }
 
-            // The ready queue: tasks she lined up for this project while planning. The next one is
-            // handed to the finishing agent automatically when its job is accepted.
-            PanelSectionHeader { width: parent.width; text: "READY QUEUE"; visible: (root.constance.queue || []).length > 0 }
+            // History: past goals over the days, newest first.
             Column {
-              visible: (root.constance.queue || []).length > 0
+              visible: (root.constanceBoard.history || []).length > 0
               width: parent.width
-              spacing: Style.space(4)
+              spacing: Style.space(6)
+              PanelSectionHeader { width: parent.width; text: "HISTORY" }
               Repeater {
-                model: root.constance.queue || []
-                Text {
+                model: (root.constanceBoard.history || []).slice(0, root.constanceHistoryAll ? 30 : 5)
+                Item {
                   required property var modelData
+                  readonly property color tint: modelData.outcome === "done" ? root.green : (modelData.outcome === "needs you" || modelData.outcome === "couldn't finish" ? root.amber : root.dim)
                   width: parent.width
-                  textFormat: Text.PlainText
-                  wrapMode: Text.WordWrap
-                  text: "• " + modelData.task + (modelData.files && modelData.files.length ? "  (" + modelData.files.join(", ") + ")" : "") + (modelData.agent ? "  → " + root.constanceAgentName(modelData.agent) : "")
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                  height: histGoal.implicitHeight + histLine.implicitHeight + Style.space(2)
+                  Rectangle { id: histDot; anchors.left: parent.left; anchors.verticalCenter: histGoal.verticalCenter; width: Style.space(8); height: width; radius: width / 2; color: parent.tint }
+                  Text {
+                    id: histGoal
+                    anchors.left: histDot.right
+                    anchors.leftMargin: Style.space(8)
+                    anchors.right: parent.right
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    text: String(modelData.text || "").split("\n")[0]
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    id: histLine
+                    anchors.left: histGoal.left
+                    anchors.right: parent.right
+                    anchors.top: histGoal.bottom
+                    anchors.topMargin: Style.space(2)
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    text: root.constanceHistoryLine(modelData) + (modelData.dir ? " · " + root.shortPath(modelData.dir) : "")
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
                 }
+              }
+              Text {
+                visible: (root.constanceBoard.history || []).length > 5
+                textFormat: Text.PlainText
+                text: root.constanceHistoryAll ? "Show less" : "Show all " + root.constanceBoard.history.length
+                color: Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.constanceHistoryAll = !root.constanceHistoryAll }
               }
             }
 
-            // The log comes before the agent list: it is the biggest section and must be visible
-            // without scrolling past the agents. Newest entry on top.
+            // The raw log, folded away by default; filters by job, worker and kind. Newest entry on top.
             Item {
               width: parent.width
               height: Math.max(logHeader.implicitHeight, copyAllChip.height)
-              PanelSectionHeader { id: logHeader; anchors.left: parent.left; anchors.right: copyAllChip.left; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter; text: "LOG" }
+              PanelSectionHeader {
+                id: logHeader
+                anchors.left: parent.left; anchors.right: copyAllChip.left; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter
+                text: (root.constanceLogOpen ? "▾ " : "▸ ") + "LOG" + ((root.constance.log || []).length ? " (" + (root.constance.log || []).length + ")" : "")
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.constanceLogOpen = !root.constanceLogOpen }
+              }
               CopyChip {
                 id: copyAllChip
                 visible: (root.constance.log || []).length > 0
@@ -2682,21 +3195,30 @@ Panel {
                 onCopy: root.copyConstanceLog()
               }
             }
+            Column {
+              visible: root.constanceLogOpen
+              width: parent.width
+              spacing: Style.space(4)
+              LogFilterRow { title: "Job"; values: root.constanceLogFilters.jobs; picked: root.constanceLogJob; labelFor: function(v) { return "#" + v }; onPick: function(v) { root.constanceLogJob = v } }
+              LogFilterRow { title: "Worker"; values: root.constanceLogFilters.workers; picked: root.constanceLogWorker; onPick: function(v) { root.constanceLogWorker = v } }
+              LogFilterRow { title: "Kind"; values: root.constanceLogFilters.kinds; picked: root.constanceLogKind; onPick: function(v) { root.constanceLogKind = v } }
+            }
             Text {
-              visible: (root.constance.log || []).length === 0
+              visible: root.constanceLogOpen && root.constanceLogShown.length === 0
               width: parent.width
               textFormat: Text.PlainText
-              text: "Nothing yet. Every task she hands out, and what comes back, shows here."
+              text: (root.constance.log || []).length ? "Nothing matches those filters." : "Nothing yet. Every task she hands out, and what comes back, shows here."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
             Column {
+              visible: root.constanceLogOpen
               width: parent.width
               spacing: Style.space(6)
               HoverHandler { onHoveredChanged: root.constanceLogPointing = hovered }
               Repeater {
-                model: (root.constance.log || []).slice().reverse().slice(0, 40)
+                model: root.constanceLogOpen ? root.constanceLogShown : []
                 // Each entry is selectable text (drag to select, Ctrl+C copies) with its own Copy
                 // chip. Long entries show their first lines until "Show all"; Copy always has it all.
                 Item {

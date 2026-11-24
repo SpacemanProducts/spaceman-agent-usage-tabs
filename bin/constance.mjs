@@ -15,6 +15,11 @@
 //   signals                     recent agent-finished notifications she heard
 //   wait [--timeout S]          block until a job finishes; prints the next one to review, oldest first
 //   review ID accept|send-back --note TEXT        record her verdict
+//   check N [--note TEXT]       tick checklist item N that she did herself
+//   needs-owner TEXT            the goal ends needing the owner: the goal queue stops instead of moving on
+//   job ID                      one job in full (prompt, report, review, its log lines) for the panel's card
+//   goals [add --goal T --dir D | rm ID | edit ID [--goal T] [--dir D] | move ID up|down|top|N | next]
+//                               the owner's goal queue (the panel's GOAL QUEUE); no subcommand lists it
 //   note TEXT                   a line in the owner's log
 //   stop                        halt everything at once (her, every job)
 //   recover                     panel load: restart the driver if a goal is active and it isn't running
@@ -38,6 +43,9 @@ import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.m
 import { logText } from "./constance-logtext.mjs";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
 import { tokenMeter, matchJobs, snapshots, readRecords, usageFile, refreshInBackground, refreshNow } from "./constance-tokens.mjs";
+import { parseItems, parseItemArg, checklist } from "./constance-checklist.mjs";
+import { cards, nowLine, history, goalRecord } from "./constance-board.mjs";
+import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner } from "./constance-goalqueue.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -254,7 +262,7 @@ function copyRoom(s, agent, machine) {
 // ramp up: when the machine has no room yet (constance-ramp.mjs), the job is
 // held — its files and number stay reserved — and releaseHeld() starts it later.
 // Throws with a human reason on any refusal; returns { job, who, verdict, practice, held }.
-function handOut({ agent, task, files = [], preferCopy = 0 }) {
+function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = "" }) {
   const g = store.read().goal;
   if (!g || g.status !== "running") throw new Error("No goal is running (stopped or paused), so nothing is handed out.");
   if (!agent || !task) throw new Error("delegate needs --agent ID and --task TEXT");
@@ -289,6 +297,8 @@ function handOut({ agent, task, files = [], preferCopy = 0 }) {
     }
     const id = s.next++;
     const j = { id, goal: g.id, agent, account, repo: dir, dir, files, task, status: practice ? "finished" : room.ok ? "waiting" : "held", createdAt: Date.now() };
+    if (items.length) j.items = items;
+    if (title) j.title = String(title).trim().slice(0, 80);
     if (useCopy) { j.copy = copy; j.worker = worker; j.worktree = worktreeFor(id); j.branch = branchFor(id); }
     if (!room.ok) j.heldReason = room.reason;
     // Claimed now, so a second handOut racing this one sees the start and ramps.
@@ -412,8 +422,9 @@ function copiesView(s) {
 
 function delegate() {
   const agent = arg("--agent"), task = arg("--task"), files = arg("--files").split(",").map((x) => x.trim()).filter(Boolean);
+  const items = parseItemArg(arg("--item")), title = arg("--title");
   let r;
-  try { r = handOut({ agent, task, files }); }
+  try { r = handOut({ agent, task, files, items, title }); }
   catch (e) { fail(e.message); }
   const { job, who, verdict } = r;
   if (r.practice) {
@@ -435,7 +446,7 @@ function autoNext(j) {
   if (!item) return "";
   const agent = item.agent || j.agent;
   try {
-    const r = handOut({ agent, task: item.task, files: item.files || [], preferCopy: agent === j.agent ? j.copy || 0 : 0 });
+    const r = handOut({ agent, task: item.task, files: item.files || [], preferCopy: agent === j.agent ? j.copy || 0 : 0, items: parseItemArg(item.items || []), title: item.title || "" });
     finishTask(j.dir, item.id, r.job.id, store.dir);
     store.log({ kind: "note", text: `Ready queue: "${item.task.slice(0, 80)}" went to ${agent} automatically as job ${r.job.id}.` });
     return r.practice
@@ -464,7 +475,7 @@ function queueCmd() {
   const task = arg("--task");
   if (task) {
     const files = arg("--files").split(",").map((x) => x.trim()).filter(Boolean);
-    const item = addTask(g.dir, { task, files, agent: arg("--agent") }, store.dir);
+    const item = addTask(g.dir, { task, files, agent: arg("--agent"), items: parseItemArg(arg("--item")), title: arg("--title") }, store.dir);
     store.log({ kind: "note", text: `Ready queue: "${task.slice(0, 80)}" queued (${files.length ? files.join(", ") : "read-only"}${item.agent ? ", for " + item.agent : ", any agent"}).` });
     out(`Queued as task ${item.id}. It goes to ${item.agent || "the finishing agent"} automatically when the current job is accepted.`);
     return;
@@ -576,7 +587,9 @@ const ROLE = (dir) => `You are Constance, the quarterback of the owner's coding 
 Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir}.
 - \`C pace\`: your own session/weekly pacing. Obey its mode. "normal": keep hard, risky or architectural work, delegate routine well-defined low-risk pieces. "delegate": you are burning your limits too fast, so delegate editing and testing too and keep only planning and review. You never run out of your own limits; the driver pauses you at 90% and resumes after the reset.
 - \`C agents\`: who is available right now (under their limits, signed in, readable, free). Re-check right before every handoff; availability changes as limits reset. No agent is the default: spread work over whoever has spare capacity. Never use an agent that isn't listed as available, and never anything that costs money.
-- \`C delegate --agent ID --files a,b --task "..."\`: hand off one small, clear task — the smaller and more self-contained, the better; give weaker agents smaller pieces. List every file it may edit; two editing jobs may never share files, and you must not edit a running job's files yourself. For read-only work (investigating a cause, summarizing a file) omit \`--files\`. The tool adds the folder check, git rules, tests/build and done file to the prompt, so the task text itself only needs to say what to do.
+- The goal's checklist: \`C status\` shows the goal split into numbered items (board.checklist), which the owner watches tick. Tag every handoff with the item it is for, \`--item N\` (or \`--item 1,3\`), and give it \`--title "fixing the guard"\`: a few plain words, starting with a verb in -ing form, shown to the owner as "Devin 2 is fixing the guard". An item ticks when one of its jobs is merged and none is still open. When you finish an item yourself, \`C check N --note "..."\`.
+- If the goal ends with something only the owner can settle (a decision, a merge conflict, a failure you couldn't fix, an item you had to leave), run \`C needs-owner "one plain sentence"\` before your report. The owner's next queued goal then waits for them instead of starting.
+- \`C delegate --agent ID --files a,b --item N --title "..." --task "..."\`: hand off one small, clear task — the smaller and more self-contained, the better; give weaker agents smaller pieces. List every file it may edit; two editing jobs may never share files, and you must not edit a running job's files yourself. For read-only work (investigating a cause, summarizing a file) omit \`--files\`. The tool adds the folder check, git rules, tests/build and done file to the prompt, so the task text itself only needs to say what to do.
 - Devin may run as several copies at once (up to ${limitOf("devin")}): each editing job gets its own worktree and branch, shows up as Devin 1..${limitOf("devin")}, and merges into the project only after you accept it. Give copies tasks whose files never overlap; if a merge ever conflicts the job is marked and left for the owner — report it, don't force it. Copies ramp up as the machine allows: a delegate may come back "held" — its files are reserved and it starts by itself when the load and free memory allow, so never delegate it again; just keep going and \`wait\`.
 - When a bug's cause is unknown, the first handoff changes nothing: tell the agent to find the cause, report it in a few lines and stop. Send the fix as a second handoff once you know the cause.
 - When a large file needs reading, hand that to a free agent to summarize instead of reading it all yourself.
@@ -589,34 +602,177 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - \`C lesson "..."\`: add one short lesson to your lessons file — something you learned the hard way this goal (a skipped check, a surprise an agent caused, a rule that saved time). It is advice for your future goals, never a rule that overrides the ones above. Read your lessons before each goal; they are already in your first message.
 Before you edit anything, run \`git status\`; commit only your own changes, never push or deploy. When the goal is done and every job is reviewed, finish with a short plain report for the owner: what was done, by whom, the commits, anything left open.`;
 
-function startGoal() {
-  const text = arg("--goal").trim(), fresh = arg("--new");
-  if (!text) fail("Tell Constance a goal first.");
-  let dir = path.resolve(arg("--dir") || ".");
+// The project folder for a goal: --dir, or a "+ New project" name made in ~/Projects. Throws with a
+// human reason when it can't be used (never the home folder itself).
+function resolveDir(dirArg, fresh) {
+  let dir = path.resolve(dirArg || ".");
   if (fresh) {   // "+ New project" in the folder step: made in ~/Projects with git set up, as Start and CS do
-    if (fresh.includes("/") || fresh.startsWith(".")) fail("Use a plain folder name.");
+    if (fresh.includes("/") || fresh.startsWith(".")) throw new Error("Use a plain folder name.");
     dir = path.join(process.env.SQUAD_PROJECTS || path.join(process.env.HOME, "Projects"), fresh);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
       spawnSync("bash", ["-c", 'source "$1"; init_repo "$2"', "_", path.join(HERE, "folders.sh"), dir], { env: ENV });
     }
   }
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) fail(`No such folder: ${dir}`);
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new Error(`No such folder: ${dir}`);
   // Never the home folder itself (or anything above it): she and her agents run
   // with permission prompts skipped, so the project folder is their whole world.
   const home = path.resolve(process.env.HOME || "/");
   const real = fs.realpathSync(dir);
-  if (real === home || real === "/" || home.startsWith(real.endsWith("/") ? real : real + "/")) fail("Pick a project folder first: Constance never works in your home folder itself.");
+  if (real === home || real === "/" || home.startsWith(real.endsWith("/") ? real : real + "/")) throw new Error("Pick a project folder first: Constance never works in your home folder itself.");
+  return dir;
+}
+
+// Make `text` in `dir` the current goal (refused while one is active). `from` is the queued goal's id.
+function beginGoal(text, dir, extra = {}) {
   const res = store.update((s) => {
     if (s.goal && ["running", "paused"].includes(s.goal.status)) return { busy: s.goal };
-    s.goal = { id: randomUUID().slice(0, 8), text, dir, status: "running", session: randomUUID(), startedAt: Date.now(), started: false };
+    s.goal = { id: randomUUID().slice(0, 8), text, dir, items: parseItems(text), status: "running", session: randomUUID(), startedAt: Date.now(), started: false, ...extra };
     s.jobs = s.jobs.filter((j) => j.status === "running");   // a fresh goal starts a fresh job list
     return s.goal;
   });
-  if (res.busy) fail(`Constance is already on a goal: "${res.busy.text}". Stop it first.`);
+  if (res.busy) return res;
   store.log({ kind: "goal", text: `${text} (in ${dir})` });
+  return res;
+}
+
+function startGoal() {
+  const text = arg("--goal").trim();
+  if (!text) fail("Tell Constance a goal first.");
+  let dir;
+  try { dir = resolveDir(arg("--dir"), arg("--new")); } catch (e) { fail(e.message); }
+  const res = beginGoal(text, dir);
+  if (res.busy) fail(`Constance is already on a goal: "${res.busy.text}". Stop it first, or add this one to her goal queue.`);
+  resumeQueue(store.dir);   // the owner starting a goal by hand is the go-ahead for the queue again
   spawnDriver();
   out(`Constance is on it: ${text}`);
+}
+
+// ---------------------------------------------------------------- goal end, history and the goal queue
+const historyFile = () => path.join(store.dir, "history.jsonl");
+function readHistory() {
+  try { return fs.readFileSync(historyFile(), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
+}
+// Keep the goal that just ended in history.jsonl (once per goal), with its tokens kept first.
+function recordHistory(fresh = true) {
+  let records = [];
+  try { records = keepTokens(fresh); } catch {}
+  const s = store.read();
+  if (!s.goal || ["running", "paused"].includes(s.goal.status)) return null;
+  if (readHistory().some((r) => r.id === s.goal.id)) return null;
+  const rec = goalRecord(s.goal, s.jobs, matchJobs(s.jobs, records));
+  fs.appendFileSync(historyFile(), JSON.stringify(rec) + "\n");
+  return rec;
+}
+
+// Quiet desktop notice (no sound: only the reset cha-ching makes noise).
+function tellOwner(title, body) {
+  try { spawnSync("notify-send", ["-a", "Constance", "-t", "10000", "-u", "normal", "-i", "dialog-warning", "-h", "boolean:suppress-sound:true", title, body], { env: ENV, timeout: 5000, stdio: "ignore" }); } catch {}
+}
+
+// A goal just ended (done or failed) in the driver. Record it; then either stop the goal queue and
+// tell the owner why, or start the next queued goal. Returns true when a next goal was started.
+function afterGoal() {
+  const s = store.read(), g = s.goal;
+  if (!g || ["running", "paused"].includes(g.status)) return false;
+  const why = needsOwner(g, s.jobs, { practice: practiceMode() });
+  if (why.length) {
+    const text = why.join("; ");
+    store.update((x) => { if (x.goal && x.goal.id === g.id) x.goal.needsOwner = text.charAt(0).toUpperCase() + text.slice(1) + "."; });
+  }
+  recordHistory();
+  const q = readGoalQueue(store.dir);
+  if (why.length) {
+    if (q.goals.length) {
+      pauseQueue(store.dir, why.join("; "));
+      store.log({ kind: "needs-you", text: `Goal queue stopped: ${why.join("; ")}. ${q.goals.length} goal${q.goals.length === 1 ? "" : "s"} wait for you.` });
+      tellOwner("Constance needs you", `${why.join("; ")}. The goal queue is stopped until you start the next goal.`);
+    } else {
+      store.log({ kind: "needs-you", text: `${why.join("; ")}.` });
+      tellOwner("Constance needs you", `${why.join("; ")}.`);
+    }
+    return false;
+  }
+  const next = takeNext(store.dir);
+  if (!next) return false;
+  let dir;
+  try { dir = resolveDir(next.dir); }
+  catch (e) {
+    pauseQueue(store.dir, `the next goal's folder can't be used: ${e.message}`);
+    // Put it back first in line so nothing is lost.
+    const back = addGoal(store.dir, next); moveGoal(store.dir, back.id, "top");
+    store.log({ kind: "needs-you", text: `Goal queue stopped: the next goal's folder can't be used (${e.message}).` });
+    tellOwner("Constance needs you", `The next queued goal's folder can't be used: ${e.message}`);
+    return false;
+  }
+  const res = beginGoal(next.text, dir, { fromQueue: next.id, driverPid: process.pid });
+  if (res.busy) return false;
+  store.log({ kind: "note", text: "Started the next goal from the goal queue." });
+  spawnWatcher();
+  return true;
+}
+
+// `goals`: the owner's goal queue.
+function goalsCmd() {
+  const sub = process.argv[3], id = process.argv[4];
+  try {
+    if (sub === "add") {
+      const text = arg("--goal").trim();
+      const g = addGoal(store.dir, { text, dir: resolveDir(arg("--dir"), arg("--new")) });
+      store.log({ kind: "queue", text: `Goal queued: ${g.text.split("\n")[0].slice(0, 100)} (in ${g.dir})` });
+      // Nothing running: the owner adding a goal is the go-ahead, so start it now.
+      const cur = store.read().goal;
+      if (!cur || !["running", "paused"].includes(cur.status)) {
+        const q = readGoalQueue(store.dir);
+        if (!q.paused && q.goals.length === 1) return startNextNow();
+      }
+      return out(`Queued: ${g.text.split("\n")[0].slice(0, 100)}`);
+    }
+    if (sub === "rm") { const g = removeGoal(store.dir, id); store.log({ kind: "queue", text: `Goal removed from the queue: ${g.text.split("\n")[0].slice(0, 100)}` }); return out("removed"); }
+    if (sub === "edit") {
+      const text = process.argv.includes("--goal") ? arg("--goal") : undefined;
+      const dir = arg("--dir") || arg("--new") ? resolveDir(arg("--dir"), arg("--new")) : "";
+      editGoal(store.dir, id, { text, dir }); return out("edited");
+    }
+    if (sub === "move") { moveGoal(store.dir, id, process.argv[5]); return out("moved"); }
+    if (sub === "next") return startNextNow();
+  } catch (e) { fail(e.message); }
+  const q = readGoalQueue(store.dir);
+  out(q);
+}
+// The owner's "Start next": clears a stopped queue and starts the first goal.
+function startNextNow() {
+  const cur = store.read().goal;
+  if (cur && ["running", "paused"].includes(cur.status)) fail("She is already on a goal; the next one starts when it ends.");
+  const next = takeNext(store.dir, { force: true });
+  if (!next) fail("The goal queue is empty.");
+  let dir;
+  try { dir = resolveDir(next.dir); } catch (e) { const back = addGoal(store.dir, next); moveGoal(store.dir, back.id, "top"); fail(e.message); }
+  const res = beginGoal(next.text, dir, { fromQueue: next.id });
+  if (res.busy) fail("She is already on a goal.");
+  spawnDriver();
+  out(`Constance is on it: ${next.text.split("\n")[0]}`);
+}
+
+// `check N`: she ticks an item she did herself.
+function checkCmd() {
+  const n = Number(process.argv[3]), note = arg("--note");
+  const g = store.read().goal;
+  if (!g) fail("No goal.");
+  const total = checklist(g, []).total;
+  if (!(Number.isInteger(n) && n >= 1 && n <= total)) fail(`Pick an item from 1 to ${total}.`);
+  store.update((s) => { s.goal.checked = { ...(s.goal.checked || {}), [n]: note || "done by Constance" }; });
+  store.log({ kind: "note", text: `Item ${n} done${note ? ": " + note : ""}.` });
+  out(`Item ${n} ticked.`);
+}
+
+// `job ID`: one job in full for the panel's card.
+function jobCmd() {
+  const id = Number(process.argv[3]);
+  const s = store.read(), j = s.jobs.find((x) => x.id === id);
+  if (!j) fail(`No job ${id}.`);
+  const { guardBefore, ...rest } = j;
+  out({ ...rest, log: store.readLog(2000).filter((e) => e.job === id && e.kind !== "practice").slice(-20) });
 }
 
 function spawnDriver() {
@@ -747,6 +903,7 @@ async function drive() {
     if (code === 0) {
       store.update((s) => { s.goal.status = "done"; s.goal.finishedAt = Date.now(); s.goal.report = report.slice(-4000); });
       store.log({ kind: "report", text: report.slice(-4000) || "(no report)" });
+      if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
     }
     // Opus (or whatever she is on) isn't allowed on this Claude plan: drop to the best model that is
@@ -762,6 +919,7 @@ async function drive() {
     if (++failures >= 3) {
       store.update((s) => { s.goal.status = "failed"; s.goal.finishedAt = Date.now(); });
       store.log({ kind: "failed", text: `Claude exited with code ${code} three times. ${report.slice(-400)}` });
+      afterGoal();
       return;
     }
     store.log({ kind: "note", text: `Claude exited with code ${code}; retrying in a minute.` });
@@ -787,6 +945,7 @@ function stopAll() {
   if (g && alive(g.driverPid, "constance.mjs")) killGroup(g.driverPid);
   if (isWatcher(watcherPid())) killGroup(watcherPid());
   store.log({ kind: "stopped", text: "Stop pressed: Constance and every job halted." });
+  try { recordHistory(false); } catch {}   // halted workers' counts were kept above
   out("Stopped.");
 }
 
@@ -818,11 +977,25 @@ function tokensView(s, d, records) {
   return view;
 }
 
+function boardView(s, d, records) {
+  const names = Object.fromEntries((d.agents || []).filter((a) => a.name).map((a) => [a.id, a.name]));
+  const name = (id) => names[id] || (id ? id[0].toUpperCase() + id.slice(1) : id);
+  const live = matchJobs(s.jobs, records);
+  const gq = readGoalQueue(store.dir);
+  return {
+    checklist: checklist(s.goal, s.jobs),
+    cards: cards({ jobs: s.jobs, goal: s.goal, queue: s.goal && ["running", "paused"].includes(s.goal.status) ? queueView(s.goal.dir, store.dir) : [], live, names: name }),
+    now: nowLine({ goal: s.goal, jobs: s.jobs, names: name, goalQueue: gq.goals, queuePaused: gq.paused }),
+    history: history({ records: readHistory(), log: store.readLog(5000), goal: s.goal, jobs: s.jobs, live }),
+    goalQueue: gq,
+  };
+}
+
 function status() {
   const records = keepTokens();
   const s = store.read(), d = readData();
-  out({ goal: s.goal, tokens: tokensView(s, d, records), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
-    queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(80) });
+  out({ goal: s.goal, board: boardView(s, d, records), tokens: tokensView(s, d, records), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
+    queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) });
 }
 
 const cmd = process.argv[2];
@@ -853,6 +1026,16 @@ if (process.argv[1] === SELF) {
     out("lesson added");
   }
   else if (cmd === "stop") stopAll();
+  else if (cmd === "goals") goalsCmd();
+  else if (cmd === "check") checkCmd();
+  else if (cmd === "job") jobCmd();
+  else if (cmd === "needs-owner") {
+    const text = process.argv.slice(3).join(" ").trim();
+    if (!text) fail("Usage: needs-owner TEXT");
+    store.update((s) => { if (s.goal) s.goal.needsOwner = text; });
+    store.log({ kind: "needs-you", text });
+    out("noted: the goal queue waits for the owner after this goal");
+  }
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|agents|pace|jobs|delegate|wait|review|note|lesson|queue|signals|log|watch|stop|recover");
+  else fail("Usage: constance.mjs start|status|agents|pace|jobs|job|delegate|wait|review|check|needs-owner|note|lesson|queue|goals|signals|log|watch|stop|recover");
 }

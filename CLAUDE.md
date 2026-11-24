@@ -116,7 +116,7 @@ keeps the developer in flow:
   foreign agents logged and left alone; since 1.41.1 only Ghostty/agent-CLI senders are heard,
   bodies are never stored, foreign runs keep no text, and the watcher exits when the goal ends) and has a real ready-task queue
   (`bin/constance-queue.mjs`, `C queue`, auto-handed on review accept, shown in
-  the panel's READY QUEUE section).
+  the panel's job board as queued cards).
   Since 1.42.0 every worker runs in bubblewrap (`bin/constance-sandbox.mjs`, test
   `constance-sandbox.test.mjs`): writable = project, the agent's own config/login folders
   (`PROFILES`), a per-job /tmp. The home folder is an empty tmpfs with only the toolchains
@@ -158,6 +158,16 @@ keeps the developer in flow:
   one, with no overlapping same-agent job, in a shared folder. Anything else is "can't tell". Counts
   are kept on the job (`tokens`) before worktrees are dropped. `status` starts a background rescan
   at most every 30 s while a worker runs (`CONSTANCE_TOKENS_GAP_MS` shortens it in tests).
+  Since 1.48.0 her panel is a board (`status` -> `board`): Now line, goal checklist
+  (`bin/constance-checklist.mjs`: items = the goal's top-level numbered/bulleted lines, else the whole
+  goal; a job counts for an item only via `delegate --item N`, or when the goal has one item; ticked when
+  a job of it is merged and none is open, or by `check N`; practice never ticks), job cards and history
+  (`bin/constance-board.mjs`; `history.jsonl`, older goals rebuilt from log.jsonl, tokens only where
+  known), and the log folded with job/worker/kind filters. `job ID` gives a card's full prompt/report.
+  Goal queue (`bin/constance-goalqueue.mjs`, `goal-queue.json`, `C goals ...`): the driver's `afterGoal()`
+  records history, then either starts the next goal in the same driver or, when `needsOwner()` finds a
+  problem, pauses the queue, logs `needs-you` and sends a silent notify-send. Stop never advances the
+  queue; a goal started by hand or "Start next" clears a pause.
 
 ## Working rules
 
