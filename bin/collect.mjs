@@ -258,14 +258,6 @@ for (const a of AGENTS) {
   const plans = modelsConfig()?.plans || {};
   if (a.id === "copilot" && out.copilotFree && plans.copilot?.freeNote) out.planNote = plans.copilot.freeNote;
   if (a.id === "devin" && /free/i.test(String(out.plan || "")) && Date.now() < DEVIN_FLASH_FREE_UNTIL && plans.devin?.freeNote) out.planNote = plans.devin.freeNote;
-  if (a.id === "kiro") {
-    const k = planInfo("kiro", { env: ENV, stateDir: OUT_DIR, onUnexpected });
-    out.signedIn = !!k;
-    if (k) {
-      out.limits = k.limits; out.status = ""; if (k.plan) out.plan = k.plan;
-      if (/free/i.test(k.plan) && plans.kiro?.freeNote) out.planNote = plans.kiro.freeNote;
-    }
-  }
   if (a.id === "amp") {
     const m = planInfo("amp", { env: ENV, stateDir: OUT_DIR, onUnexpected });
     out.signedIn = !!m;

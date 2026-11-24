@@ -6,25 +6,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-const clamp01 = (n) => Math.max(0, Math.min(1, n));
-const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-// Kiro: `kiro-cli chat --no-interactive "/usage"`
-//   Estimated Usage | resets on 2026-12-01 | KIRO FREE
-//   Credits (0.02 of 50 covered in plan), 0.0%
-export function parseKiroUsage(out) {
-  const head = String(out).match(/Estimated Usage\s*\|\s*resets on (\d{4}-\d{2}-\d{2})\s*\|\s*([^\n]+)/i);
-  const cr = String(out).match(/Credits \(([\d.,]+) of ([\d.,]+)/i);
-  if (!head && !cr) return null;
-  const num = (s) => Number(String(s).replace(/,/g, ""));
-  const plan = head ? head[2].trim().replace(/^kiro\s+/i, "").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : "";
-  const info = { plan, limits: [] };
-  if (cr && num(cr[2]) > 0) {
-    info.limits.push({ title: "Credits", percent: clamp01(num(cr[1]) / num(cr[2])), resetsAt: head ? `${head[1]}T00:00:00Z` : "", detail: `${cr[1]} of ${cr[2]}` });
-  }
-  return info;
-}
-
 // Amp: `amp usage`. Only the sign-in and a daily allowance (if Amp reports one)
 // are used; purchased credit balances are deliberately ignored.
 export function parseAmpUsage(out) {
@@ -35,7 +16,6 @@ export function parseAmpUsage(out) {
 }
 
 const RUNNERS = {
-  kiro: { cmd: ["kiro-cli", "chat", "--no-interactive", "/usage"], parse: parseKiroUsage },
   amp: { cmd: ["amp", "usage"], parse: parseAmpUsage },
 };
 const TTL_MS = 30 * 60 * 1000;

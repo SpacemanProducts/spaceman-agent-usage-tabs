@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.29.1 - 2026-11-23
+- **Kiro shows an honest "can't read" note:** `kiro-cli` has no headless usage command (`/usage` is interactive-only), so the guessed collector is removed rather than showing stale or invented numbers.
+
 ## 1.29.0 - 2026-11-23
 - **Hidden folders are restore-only:** the Hidden folders view shows a labeled Restore button and no pin control; restoring returns a folder to the main list unpinned (it can be pinned there), and hiding a pinned folder unpins it.
 

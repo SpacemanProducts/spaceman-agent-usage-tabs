@@ -370,7 +370,7 @@
    "cantRead": "Can't read: Kimi's quotas, because Kimi isn't signed in. Run `kimi login` and they will show."
   },
   "kiro": {
-   "freeNote": "Free tier: 50 credits a month; paid tiers run from 1,000 to 10,000 credits."
+   "cantRead": "Can't read: Kiro's plan limits. `kiro-cli` has no headless usage command — `/usage` only exists in its interactive UI — so nothing is shown rather than guessed. Free tier is 50 credits a month; paid tiers run from 1,000 to 10,000."
   },
   "amp": {
    "freeNote": "The free tier is in flux: the ad-supported tier was reported paused, and a $10 daily allowance remains for some users. A daily allowance is shown only if Amp reports one.",
