@@ -3,6 +3,10 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.39.0 - 2026-11-24
+- **First-run welcome screen:** the first time the panel opens after install it shows a Welcome screen with three tips (the glanceable meters and celebrations, tabs/models/drag-order and the header buttons, and the privacy rules) and a "Got it" button that dismisses it for good. Until then it reappears on each open; auto-opened reset panels never trigger it.
+- **Durable backups:** `bin/backup.sh` writes a timestamped tarball of the plugin folder plus `shell.json` into `~/.local/share/agent-usage-tabs-backups/` (keeping the newest 10) instead of /tmp, and CLAUDE.md now requires it before editing.
+
 ## 1.38.0 - 2026-11-24
 - **Public-release polish:** README rewritten for new users — install check, update and uninstall steps, settings, Constance with practice mode and model fallback, multi-account support, privacy and the Ko-fi link. Fresh panel-only screenshots in dark and light themes (tabs, Start picker, Constance) with folder names blurred. New `bin/install-check.mjs` preflight tells a new user what their machine is missing before they install, and a lifecycle test proves a clean install and uninstall leave nothing behind.
 

@@ -110,7 +110,9 @@ keeps the developer in flow:
 
 ## Working rules
 
-- Back up `~/.config/omarchy/shell.json` and the plugin folder before editing.
+- Back up `~/.config/omarchy/shell.json` and the plugin folder before editing —
+  run `bin/backup.sh`, which writes a timestamped tarball to
+  `~/.local/share/agent-usage-tabs-backups/` (never /tmp; it does not survive reboot).
   Never change the user's bar config beyond what a task needs; revert test
   values.
 - Run all tests: `for t in bin/*.test.mjs; do node "$t"; done`. New logic goes
