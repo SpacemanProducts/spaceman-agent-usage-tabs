@@ -904,6 +904,14 @@ Panel {
   // She keeps working with the panel closed; the job file lets her pick up after a shell restart (recover, at load).
   property bool constanceOpen: false
   property bool constanceTyping: false
+  // The pointer is over the log: mouse drags select text there instead of scrolling the panel.
+  property bool constanceLogPointing: false
+  // Copy to the clipboard with wl-copy (the text is one argument, so nothing is run through a shell).
+  function copyText(t) { Quickshell.execDetached(["wl-copy", "--", String(t)]) }
+  // Copy all: the whole log.jsonl, not just the entries shown, with practice prompts in full.
+  function copyConstanceLog() {
+    Quickshell.execDetached(["bash", "-c", 'node "$1" log | wl-copy', "copy-log", pluginDir + "/bin/constance.mjs"])
+  }
   onConstanceOpenChanged: if (!constanceOpen) { goalArea.focus = false; constanceTyping = false }
   property var constance: ({ goal: null, jobs: [], agents: [], pace: null, log: [], practice: true, queue: [], signals: [] })
   property string constanceError: ""
@@ -1288,6 +1296,32 @@ Panel {
 
   // A labelled on/off switch. Colors are passed in because an inline component
   // can't rely on reaching the panel's ids.
+  // A small "Copy" chip: copies `text` (or runs onCopy) and says "Copied" for a moment.
+  component CopyChip: Rectangle {
+    id: chip
+    property string label: "Copy"
+    property string tip: "Copy this entry"
+    signal copy()
+    property bool done: false
+    width: chipLabel.implicitWidth + Style.space(14)
+    height: chipLabel.implicitHeight + Style.space(6)
+    radius: Style.cornerRadius
+    color: chipArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : "transparent"
+    border.width: 1
+    border.color: root.soft(root.foreground, 0.3)
+    Text {
+      id: chipLabel
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: chip.done ? "Copied" : chip.label
+      color: chip.done ? root.green : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+    Timer { id: chipReset; interval: 1500; onTriggered: chip.done = false }
+    MouseArea { id: chipArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { chip.copy(); chip.done = true; chipReset.restart() } }
+    PanelToolTip { visible: chipArea.containsMouse; text: chip.tip; fontFamily: root.fontFamily }
+  }
   component SettingSwitch: Item {
     id: sw
     property string label: ""
@@ -1968,6 +2002,7 @@ Panel {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
+        acceptedButtons: root.constanceLogPointing ? Qt.NoButton : Qt.LeftButton
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         Column {
@@ -2549,7 +2584,20 @@ Panel {
 
             // The log comes before the agent list: it is the biggest section and must be visible
             // without scrolling past the agents. Newest entry on top.
-            PanelSectionHeader { width: parent.width; text: "LOG" }
+            Item {
+              width: parent.width
+              height: Math.max(logHeader.implicitHeight, copyAllChip.height)
+              PanelSectionHeader { id: logHeader; anchors.left: parent.left; anchors.right: copyAllChip.left; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter; text: "LOG" }
+              CopyChip {
+                id: copyAllChip
+                visible: (root.constance.log || []).length > 0
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                label: "Copy all"
+                tip: "Copy the whole log as text, every practice prompt in full"
+                onCopy: root.copyConstanceLog()
+              }
+            }
             Text {
               visible: (root.constance.log || []).length === 0
               width: parent.width
@@ -2562,19 +2610,66 @@ Panel {
             Column {
               width: parent.width
               spacing: Style.space(6)
+              HoverHandler { onHoveredChanged: root.constanceLogPointing = hovered }
               Repeater {
                 model: (root.constance.log || []).slice().reverse().slice(0, 40)
-                Text {
+                // Each entry is selectable text (drag to select, Ctrl+C copies) with its own Copy
+                // chip. Long entries show their first lines until "Show all"; Copy always has it all.
+                Item {
+                  id: logEntry
                   required property var modelData
+                  readonly property string full: root.constanceLogLine(modelData)
+                  readonly property int maxLines: modelData.kind === "report" ? 30 : (modelData.kind === "practice" ? 40 : 4)
+                  readonly property real cap: maxLines * logText.font.pixelSize * 1.4
+                  readonly property bool tall: logText.contentHeight > cap + 1
+                  property bool expanded: false
                   width: parent.width
-                  textFormat: Text.PlainText
-                  wrapMode: Text.WordWrap
-                  maximumLineCount: modelData.kind === "report" ? 30 : (modelData.kind === "practice" ? 40 : 4)
-                  elide: Text.ElideRight
-                  text: root.constanceLogLine(modelData)
-                  color: modelData.kind === "report" || modelData.kind === "review" ? root.foreground : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                  height: Math.max(entryCopy.height, logClip.height + (tall ? moreLabel.implicitHeight + Style.space(2) : 0))
+                  Item {
+                    id: logClip
+                    anchors.left: parent.left
+                    anchors.right: entryCopy.left
+                    anchors.rightMargin: Style.space(8)
+                    height: logEntry.tall && !logEntry.expanded ? logEntry.cap : logText.contentHeight
+                    clip: true
+                    TextEdit {
+                      id: logText
+                      width: parent.width
+                      readOnly: true
+                      selectByMouse: true
+                      persistentSelection: false
+                      textFormat: TextEdit.PlainText
+                      wrapMode: TextEdit.Wrap
+                      text: logEntry.full
+                      color: logEntry.modelData.kind === "report" || logEntry.modelData.kind === "review" ? root.foreground : root.dim
+                      selectionColor: root.soft(Color.accent, 0.35)
+                      selectedTextColor: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      // While it has focus the panel's own keys (tabs, close) wait; Escape hands them back.
+                      onActiveFocusChanged: root.constanceTyping = activeFocus
+                      Keys.onEscapePressed: { logText.deselect(); logText.focus = false; keyCatcher.forceActiveFocus() }
+                    }
+                  }
+                  Text {
+                    id: moreLabel
+                    visible: logEntry.tall
+                    anchors.top: logClip.bottom
+                    anchors.topMargin: Style.space(2)
+                    textFormat: Text.PlainText
+                    text: logEntry.expanded ? "Show less" : "Show all"
+                    color: Color.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: logEntry.expanded = !logEntry.expanded }
+                  }
+                  CopyChip {
+                    id: entryCopy
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    tip: logEntry.modelData.kind === "practice" ? "Copy this entry with its full prompt" : "Copy this entry"
+                    onCopy: root.copyText(logEntry.full)
+                  }
                 }
               }
             }

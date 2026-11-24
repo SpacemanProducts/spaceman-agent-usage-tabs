@@ -141,6 +141,9 @@ keeps the developer in flow:
   0.8 load per core and >= max(2 GiB, 10%) free memory. Otherwise the job is `held` (files and
   copy number reserved) and `releaseHeld()` starts it from wait/jobs/the driver heartbeat.
   Tests use a fake `CONSTANCE_PROC` and `CONSTANCE_RAMP_GAP_MS=0`.
+  Since 1.45.0 practice shows a copy's real prompt (its worktree for pwd and the done file),
+  stored as `practiceWorktree`/`practiceBranch`, never `worktree`/`branch` (those drive merge and
+  cleanup). The panel log is selectable with Copy / Copy all (`constance.mjs log`).
 
 ## Working rules
 

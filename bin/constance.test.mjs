@@ -51,15 +51,22 @@ fi
 `, { mode: 0o755 });
 // Fake devin: same shape as fake grok, but it runs in its own worktree — the done
 // file path and the file it edits both come out of the prompt, and it commits on
-// whatever branch the worktree gave it.
+// whatever branch the worktree gave it. Like a careful real agent it runs the
+// prompt's pwd check first: if the folder the prompt names isn't where it was
+// started, or the done file isn't inside that folder, it stops and writes nothing
+// (the job then ends as "exited without writing its done file").
 fs.writeFileSync(path.join(bin, "devin"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+want=$(grep -o 'if it is not exactly [^ ]*, stop now' <<<"$p" | head -1 | sed 's/^if it is not exactly //; s/, stop now$//')
+here=$(pwd)
+[[ -n "$want" && "$here" == "$want" ]] || { echo "pwd check failed: here=$here want=$want"; exit 1; }
+[[ "$f" == "$here/.constance/"* ]] || { echo "done file $f is not in $here"; exit 1; }
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-x.txt}
 before=$(git rev-parse HEAD)
 echo "devin $name" > "$name"; git add "$name"; git commit -qm "devin: $name" || true
 after=$(git rev-parse HEAD); c=""; [[ "$after" != "$before" ]] && c="$after"
-echo "{\\"summary\\": \\"added \${name%.*}\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]}" > "$f"
+echo "{\\"summary\\": \\"added \${name%.*} in $here\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]}" > "$f"
 `, { mode: 0o755 });
 // Fake Constance: delegate (one read-only investigation, then the fix), wait, review, report.
 // Records its arguments.
@@ -321,6 +328,43 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   assert.ok(qlog.length >= 3, "queue events are in the log: " + qlog.length);
 }
 
+// Practice with a Devin copy: the logged prompt is the one a real copy would get —
+// its own worktree under the worktree root for the pwd check and the done file,
+// not the main folder — yet no worktree or branch is created.
+fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: true }));
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files p1.txt --task "add p1" >> "${root}/practice-copy.out" 2>&1
+$C wait --timeout 30 > "${root}/practice-copy-wait.json"
+id=$(grep -o '"id": [0-9]*' "${root}/practice-copy-wait.json" | head -1 | grep -o '[0-9]*')
+$C review "$id" accept --note "fine"
+echo "Practice copy report."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "practice copy goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done"), "the practice copy goal finishes: " + JSON.stringify(status().goal));
+{
+  const ps = status();
+  const pl = ps.log.filter((l) => l.kind === "practice" && l.agent === "devin").pop();
+  assert.ok(pl, "the devin handoff is logged");
+  const wt = path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-worktrees", `job-${pl.job}`);
+  assert.equal(pl.worktree, wt, "the log names the would-be worktree");
+  assert.ok(pl.prompt.includes(`if it is not exactly ${wt}, stop now`), "the pwd check names the worktree: " + pl.prompt);
+  assert.ok(pl.prompt.includes(`write the file ${wt}/.constance/done-${pl.job}.json`), "the done file is in the worktree");
+  assert.ok(!pl.prompt.includes(`not exactly ${repo},`), "never the main folder for the pwd check");
+  assert.ok(!fs.existsSync(wt), "practice created no worktree");
+  assert.equal(git("branch", "--list", "constance/*").trim(), "", "practice created no branch");
+  const pj = ps.jobs.find((j) => j.id === pl.job);
+  assert.equal(pj.status, "accepted"); assert.ok(!pj.worktree && !pj.branch, "nothing for a merge to act on");
+  assert.match(fs.readFileSync(path.join(root, "practice-copy.out"), "utf8"), /own worktree .*constance-worktrees\/job-/);
+  // Copy all: `log` prints the whole log as text, practice prompts in full.
+  const lt = run("log").stdout;
+  assert.ok(lt.includes(pl.prompt), "the full practice prompt is in the copied log");
+  assert.ok(lt.includes(`(a real run works in ${wt} on constance/job-${pl.job})`));
+  assert.ok(lt.indexOf("Goal") < lt.lastIndexOf("Practice job"), "oldest first");
+}
+fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
+
 // Devin copies: two editing jobs run at once, each in its own worktree/branch,
 // tracked as Devin 1 and Devin 2. Both finish together; each is reviewed and
 // merged one at a time, then the worktrees and branches are cleaned up.
@@ -348,6 +392,12 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   assert.deepEqual(dj.map((j) => j.worker).sort(), ["Devin 1", "Devin 2"], "each copy is its own worker");
   assert.ok(dj.every((j) => j.status === "accepted"), "both copies accepted: " + JSON.stringify(dj.map((j) => [j.id, j.status])));
   for (const f of ["c1.txt", "c2.txt"]) assert.ok(fs.existsSync(path.join(repo, f)), f + " merged into the repo");
+  // The fake Devin passed the pwd check in its own worktree and wrote the done file there,
+  // and that is where she read it from (nothing landed in the main folder's .constance/).
+  for (const j of dj) {
+    assert.match(j.summary, new RegExp(`in .*constance-worktrees/job-${j.id}$`), "the copy worked in its worktree: " + j.summary);
+    assert.ok(!fs.existsSync(path.join(repo, ".constance", `done-${j.id}.json`)), "no done file in the main folder");
+  }
   assert.equal(git("branch", "--list", "constance/*").trim(), "", "copy branches are deleted after merge");
   assert.equal(git("worktree", "list", "--porcelain").split("worktree ").length - 1, 1, "only the main worktree remains");
   assert.ok(cs.log.some((l) => l.kind === "merge" && /merged constance\/job-/.test(l.text)), "the merges are in the log");

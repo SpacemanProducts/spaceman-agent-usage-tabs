@@ -35,6 +35,7 @@ import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./cons
 import { NotifyParser, handleNotification, recentSignals } from "./constance-notify.mjs";
 import { addTask, peekNext, finishTask, removeTask, queueView } from "./constance-queue.mjs";
 import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
+import { logText } from "./constance-logtext.mjs";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -243,8 +244,14 @@ function handOut({ agent, task, files = [], preferCopy = 0 }) {
     // Claimed now, so a second handOut racing this one sees the start and ramps.
     if (useCopy && room.ok) j.startedAt = Date.now();
     if (practice) { j.finishedAt = Date.now(); j.summary = "(practice run: the prompt is in the log, nothing was launched)"; }
-    j.prompt = useCopy
-      ? handoffPrompt({ id, dir, task, files, account, worktree: j.worktree, branch: j.branch, mainDir: dir }, extra)
+    // Practice shows the same prompt a real copy would get: its worktree for the
+    // pwd check and the done file. Only the would-be path is recorded
+    // (practiceWorktree), so nothing is created, merged or cleaned up for it.
+    const asCopy = limit > 1 && files.length > 0;
+    if (asCopy && practice) { j.practiceWorktree = worktreeFor(id); j.practiceBranch = branchFor(id); }
+    const wt = j.worktree || j.practiceWorktree, br = j.branch || j.practiceBranch;
+    j.prompt = asCopy
+      ? handoffPrompt({ id, dir, task, files, account, worktree: wt, branch: br, mainDir: dir }, extra)
       : handoffPrompt(j, extra);
     s.jobs.push(j);
     return j;
@@ -253,7 +260,7 @@ function handOut({ agent, task, files = [], preferCopy = 0 }) {
   if (job.cap) throw new Error(`${agent} already has ${job.cap} copies running or held (the limit is ${job.cap}). Wait for one to be reviewed, or hand the task to another agent.`);
   const who = (job.worker || verdict.name) + (verdict.account ? ` (${verdict.account})` : "");
   if (practice) {
-    store.log({ kind: "practice", job: job.id, agent, account: verdict.account, reason: verdict.reason, files, text: task, prompt: job.prompt });
+    store.log({ kind: "practice", job: job.id, agent, account: verdict.account, reason: verdict.reason, files, text: task, prompt: job.prompt, ...(job.practiceWorktree ? { worktree: job.practiceWorktree, branch: job.practiceBranch } : {}) });
     return { job, who, verdict, practice: true };
   }
   if (job.status === "held") {
@@ -360,7 +367,7 @@ function delegate() {
   catch (e) { fail(e.message); }
   const { job, who, verdict } = r;
   if (r.practice) {
-    out(`Practice job ${job.id}: ${who} would take it (${verdict.reason}). Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
+    out(`Practice job ${job.id}: ${who} would take it (${verdict.reason}).${job.practiceWorktree ? ` A real run would work in its own worktree ${job.practiceWorktree} on ${job.practiceBranch}.` : ""} Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
     return;
   }
   if (r.held) {
@@ -749,6 +756,8 @@ if (process.argv[1] === SELF) {
   else if (cmd === "jobs") { sweep(); releaseHeld(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], copies: copiesView(s), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
   else if (cmd === "queue") queueCmd();
   else if (cmd === "signals") out(recentSignals(store.dir, 20));
+  // The whole log as plain text (the panel's Copy all): every entry, practice prompts in full.
+  else if (cmd === "log") { const names = Object.fromEntries((readData().agents || []).map((a) => [a.id, a.name || a.id])); process.stdout.write(logText(store.readLog(Infinity), (id) => names[id] || id)); }
   else if (cmd === "watch") await watch();
   else if (cmd === "delegate") delegate();
   else if (cmd === "wait") await waitJob();
@@ -763,5 +772,5 @@ if (process.argv[1] === SELF) {
   }
   else if (cmd === "stop") stopAll();
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|agents|pace|jobs|delegate|wait|review|note|lesson|queue|signals|watch|stop|recover");
+  else fail("Usage: constance.mjs start|status|agents|pace|jobs|delegate|wait|review|note|lesson|queue|signals|log|watch|stop|recover");
 }
