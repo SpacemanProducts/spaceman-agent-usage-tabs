@@ -4,6 +4,7 @@ One short entry per feature release, newest first; small fix versions are folded
 they belong to. The full history, patch by patch, is in git (`git log`).
 
 ## 1.46.0 - 2026-11-24
+- **1.46.1 – six Constance review fixes:** every new commit is diff-checked whatever the agent reports; home/Projects changes are notices, not strikes; finish signals also come from a job's exit, done file and log; model fallback matches only Claude Code's exact rejection message; `review` refuses unfinished jobs (only `finished` may be accepted or sent back — practice jobs are born finished, so they still work); and Stop runs the guard on halted jobs, so a stopped agent's stray changes are still checked and logged before its worktree/tmp is dropped.
 - **Constance's pause follows the reset:** in the last fifth of a session or weekly window she no longer stops at 90% — she stays on delegate pace (planning, review and merges only, editing and testing go to the free agents) and stops only at 97%, so she never runs out before the reset. Far from a reset the 90% pause is unchanged. `bin/constance-pace.mjs` picks the stop line per window from its `resetsAt`.
 - **Keep going button:** while Constance is paused, her panel shows a green **Keep going** next to Stop. It drops a `keep-going.json` in her state dir naming the window that paused her; until that window resets she can't be auto-paused for it (the owner takes the risk). The file expires by itself — a reset changes `resetsAt`, and a window with no reset time honors it for one window length only.
 

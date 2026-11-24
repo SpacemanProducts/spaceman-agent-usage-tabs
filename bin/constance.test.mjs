@@ -38,6 +38,7 @@ fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePra
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
 [[ -e "${root}/home/home-marker" ]] && echo "sandboxed=no" || echo "sandboxed=yes"
+grep -q "stray-now" <<<"$p" && echo stray > stray-now.txt
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 if grep -q "exit now" <<<"$p"; then
   exit 0
@@ -597,6 +598,36 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
   assert.equal(exSig.source, "exit");
   assert.equal(sig2.find((s) => s.job === sneaky.id)?.source, "done-file", "a normal finish records done-file");
   assert.equal(git("status", "--porcelain").trim(), "", "the repo is clean afterwards");
+}
+
+// Review refuses a job that isn't finished (a running one keeps running, nothing
+// is logged or merged), and Stop still runs the guard on a halted job: the fake
+// grok left stray-now.txt outside its list before it was killed, and the guard
+// entry is logged for it.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+node ${CLI} delegate --agent grok --files ok2.txt --task "stray-now: also add ok2" >/dev/null 2>&1
+sleep 300
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "stop guard goal").status, 0);
+assert.ok(await until(() => status().jobs.some((j) => j.status === "running" && j.goal === status().goal?.id)), "the stray job is running");
+{
+  const rid = status().jobs.find((j) => j.status === "running" && j.goal === status().goal.id).id;
+  const rv = run("review", String(rid), "accept", "--note", "too early");
+  assert.notEqual(rv.status, 0, "reviewing a running job fails");
+  assert.match(rv.stderr, /only a finished job can be reviewed/);
+  assert.match(run("review", "9999", "accept").stderr, /No job 9999\./);
+  const mid = status();
+  assert.equal(mid.jobs.find((j) => j.id === rid).status, "running", "a refused review changes nothing");
+  assert.ok(!mid.log.some((l) => l.kind === "review" && l.job === rid), "no review line was logged");
+  assert.equal(run("stop").status, 0);
+  const st = status();
+  assert.equal(st.jobs.find((j) => j.id === rid).status, "stopped");
+  assert.ok(st.log.some((l) => l.kind === "guard" && l.job === rid && /stray-now\.txt/.test(l.text)),
+    "Stop ran the guard on the halted job: " + JSON.stringify(st.log.filter((l) => l.job === rid)));
+  assert.ok(fs.existsSync(path.join(repo, "stray-now.txt")), "the stray file is left for the owner, never deleted");
+  assert.equal(st.guards.grok.strikes, 3, "the stopped job's violation counted a strike: " + JSON.stringify(st.guards));
 }
 
 // The watcher: a fake busctl feeds it real-format Notify blocks. With no job

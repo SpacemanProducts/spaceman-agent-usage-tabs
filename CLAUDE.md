@@ -144,6 +144,9 @@ keeps the developer in flow:
   Since 1.45.0 practice shows a copy's real prompt (its worktree for pwd and the done file),
   stored as `practiceWorktree`/`practiceBranch`, never `worktree`/`branch` (those drive merge and
   cleanup). The panel log is selectable with Copy / Copy all (`constance.mjs log`).
+  Since 1.46.1 `review` refuses anything but a finished job (it sweeps first, so a just-landed
+  done file counts), and `stop` runs the guard on every job that was running before its
+  worktree/tmp is dropped, so a halted agent's stray changes are still checked and logged.
 
 ## Working rules
 

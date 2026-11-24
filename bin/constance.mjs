@@ -546,8 +546,13 @@ function cleanupRejected(j) {
 function review() {
   const id = Number(process.argv[3]), verdict = process.argv[4], note = arg("--note");
   if (!["accept", "send-back"].includes(verdict)) fail("Usage: review ID accept|send-back --note TEXT");
+  // A done file may have landed since the last sweep: bring statuses up to date
+  // first so a just-finished job can be reviewed right away.
+  sweep();
+  const found = store.read().jobs.find((x) => x.id === id);
+  if (!found) fail(`No job ${id}.`);
+  if (found.status !== "finished") fail(`Job ${id} is ${found.status}; only a finished job can be reviewed.`);
   const j = store.update((s) => { const j = s.jobs.find((x) => x.id === id); if (j) { j.status = verdict === "accept" ? "accepted" : "sent back"; j.reviewNote = note; j.reviewedAt = Date.now(); } return j; });
-  if (!j) fail(`No job ${id}.`);
   store.log({ kind: "review", job: id, agent: j.agent, worker: j.worker, verdict, text: note });
   // Accepted means the agent is free: merge its branch first (copies only),
   // clean up, then hand it the next queued task for this project immediately.
@@ -762,12 +767,16 @@ async function drive() {
 }
 
 function stopAll() {
+  // Jobs that were actually running still get their guard check before their
+  // worktrees and temp folders go: a stopped agent's stray changes count too.
+  // Held/waiting jobs never launched, so there is nothing to check for them.
+  const halted = new Set(store.read().jobs.filter((j) => j.status === "running").map((j) => j.id));
   const s = store.update((s) => {
     if (s.goal && ["running", "paused"].includes(s.goal.status)) { s.goal.status = "stopped"; s.goal.finishedAt = Date.now(); }
     for (const j of s.jobs) if (j.status === "running" || j.status === "waiting" || j.status === "held") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; }
     return JSON.parse(JSON.stringify(s));
   });
-  for (const j of s.jobs) if (j.status === "stopped") { dropJobTmp(j); if (j.worktree) dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true }); }
+  for (const j of s.jobs) if (j.status === "stopped") { if (halted.has(j.id)) guardFinished(j); dropJobTmp(j); if (j.worktree) dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true }); }
   const g = s.goal;
   if (g && alive(g.brainPid, "claude")) killGroup(g.brainPid);
   if (g && alive(g.driverPid, "constance.mjs")) killGroup(g.driverPid);
