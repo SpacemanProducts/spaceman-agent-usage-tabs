@@ -946,6 +946,17 @@ Panel {
     for (var i = 0; i < js.length; i++) if (js[i].agent === id && js[i].status === "running") return js[i]
     return null
   }
+  // One row per running copy of a multi-copy agent (Devin 1..4), so each worker
+  // is tracked separately instead of collapsing into a single agent row.
+  function constanceCopyRows(a) {
+    var rows = [], js = constance.jobs || []
+    for (var i = 0; i < js.length; i++) {
+      var j = js[i]
+      if (j.agent !== a.id || !j.worker || (j.status !== "running" && j.status !== "waiting")) continue
+      rows.push({ id: a.id, worker: j.worker, job: j, available: true, reason: "", account: (j.account && j.account.label) || a.account || "", resetsAt: null, blockTitle: null })
+    }
+    return rows
+  }
   function constanceGoalLine() {
     var g = constance.goal
     if (!g) return ""
@@ -953,7 +964,7 @@ Panel {
     return st + ": " + g.text
   }
   function constanceLogLine(e) {
-    var who = e.agent ? constanceAgentName(e.agent) + (e.account ? " (" + e.account + ")" : "") : ""
+    var who = e.agent ? (e.worker || constanceAgentName(e.agent)) + (e.account ? " (" + e.account + ")" : "") : ""
     var head = { goal: "Goal", handoff: "Job " + e.job + " → " + who, practice: "Practice job " + e.job + " → " + who + (e.reason ? " (" + e.reason + ")" : ""),
                  returned: "Job " + e.job + " back from " + who, model: "Model",
                  review: "Job " + e.job + (e.verdict === "accept" ? " accepted" : " sent back"), report: "Report", paused: "Paused",
@@ -980,7 +991,11 @@ Panel {
       var a = list[i]
       if (a.reason === "not installed") continue
       if (a.id === "claude") { me = a; continue }
-      if (root.constanceJobOf(a.id) || a.available) ready.push(a)
+      if (root.constanceJobOf(a.id) || a.available) {
+        var rows = root.constanceCopyRows(a)
+        if (rows.length) { for (var k = 0; k < rows.length; k++) ready.push(rows[k]) }
+        else ready.push(a)
+      }
       else if (/of a limit|hit its limit/.test(String(a.reason))) waiting.push(a)
       else cant.push(a)
     }
@@ -1319,7 +1334,7 @@ Panel {
   component ConstanceAgentRow: Item {
     id: car
     required property var modelData
-    readonly property var job: modelData && modelData.id ? root.constanceJobOf(modelData.id) : null
+    readonly property var job: modelData && modelData.job ? modelData.job : (modelData && modelData.id ? root.constanceJobOf(modelData.id) : null)
     readonly property bool me: modelData && modelData.id === "claude"
     width: parent.width
     height: Math.max(cName.implicitHeight, cWhat.implicitHeight)
@@ -1338,7 +1353,7 @@ Panel {
       width: Style.space(130)
       textFormat: Text.PlainText
       elide: Text.ElideRight
-      text: (me ? "Constance" : root.constanceAgentName(modelData.id)) + (modelData.account ? " (" + modelData.account + ")" : "")
+      text: (me ? "Constance" : (modelData.worker || root.constanceAgentName(modelData.id))) + (modelData.account ? " (" + modelData.account + ")" : "")
       color: modelData.available || job || me ? root.foreground : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall

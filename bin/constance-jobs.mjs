@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const STATUSES = ["waiting", "running", "finished", "accepted", "sent back", "stopped"];
+export const STATUSES = ["waiting", "running", "finished", "accepted", "sent back", "stopped", "conflict"];
 
 export function stateDir(env = process.env) {
   const base = env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), ".local/state");
@@ -54,9 +54,11 @@ export function overlaps(a = [], b = []) {
   return [...new Set(hits)];
 }
 
-// The running jobs in the same folder whose files overlap these.
+// The jobs in the same project whose files overlap these. Finished jobs still
+// count: a worktree copy's branch isn't merged until review accepts it, so its
+// files are just as spoken for as a running job's.
 export function conflicts(jobs, dir, files) {
-  return jobs.filter((j) => (j.status === "running" || j.status === "waiting") && j.dir === dir && overlaps(j.files, files).length > 0);
+  return jobs.filter((j) => ["running", "waiting", "finished"].includes(j.status) && (j.repo || j.dir) === dir && overlaps(j.files, files).length > 0);
 }
 
 export const doneFile = (dir, id) => path.join(dir, ".constance", `done-${id}.json`);
@@ -65,11 +67,16 @@ export const doneFile = (dir, id) => path.join(dir, ".constance", `done-${id}.js
 // status check and what not to touch, the task, tests and build, its own commit (never a push or
 // deploy unless the task says so), a plain-text report, and the done file last. With no files listed
 // the job is read-only: the agent changes nothing and only reports.
-export function handoffPrompt({ id, dir, task, files = [], account = null }, extra = "") {
+export function handoffPrompt({ id, dir, task, files = [], account = null, worktree = "", branch = "", mainDir = "" }, extra = "") {
   const readOnly = !files || files.length === 0;
+  const runDir = worktree || dir;
   return [
-    `Check: this job is for the project folder ${dir}. Run \`pwd\` first; if it is not exactly ${dir}, stop now and change nothing.`,
-    `Then run \`git status\`. Other agents may be working in this folder at the same time: never touch, stage, revert or commit changes you did not make.`,
+    worktree
+      ? `Check: this job is for the git worktree ${runDir} (branch ${branch}) of the project ${mainDir || dir}. Run \`pwd\` first; if it is not exactly ${runDir}, stop now and change nothing.`
+      : `Check: this job is for the project folder ${dir}. Run \`pwd\` first; if it is not exactly ${dir}, stop now and change nothing.`,
+    worktree
+      ? `Then run \`git status\` and \`git branch --show-current\`; you should be on ${branch}. Other Constance copies work in their own worktrees at the same time: never touch the main checkout at ${mainDir || dir} or another worktree.`
+      : `Then run \`git status\`. Other agents may be working in this folder at the same time: never touch, stage, revert or commit changes you did not make.`,
     ``,
     `Task (job ${id}, from Constance):`,
     String(task).trim(),
@@ -79,12 +86,12 @@ export function handoffPrompt({ id, dir, task, files = [], account = null }, ext
       ? `This is a read-only job: change nothing, create nothing, delete nothing.`
       : `Only edit these files: ${files.join(", ")}. Everything else is off-limits; if the task needs other files, say so in your report instead of editing them.`,
     `Run the project's tests and build, if it has them, and make sure they pass.`,
-    ...(readOnly ? [] : [`When you are done, commit only your own work in its own commit: \`git add\` the files you changed by name (never \`git add -A\` or \`git add .\`), then \`git commit\` with a short message.`]),
-    `Do not push or deploy unless the task explicitly says to.`,
+    ...(readOnly ? [] : [`When you are done, commit only your own work${branch ? ` on branch ${branch}` : ""} in its own commit: \`git add\` the files you changed by name (never \`git add -A\` or \`git add .\`), then \`git commit\` with a short message.`]),
+    `Do not push or deploy${branch ? " or merge" : ""} unless the task explicitly says to.`,
     ``,
     `Report in plain text: what you changed, the test and build results, and which files you touched. No screenshots unless checking the look itself is the task. If you could not finish, say why in a few lines and stop.`,
     ``,
-    `Last step, even if you could not finish: write the file ${doneFile(dir, id)} containing JSON like {"summary": "what you did or why you stopped, in a few lines", "commit": "the full hash of your commit, or empty if you made none", "files": ["the files you changed"]}. Do not commit that file.`,
+    `Last step, even if you could not finish: write the file ${doneFile(runDir, id)} containing JSON like {"summary": "what you did or why you stopped, in a few lines", "commit": "the full hash of your commit, or empty if you made none", "files": ["the files you changed"]}. Do not commit that file.`,
     ...(extra ? ["", extra] : []),
   ].join("\n");
 }

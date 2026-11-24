@@ -70,8 +70,8 @@ const acct = (id, label, percent, extra = {}) => ({ id, label, limits: [{ title:
 // The panel names the account she picked and the log does too.
 {
   const qml = fs.readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
-  assert.match(qml, /constanceAgentName\(modelData\.id\)\) \+ \(modelData\.account \? " \(" \+ modelData\.account \+ "\)" : ""\)/, "agent rows show 'Name (Account)'");
-  assert.match(qml, /constanceAgentName\(e\.agent\) \+ \(e\.account \? " \(" \+ e\.account \+ "\)" : ""\)/, "log lines name the account too");
+  assert.match(qml, /\(modelData\.worker \|\| root\.constanceAgentName\(modelData\.id\)\)\) \+ \(modelData\.account \? " \(" \+ modelData\.account \+ "\)" : ""\)/, "agent rows show 'Name (Account)' (or the copy's worker name)");
+  assert.match(qml, /\(e\.worker \|\| constanceAgentName\(e\.agent\)\) \+ \(e\.account \? " \(" \+ e\.account \+ "\)" : ""\)/, "log lines name the worker and account too");
 }
 assert.equal(judge(ag("grok"), { now, generatedAt: now - 20 * 60e3 }).reason, "usage reading is out of date");
 assert.equal(judge(ag("kimi"), at).reason, "no headless launch known");

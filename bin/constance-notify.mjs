@@ -89,11 +89,12 @@ export function matchJob(text, jobs) {
   if (!agent) return null;
   const running = jobs.filter((j) => j.status === "running" && j.agent === agent.id);
   if (!running.length) return { agent: agent.id, kind: "foreign" };
-  const byDir = running.find((j) => text.includes(j.dir));
-  const withDone = running.filter((j) => { try { return fs.existsSync(doneFile(j.dir, j.id)); } catch { return false; } });
+  const runDir = (j) => j.worktree || j.dir;
+  const byDir = running.find((j) => [j.worktree, j.dir].filter(Boolean).some((d) => text.includes(d)));
+  const withDone = running.filter((j) => { try { return fs.existsSync(doneFile(runDir(j), j.id)); } catch { return false; } });
   const job = byDir || withDone[0] || running.reduce((a, b) => ((b.startedAt || 0) > (a.startedAt || 0) ? b : a));
   const kind = FINISHED.test(text) ? "agent-done" : "agent-signal";
-  return { agent: agent.id, kind, job: job.id, dir: job.dir, ambiguous: running.length > 1 && !byDir && !withDone.length };
+  return { agent: agent.id, kind, job: job.id, dir: runDir(job), ambiguous: running.length > 1 && !byDir && !withDone.length };
 }
 
 // No done file yet: what does the folder actually look like? Read-only git.

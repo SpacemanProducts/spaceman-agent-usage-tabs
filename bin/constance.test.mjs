@@ -22,6 +22,7 @@ const soon = (h) => new Date(Date.now() + h * 3600e3).toISOString();
 const writeData = (claudeSession = 0.1, grokPct = 0.1) => fs.writeFileSync(path.join(tabs, "data.json"), JSON.stringify({ generatedAt: Date.now(), agents: [
   { id: "claude", installed: true, signedIn: true, limits: [{ title: "Session", percent: claudeSession, resetsAt: soon(4) }, { title: "Weekly", percent: 0.1, resetsAt: soon(150) }] },
   { id: "grok", installed: true, signedIn: true, limits: [{ title: "Daily", percent: grokPct }] },
+  { id: "devin", name: "Devin", installed: true, signedIn: true, limits: [{ title: "Daily", percent: 0.1 }] },
   { id: "copilot", installed: true, signedIn: true, limits: [{ title: "Monthly", percent: 0.94 }] }] }));
 writeData();
 // Practice mode is on by default; this first goal runs for real, so switch it off for now.
@@ -47,6 +48,18 @@ else
   after=$(git rev-parse HEAD); c=""; [[ "$after" != "$before" ]] && c="$after"
   echo "{\\"summary\\": \\"added \${name%.*}\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]}" > "$f"
 fi
+`, { mode: 0o755 });
+// Fake devin: same shape as fake grok, but it runs in its own worktree — the done
+// file path and the file it edits both come out of the prompt, and it commits on
+// whatever branch the worktree gave it.
+fs.writeFileSync(path.join(bin, "devin"), `#!/bin/bash
+p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
+name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-x.txt}
+before=$(git rev-parse HEAD)
+echo "devin $name" > "$name"; git add "$name"; git commit -qm "devin: $name" || true
+after=$(git rev-parse HEAD); c=""; [[ "$after" != "$before" ]] && c="$after"
+echo "{\\"summary\\": \\"added \${name%.*}\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]}" > "$f"
 `, { mode: 0o755 });
 // Fake Constance: delegate (one read-only investigation, then the fix), wait, review, report.
 // Records its arguments.
@@ -301,6 +314,87 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   const qlog = qs.log.filter((l) => /Ready queue/.test(l.text || ""));
   assert.ok(qlog.length >= 3, "queue events are in the log: " + qlog.length);
 }
+
+// Devin copies: two editing jobs run at once, each in its own worktree/branch,
+// tracked as Devin 1 and Devin 2. Both finish together; each is reviewed and
+// merged one at a time, then the worktrees and branches are cleaned up.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files c1.txt --task "add c1" >> "${root}/copies.out" 2>&1
+$C delegate --agent devin --files c2.txt --task "add c2" >> "${root}/copies.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 30 > "${root}/wait-c1.json"
+id1=$(grep -o '"id": [0-9]*' "${root}/wait-c1.json" | head -1 | grep -o '[0-9]*')
+$C review "$id1" accept --note "c1 ok" > "${root}/rev-c1.txt" 2>&1
+$C wait --timeout 30 > "${root}/wait-c2.json"
+id2=$(grep -o '"id": [0-9]*' "${root}/wait-c2.json" | head -1 | grep -o '[0-9]*')
+$C review "$id2" accept --note "c2 ok" > "${root}/rev-c2.txt" 2>&1
+echo "Copies report: two Devins merged."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "copies goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done"), "the copies goal finishes: " + JSON.stringify(status().goal));
+{
+  const cs = status();
+  const dj = cs.jobs.filter((j) => j.agent === "devin" && ["c1.txt", "c2.txt"].some((f) => j.files.includes(f)));
+  assert.equal(dj.length, 2, "two devin jobs");
+  assert.deepEqual(dj.map((j) => j.worker).sort(), ["Devin 1", "Devin 2"], "each copy is its own worker");
+  assert.ok(dj.every((j) => j.status === "accepted"), "both copies accepted: " + JSON.stringify(dj.map((j) => [j.id, j.status])));
+  for (const f of ["c1.txt", "c2.txt"]) assert.ok(fs.existsSync(path.join(repo, f)), f + " merged into the repo");
+  assert.equal(git("branch", "--list", "constance/*").trim(), "", "copy branches are deleted after merge");
+  assert.equal(git("worktree", "list", "--porcelain").split("worktree ").length - 1, 1, "only the main worktree remains");
+  assert.ok(cs.log.some((l) => l.kind === "merge" && /merged constance\/job-/.test(l.text)), "the merges are in the log");
+  assert.equal(git("status", "--porcelain").trim(), "", "the repo is clean after the merges");
+}
+
+// Merge conflict: the owner moves the main branch after the copies branched off
+// but before review. Accepting the copy that touched the same file must stop and
+// report — the merge is aborted, nothing is forced, the worktree/branch stay.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.rmSync(path.join(root, "owner-ok"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files a.txt --task "change a" >> "${root}/conflict.out" 2>&1
+$C delegate --agent devin --files b.txt --task "add b" >> "${root}/conflict.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 30 > "${root}/wait-conf1.json"
+while [[ ! -e "${root}/owner-ok" ]]; do sleep 0.2; done
+id1=$(grep -o '"id": [0-9]*' "${root}/wait-conf1.json" | head -1 | grep -o '[0-9]*')
+$C review "$id1" accept --note "first" > "${root}/rev-conf1.txt" 2>&1
+$C wait --timeout 30 > "${root}/wait-conf2.json"
+id2=$(grep -o '"id": [0-9]*' "${root}/wait-conf2.json" | head -1 | grep -o '[0-9]*')
+$C review "$id2" accept --note "second" > "${root}/rev-conf2.txt" 2>&1
+echo "Conflict report: one merge stopped for the owner."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "conflict goal").status, 0);
+assert.ok(await until(() => status().jobs.some((j) => j.agent === "devin" && j.status === "finished")), "a devin copy finished");
+// The owner commits a competing change to a.txt on the main branch before any review.
+fs.writeFileSync(path.join(repo, "a.txt"), "owner\n"); git("add", "a.txt"); git("commit", "-qm", "owner changes a");
+fs.writeFileSync(path.join(root, "owner-ok"), "go\n");
+assert.ok(await until(() => status().goal && status().goal.status === "done"), "the conflict goal finishes: " + JSON.stringify(status().goal));
+{
+  const cs = status();
+  const aJob = cs.jobs.find((j) => j.agent === "devin" && j.files.includes("a.txt") && j.goal === cs.goal.id);
+  const bJob = cs.jobs.find((j) => j.agent === "devin" && j.files.includes("b.txt") && j.goal === cs.goal.id);
+  assert.ok(aJob && bJob, "both conflict-goal jobs exist");
+  assert.equal(aJob.status, "conflict", "the conflicting copy is marked, not forced: " + JSON.stringify(aJob));
+  assert.equal(bJob.status, "accepted", "the clean copy still merges");
+  assert.equal(aJob.worker, "Devin 1"); assert.equal(bJob.worker, "Devin 2");
+  assert.equal(fs.readFileSync(path.join(repo, "a.txt"), "utf8"), "owner\n", "the owner's a.txt won; the conflicted branch was not forced in");
+  assert.equal(fs.readFileSync(path.join(repo, "b.txt"), "utf8"), "devin b.txt\n", "the clean copy merged");
+  assert.ok(fs.existsSync(aJob.worktree), "the conflicted worktree is left for the owner");
+  assert.ok(git("branch", "--list", aJob.branch).trim().includes(aJob.branch), "the conflicted branch is kept");
+  assert.equal(git("branch", "--list", bJob.branch).trim(), "", "the merged branch is deleted");
+  assert.ok(!git("branch", "--list", bJob.branch).includes(bJob.branch));
+  const revs = fs.readFileSync(path.join(root, "rev-conf1.txt"), "utf8") + fs.readFileSync(path.join(root, "rev-conf2.txt"), "utf8");
+  assert.match(revs, /conflicted/, "the conflict was reported, not hidden");
+  assert.ok(cs.log.some((l) => l.kind === "merge" && /conflict/.test(l.text)), "the merge conflict is in her log");
+  // Clean up the conflicted worktree/branch the test deliberately left behind.
+  git("worktree", "remove", "--force", aJob.worktree); git("branch", "-D", aJob.branch);
+}
+fs.rmSync(path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-worktrees"), { recursive: true, force: true });
 
 // The watcher: a fake busctl feeds it real-format Notify blocks. With no job
 // running for the named agent, the notification is logged as the owner's own —

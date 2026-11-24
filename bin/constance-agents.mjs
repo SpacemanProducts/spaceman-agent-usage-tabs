@@ -35,6 +35,12 @@ export function launchCommand(id, prompt) {
   return l ? [l.cli, ...l.args(prompt)] : null;
 }
 
+// How many copies of the same agent Constance may run at once. A copy is a
+// separate git worktree + branch + sandbox, tracked as its own worker ("Devin
+// 1".."Devin 4"). Agents not listed here stay single-job, exactly as before.
+export const MAX_COPIES = { devin: 4 };
+export function copyLimit(id) { return MAX_COPIES[id] || 1; }
+
 // Each registered account is its own source of capacity: she can use whichever
 // login has the most room, not only the seated one. accounts[] (2+ signed-in
 // accounts) lists every login; without it the agent's own limits are the only

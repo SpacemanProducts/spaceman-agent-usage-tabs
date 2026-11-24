@@ -151,6 +151,21 @@ assert.equal(own.agent, "codex"); assert.equal(own.kind, "foreign");
 assert.equal(handleNotification({ app: "Ghostty", summary: "Codex", body: "waiting for input" }, { jobs, storeDir: stateDir }), null, "a non-finish foreign signal is dropped");
 assert.ok(!/secret project/.test(fs.readFileSync(notifyFile(stateDir), "utf8")), "foreign notification text is never stored");
 
+// Two copies of the same agent: the one whose worktree done file exists is the
+// one the notification belongs to, even when both are running.
+{
+  const wt = path.join(root, "wt-copy");
+  fs.mkdirSync(path.join(wt, ".constance"), { recursive: true });
+  fs.writeFileSync(doneFile(wt, 5), '{"summary":"done","commit":""}');
+  const wjobs = [
+    { id: 5, agent: "devin", status: "running", dir: repo, worktree: wt, startedAt: 1 },
+    { id: 6, agent: "devin", status: "running", dir: repo, startedAt: 2 },
+  ];
+  m = matchJob("Devin finished", wjobs);
+  assert.equal(m.job, 5, "the copy with the done file is matched");
+  assert.equal(m.dir, wt, "the worktree is inspected, not the main repo");
+}
+
 // inspectJobDir on a clean repo.
 const info = inspectJobDir(repo, 99);
 assert.match(info, /no done file yet/);

@@ -129,5 +129,33 @@ assert.equal(busDirs(), busBefore, "a refused launch leaves nothing behind");
   assert.equal(fs.readFileSync(path.join(proj, "late.txt"), "utf8"), "done\n", "the job ran to the end after its launcher exited");
 }
 
+// A linked worktree: .git is a pointer file into the main repo. The sandbox must
+// keep that pointer read-only, bind the shared git dir for objects/refs, expose
+// only THIS worktree's gitdir writable, and keep the main repo's hooks/config
+// read-only — exactly like a normal repo's .git.
+{
+  const wt = path.join(base, "wt");
+  execFileSync("git", ["-C", proj, "config", "user.email", "t@t"]);
+  execFileSync("git", ["-C", proj, "config", "user.name", "t"]);
+  fs.writeFileSync(path.join(proj, "seed.txt"), "seed\n");
+  execFileSync("git", ["-C", proj, "add", "seed.txt"]);
+  execFileSync("git", ["-C", proj, "commit", "-qm", "seed"]);
+  execFileSync("git", ["-C", proj, "worktree", "add", "-b", "wt-test", wt, "HEAD"], { encoding: "utf8" });
+  const wargs = sandboxArgs({ agent: "grok", dir: wt, tmp, env }).join(" ");
+  const common = path.join(proj, ".git");
+  const wtGit = fs.readdirSync(path.join(common, "worktrees"))[0];
+  const wtGitDir = path.join(common, "worktrees", wtGit);
+  for (const frag of [
+    `--ro-bind ${wt}/.git ${wt}/.git`,
+    `--bind ${common} ${common}`,
+    `--ro-bind ${common}/hooks ${common}/hooks`,
+    `--ro-bind ${common}/config ${common}/config`,
+    `--ro-bind ${path.join(common, "worktrees")} ${path.join(common, "worktrees")}`,
+    `--bind ${wtGitDir} ${wtGitDir}`,
+  ]) assert.ok(wargs.includes(frag), `worktree sandbox args contain ${frag}: ${wargs}`);
+  execFileSync("git", ["-C", proj, "worktree", "remove", "--force", wt]);
+  execFileSync("git", ["-C", proj, "branch", "-D", "wt-test"]);
+}
+
 fs.rmSync(base, { recursive: true, force: true });
 console.log("constance-sandbox: tests passed");

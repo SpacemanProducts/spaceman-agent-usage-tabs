@@ -67,6 +67,28 @@ export function bwrapWorks(bin = "bwrap") {
 
 const under = (child, parent) => child === parent || child.startsWith(parent.endsWith("/") ? parent : parent + "/");
 
+// A normal repo has .git as a directory; a linked worktree has it as a file
+// pointing at <main>/.git/worktrees/<name>, whose commondir points back at the
+// main .git. The sandbox needs the common dir for objects/refs and the worktree
+// gitdir for index/HEAD — while hooks and config stay read-only either way.
+function gitPointer(dir) {
+  const file = path.join(dir, ".git");
+  try {
+    const st = fs.statSync(file);
+    if (st.isDirectory()) return { type: "dir", dir: file };
+    if (!st.isFile()) return null;
+    const m = fs.readFileSync(file, "utf8").match(/^gitdir:\s*(.+)$/m);
+    if (!m) return null;
+    const gitDir = path.resolve(dir, m[1].trim());
+    let common = gitDir;
+    try {
+      const rel = fs.readFileSync(path.join(gitDir, "commondir"), "utf8").trim();
+      if (rel) common = path.resolve(gitDir, rel);
+    } catch {}
+    return { type: "worktree", file, gitDir, common };
+  } catch { return null; }
+}
+
 // The bwrap argv (without the command) for one job. `extraRw` takes absolute
 // folders that also belong to the agent (a non-seated account's login home).
 // Order matters: bwrap applies mounts in order, so the empty home comes first
@@ -106,13 +128,29 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
   a.push("--bind", proj, proj);
   // The project's git config and hooks stay read-only: both can name commands
   // that git runs later, outside the sandbox (hooks, core.fsmonitor, core.hooksPath).
-  const gitDir = path.join(proj, ".git");
-  if (exists(gitDir) && fs.statSync(gitDir).isDirectory()) {
-    const hooks = path.join(gitDir, "hooks");
+  const gi = gitPointer(proj);
+  if (gi?.type === "dir") {
+    const hooks = path.join(gi.dir, "hooks");
     if (!exists(hooks)) fs.mkdirSync(hooks);
     a.push("--ro-bind", hooks, hooks);
-    const cfg = path.join(gitDir, "config");
+    const cfg = path.join(gi.dir, "config");
     if (exists(cfg)) a.push("--ro-bind", cfg, cfg);
+  } else if (gi?.type === "worktree") {
+    // In a worktree .git is a file: keep the pointer itself read-only, bind the
+    // shared git dir for objects/refs, then re-expose only THIS worktree's
+    // gitdir (index/HEAD) writable. Sibling worktrees' gitdirs stay read-only.
+    a.push("--ro-bind", gi.file, gi.file);
+    a.push("--bind", gi.common, gi.common);
+    const hooks = path.join(gi.common, "hooks");
+    if (!exists(hooks)) fs.mkdirSync(hooks);
+    a.push("--ro-bind", hooks, hooks);
+    const cfg = path.join(gi.common, "config");
+    if (exists(cfg)) a.push("--ro-bind", cfg, cfg);
+    const wts = path.join(gi.common, "worktrees");
+    if (exists(wts)) {
+      a.push("--ro-bind", wts, wts);
+      if (exists(gi.gitDir)) a.push("--bind", gi.gitDir, gi.gitDir);
+    }
   }
   // Keyring agents get the filtered proxy's socket as their only bus.
   if (busSock) a.push("--bind", busSock, `/run/user/${uid}/bus`);

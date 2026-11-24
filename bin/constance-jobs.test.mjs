@@ -8,9 +8,10 @@ assert.deepEqual(overlaps(["a.js"], ["b.js"]), []);
 assert.deepEqual(overlaps(["./src/a.js"], ["src/a.js"]), ["src/a.js"]);
 assert.equal(overlaps(["src/a.js"], ["src/"]).length, 1, "a file inside a listed folder overlaps");
 assert.equal(overlaps(["."], ["x"]).length, 1, "the whole repo overlaps everything");
-const jobs = [{ id: 1, dir: "/p", files: ["Panel.qml"], status: "running" }, { id: 2, dir: "/p", files: ["x.js"], status: "accepted" }, { id: 3, dir: "/q", files: ["Panel.qml"], status: "running" }];
-assert.deepEqual(conflicts(jobs, "/p", ["Panel.qml", "y"]).map((j) => j.id), [1], "only running jobs in the same folder conflict");
-assert.deepEqual(conflicts(jobs, "/p", ["x.js"]), [], "finished work doesn't block");
+const jobs = [{ id: 1, dir: "/p", files: ["Panel.qml"], status: "running" }, { id: 2, dir: "/p", files: ["x.js"], status: "accepted" }, { id: 3, dir: "/q", files: ["Panel.qml"], status: "running" }, { id: 4, dir: "/p", files: ["z.js"], status: "finished" }];
+assert.deepEqual(conflicts(jobs, "/p", ["Panel.qml", "y"]).map((j) => j.id), [1], "only unfinished jobs in the same folder conflict");
+assert.deepEqual(conflicts(jobs, "/p", ["x.js"]), [], "accepted work doesn't block");
+assert.deepEqual(conflicts(jobs, "/p", ["z.js"]).map((j) => j.id), [4], "a finished job still holds its files until it's merged");
 
 const p = handoffPrompt({ id: 7, dir: "/home/u/proj", task: "Add the button.", files: ["Panel.qml"] });
 const lines = p.split("\n");
@@ -44,6 +45,16 @@ assert.match(handoffPrompt({ id: 9, dir: "/p", task: "t" }), /read-only job/, "f
 // A named account is called out in the prompt; no account, no line.
 assert.match(handoffPrompt({ id: 10, dir: "/p", task: "t", account: { id: "work", label: "Work" } }), /Account: this run is on the "Work" account\./);
 assert.doesNotMatch(handoffPrompt({ id: 11, dir: "/p", task: "t" }), /Account:/, "single-account jobs stay unchanged");
+
+// A copy job runs in a worktree on its own branch: the prompt checks that folder
+// and branch, warns off the main checkout, and still ends on the done file.
+const wt = handoffPrompt({ id: 12, dir: "/repo", task: "t", files: ["a.js"], worktree: "/var/tmp/wt", branch: "constance/job-12", mainDir: "/repo" });
+assert.match(wt, /git worktree \/var\/tmp\/wt \(branch constance\/job-12\) of the project \/repo/);
+assert.match(wt, /git branch --show-current`; you should be on constance\/job-12/);
+assert.match(wt, /never touch the main checkout at \/repo or another worktree/);
+assert.match(wt, /commit only your own work on branch constance\/job-12/);
+assert.match(wt, /Do not push or deploy or merge/);
+assert.ok(wt.trim().split("\n").pop().includes(doneFile("/var/tmp/wt", 12)), "the done file lives in the worktree");
 
 assert.deepEqual(reviewQueue([{ id: 1, status: "finished", finishedAt: 20 }, { id: 2, status: "finished", finishedAt: 10 }, { id: 3, status: "accepted", finishedAt: 5 }]).map((j) => j.id), [2, 1], "reviewed in the order they finished");
 

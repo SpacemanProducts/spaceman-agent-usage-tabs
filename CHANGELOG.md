@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.43.0 - 2026-11-24
+- **Constance can run up to 4 Devins at once:** each editing Devin job gets its own git worktree on its own branch in a temp area outside your projects, tracked in the panel as Devin 1–4, sandboxed with write access only to that worktree (the main repo's `.git/hooks` and `.git/config` stay read-only inside every sandbox). She gives copies tasks with no overlapping files and hears each one finish separately. After you accept a copy's work she merges its branch into the project one at a time; a conflict stops and is reported instead of forcing anything, and the worktree/branch are kept for you. Accepted copies get the next queued task right away, and worktrees/branches are cleaned up after merge or rejection. `bin/constance-worktree.mjs` + tests cover the worktrees, merges and conflicts.
+
 ## 1.42.1 - 2026-11-24
 - **Constance's goal box takes keyboard input again:** clicking it focuses the text area, so typing, Ctrl+V, Ctrl+Shift+V and right-click paste work, and leaving the view or closing the panel releases the keys back to the panel.
 

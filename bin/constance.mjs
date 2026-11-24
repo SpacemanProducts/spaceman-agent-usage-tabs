@@ -25,7 +25,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.mjs";
+import { judgeAll, launchCommand, accountEnv, LAUNCH, copyLimit } from "./constance-agents.mjs";
 import { pace } from "./constance-pace.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
@@ -34,6 +34,7 @@ import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./cons
 import { NotifyParser, handleNotification, recentSignals } from "./constance-notify.mjs";
 import { addTask, peekNext, finishTask, removeTask, queueView } from "./constance-queue.mjs";
 import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
+import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -94,6 +95,11 @@ function practiceMode() {
 // ---------------------------------------------------------------- jobs
 // Bring statuses up to date: a done file means finished; a process that ended without one is finished too
 // (with a note), so it still gets reviewed.
+// The folder the agent actually worked in: a copy job's worktree, or the repo
+// itself for ordinary jobs. j.dir stays the project repo so conflicts, the
+// queue and reviews all talk about one place.
+const runDir = (j) => j.worktree || j.dir;
+
 // A job's sandbox /tmp is only ever the folder handOut made for it; it goes when the job ends.
 function dropJobTmp(j) {
   const t = String(j.tmp || "");
@@ -105,7 +111,7 @@ function sweep() {
     const changed = [];
     for (const j of s.jobs) {
       if (j.status !== "running") continue;
-      const f = doneFile(j.dir, j.id);
+      const f = doneFile(runDir(j), j.id);
       let done = null;
       try { done = JSON.parse(fs.readFileSync(f, "utf8")); j.finishedAt = fs.statSync(f).mtimeMs; }
       catch {
@@ -127,14 +133,14 @@ function sweep() {
 // strike (smaller tasks from then on) and marks the job so her review sees it.
 function guardFinished(j) {
   if (!j.guardBefore || j.guardChecked) return;
-  const res = checkRun({ dir: j.dir, files: j.files || [], commit: j.commit, before: j.guardBefore, env: ENV });
+  const res = checkRun({ dir: runDir(j), files: j.files || [], commit: j.commit, before: j.guardBefore, env: ENV });
   store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.guardChecked = true; });
   if (res.ok) return;
   // Revert the commit only when the commit itself touched disallowed files; a
   // home/projects-only or dirty-leftover violation leaves committed work alone.
   // Only a commit the guard verified as this run's own is ever reverted.
-  const commitBad = !!res.ownCommit && changedFiles(j.dir, res.ownCommit).some((p) => (res.badPaths || []).includes(p));
-  const did = restoreRun({ dir: j.dir, commit: commitBad ? res.ownCommit : "", badPaths: res.badPaths || [], addedProjects: res.addedProjects || [],
+  const commitBad = !!res.ownCommit && changedFiles(runDir(j), res.ownCommit).some((p) => (res.badPaths || []).includes(p));
+  const did = restoreRun({ dir: runDir(j), commit: commitBad ? res.ownCommit : "", badPaths: res.badPaths || [], addedProjects: res.addedProjects || [],
     addedHome: res.addedHome || [], removedHome: res.removedHome || [], removedProjects: res.removedProjects || [] });
   const lesson = `${j.agent} broke a guardrail on job ${j.id}: ${res.violations.join("; ")}.`;
   addLesson(lesson, store.dir);
@@ -161,11 +167,27 @@ function excludeDoneFiles(dir) {
   if (!txt.split("\n").includes(".constance/")) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, (txt && !txt.endsWith("\n") ? "\n" : "") + ".constance/\n"); }
 }
 
+// Copies of one agent that still hold their slot: waiting/running, finished and
+// awaiting review (the branch isn't merged yet), or conflicted (left for the
+// owner). Accepted, sent-back and stopped jobs free their number.
+function copySlots(s, agent, dir) {
+  return s.jobs.filter((j) => j.agent === agent && j.dir === dir && j.copy && ["waiting", "running", "finished", "conflict"].includes(j.status));
+}
+function claimCopy(s, agent, dir, limit, prefer = 0) {
+  const used = new Set(copySlots(s, agent, dir).map((j) => j.copy));
+  if (prefer > 0 && prefer <= limit && !used.has(prefer)) return prefer;
+  for (let i = 1; i <= limit; i++) if (!used.has(i)) return i;
+  return 0;
+}
+
 // The actual handoff, shared by `delegate` and the queue's auto-next: checks the
 // agent is still available, enforces strike caps and file conflicts, builds the
-// prompt (project rules + guardrails), snapshots the world, and launches. Throws
-// with a human reason on any refusal; returns { job, who, verdict, practice }.
-function handOut({ agent, task, files = [] }) {
+// prompt (project rules + guardrails), snapshots the world, and launches. Agents
+// with copyLimit > 1 (Devin, up to 4) get an editing job in their own git
+// worktree on their own branch, tracked as a numbered worker; it merges into the
+// repo only after review accepts it. Throws with a human reason on any refusal;
+// returns { job, who, verdict, practice }.
+function handOut({ agent, task, files = [], preferCopy = 0 }) {
   const g = store.read().goal;
   if (!g || g.status !== "running") throw new Error("No goal is running (stopped or paused), so nothing is handed out.");
   if (!agent || !task) throw new Error("delegate needs --agent ID and --task TEXT");
@@ -179,30 +201,55 @@ function handOut({ agent, task, files = [] }) {
   if (files.length > cap) throw new Error(`${agent} broke a guardrail before, so it gets smaller tasks: at most ${cap} file${cap === 1 ? "" : "s"} per job (it asked for ${files.length}). Split the work or pick another agent.`);
   const practice = practiceMode();
   const account = verdict.accountId ? { id: verdict.accountId, label: verdict.account } : null;
-  const who = verdict.name + (verdict.account ? ` (${verdict.account})` : "");
   // Per-project rules are read fresh for every handoff; guardrails go to every
   // delegated agent (they are all fast/free models).
   const extra = rulesBlock(readProjectRules(dir)) + "\n" + guardrailBlock(files);
+  const limit = copyLimit(agent);
   const job = store.update((s) => {
     const busy = conflicts(s.jobs, dir, files);
     if (busy.length) return { busy };
-    const j = { id: s.next++, goal: g.id, agent, account, dir, files, task, status: practice ? "finished" : "waiting", createdAt: Date.now() };
+    const useCopy = limit > 1 && files.length > 0 && !practice;
+    let copy = 0, worker = "";
+    if (useCopy) {
+      const slots = copySlots(s, agent, dir);
+      if (slots.length >= limit) return { cap: limit };
+      copy = claimCopy(s, agent, dir, limit, preferCopy);
+      if (!copy) return { cap: limit };
+      worker = `${verdict.name} ${copy}`;
+    }
+    const id = s.next++;
+    const j = { id, goal: g.id, agent, account, repo: dir, dir, files, task, status: practice ? "finished" : "waiting", createdAt: Date.now() };
+    if (useCopy) { j.copy = copy; j.worker = worker; j.worktree = worktreeFor(id); j.branch = branchFor(id); }
     if (practice) { j.finishedAt = Date.now(); j.summary = "(practice run: the prompt is in the log, nothing was launched)"; }
-    j.prompt = handoffPrompt(j, extra);
+    j.prompt = useCopy
+      ? handoffPrompt({ id, dir, task, files, account, worktree: j.worktree, branch: j.branch, mainDir: dir }, extra)
+      : handoffPrompt(j, extra);
     s.jobs.push(j);
     return j;
   });
   if (job.busy) throw new Error(`Those files overlap job ${job.busy.map((b) => `${b.id} (${b.agent}: ${b.files.join(", ")})`).join("; ")}. Wait for it, or split the work differently.`);
+  if (job.cap) throw new Error(`${agent} already has ${job.cap} copies running. Wait for one to be reviewed, or hand the task to another agent.`);
+  const who = (job.worker || verdict.name) + (verdict.account ? ` (${verdict.account})` : "");
   if (practice) {
     store.log({ kind: "practice", job: job.id, agent, account: verdict.account, reason: verdict.reason, files, text: task, prompt: job.prompt });
     return { job, who, verdict, practice: true };
   }
-  excludeDoneFiles(dir);
-  fs.mkdirSync(path.join(dir, ".constance"), { recursive: true });
-  try { fs.rmSync(doneFile(dir, job.id)); } catch {}
+  // A copy job gets its worktree before anything else: no worktree, no launch.
+  if (job.worktree) {
+    try { createWorktree(dir, job.id); }
+    catch (e) {
+      store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "stopped"; j.summary = `(no worktree: ${e.message})`; });
+      store.log({ kind: "note", job: job.id, agent, worker: job.worker, text: `Job ${job.id} not launched: ${e.message}` });
+      throw new Error(`${agent} copy couldn't get its worktree: ${e.message}`);
+    }
+  }
+  const rd = runDir(job);
+  excludeDoneFiles(rd);
+  fs.mkdirSync(path.join(rd, ".constance"), { recursive: true });
+  try { fs.rmSync(doneFile(rd, job.id)); } catch {}
   // Snapshot the world before the run: the post-run guard checks the diff and
   // these lists against it.
-  const before = guardSnapshot(ENV, dir);
+  const before = guardSnapshot(ENV, rd);
   store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.guardBefore = before; });
   const logPath = path.join(store.dir, `job-${job.id}.log`);
   const fd = fs.openSync(logPath, "w");
@@ -210,24 +257,24 @@ function handOut({ agent, task, files = [] }) {
   // that home is the agent's own, so it is writable inside the sandbox too.
   const acctEnv = accountEnv(agent, job.account?.id);
   // Prompts are off, so the agent only ever runs inside the sandbox: write access
-  // to this project, its own config/login folders and a fresh temp folder. If it
-  // can't be sandboxed, nothing launches.
+  // to this worktree (or project), its own config/login folders and a fresh temp
+  // folder. If it can't be sandboxed, nothing launches.
   let box;
   try {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `constance-job-${job.id}-`));
     store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.tmp = tmp; });
-    box = sandboxLaunch(launchCommand(agent, job.prompt), { agent, dir, tmp, env: { ...ENV, ...acctEnv }, extraRw: Object.values(acctEnv), keyringAgents: keyringAgents() });
+    box = sandboxLaunch(launchCommand(agent, job.prompt), { agent, dir: rd, tmp, env: { ...ENV, ...acctEnv }, extraRw: Object.values(acctEnv), keyringAgents: keyringAgents() });
   } catch (e) {
     fs.closeSync(fd);
     store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "stopped"; j.summary = `(not launched: ${e.message})`; });
-    store.log({ kind: "note", job: job.id, agent, text: `Job ${job.id} not launched: ${e.message}` });
+    store.log({ kind: "note", job: job.id, agent, worker: job.worker, text: `Job ${job.id} not launched: ${e.message}` });
     throw new Error(`${agent} can't run sandboxed, so it was not launched: ${e.message}`);
   }
   const [cmd, ...args] = box.cmd;
-  const child = spawn(cmd, args, { cwd: dir, env: box.env, detached: true, stdio: ["ignore", fd, fd] });
+  const child = spawn(cmd, args, { cwd: rd, env: box.env, detached: true, stdio: ["ignore", fd, fd] });
   child.unref();
   store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "running"; j.pid = child.pid; j.startedAt = Date.now(); j.log = logPath; });
-  store.log({ kind: "handoff", job: job.id, agent, account: verdict.account, files, text: task });
+  store.log({ kind: "handoff", job: job.id, agent, worker: job.worker, account: verdict.account, files, text: task });
   return { job, who, verdict, practice: false };
 }
 
@@ -241,7 +288,7 @@ function delegate() {
     out(`Practice job ${job.id}: ${who} would take it (${verdict.reason}). Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
     return;
   }
-  out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."} It writes ${doneFile(job.dir, job.id)} when done; run \`wait\`.`);
+  out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."}${job.worker ? ` ${job.worker} works in its own worktree on ${job.branch}.` : ""} It writes ${doneFile(runDir(job), job.id)} when done; run \`wait\`.`);
 }
 
 // After a job is accepted, the next queued task for its project goes to the
@@ -252,7 +299,7 @@ function autoNext(j) {
   if (!item) return "";
   const agent = item.agent || j.agent;
   try {
-    const r = handOut({ agent, task: item.task, files: item.files || [] });
+    const r = handOut({ agent, task: item.task, files: item.files || [], preferCopy: agent === j.agent ? j.copy || 0 : 0 });
     finishTask(j.dir, item.id, r.job.id, store.dir);
     store.log({ kind: "note", text: `Ready queue: "${item.task.slice(0, 80)}" went to ${agent} automatically as job ${r.job.id}.` });
     return r.practice
@@ -293,7 +340,7 @@ function queueCmd() {
 async function waitJob() {
   const until = Date.now() + Math.min(560, Number(arg("--timeout", "100")) || 100) * 1000;
   for (;;) {
-    for (const j of sweep()) store.log({ kind: "returned", job: j.id, agent: j.agent, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
+    for (const j of sweep()) store.log({ kind: "returned", job: j.id, agent: j.agent, worker: j.worker, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
     const s = store.read();
     const next = reviewQueue(s.jobs)[0];
     if (next) {
@@ -302,16 +349,59 @@ async function waitJob() {
       const earlier = s.jobs.filter((j) => j.id !== next.id && j.goal === next.goal && ["finished", "accepted"].includes(j.status) && (j.finishedAt || 0) <= (next.finishedAt || 0))
         .map((j) => ({ id: j.id, agent: j.agent, commit: j.commit, shared: overlaps(changedFiles(j.dir, j.commit), files) })).filter((x) => x.shared.length);
       let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
-      return out({ review: { id: next.id, agent: next.agent, dir: next.dir, files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
+      return out({ review: { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
         guardViolation: next.guardViolation || null,
-        checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent })), signals: recentSignals(store.dir, 6),
+        checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null })), signals: recentSignals(store.dir, 6),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     if (!s.jobs.some((j) => j.status === "running")) return out({ review: null, stillRunning: [], next: "No jobs are running." });
     if (s.goal?.status === "stopped") return out({ review: null, next: "Stopped by the owner. End now." });
-    if (Date.now() > until) return out({ review: null, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent })), next: "Still running; call `wait` again." });
+    if (Date.now() > until) return out({ review: null, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null })), next: "Still running; call `wait` again." });
     await sleep(5000);
   }
+}
+
+// Merges of accepted copy branches run one at a time across separate `review`
+// calls: a tiny mkdir lock in her state dir, stale after 30 s.
+function withMergeLock(fn) {
+  const lock = path.join(store.dir, "merge.lock");
+  for (let i = 0; ; i++) {
+    try { fs.mkdirSync(lock); break; }
+    catch {
+      try { if (Date.now() - fs.statSync(lock).mtimeMs > 30000) { fs.rmdirSync(lock); continue; } } catch {}
+      if (i > 400) throw new Error("another merge is still running");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  try { return fn(); } finally { try { fs.rmdirSync(lock); } catch {} }
+}
+
+// Accept means the copy's branch merges into the repo's current branch, then
+// its worktree and branch are cleaned up. A conflict aborts the merge, marks the
+// job "conflict", keeps the worktree/branch for the owner, and reports — never
+// forces anything.
+function mergeAccepted(j) {
+  if (!j.worktree || !j.branch) return { ok: true };
+  const m = mergeBranch(j.dir, j.branch);
+  if (!m.ok) {
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "conflict"; x.mergeError = m.output || ""; } });
+    store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `merge ${m.conflict ? "conflict" : "failed"} on ${j.branch}: ${(m.output || "").slice(-300)}` });
+    return m;
+  }
+  const did = dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true, merged: true });
+  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.mergedAt = Date.now(); x.mergeCommit = m.commit || ""; x.worktree = ""; x.cleaned = did.join("; "); } });
+  store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `merged ${j.branch} into ${repoBranch(j.dir) || "the current branch"}${m.commit ? ` (${String(m.commit).slice(0, 9)})` : ""}; ${did.join("; ")}` });
+  return { ok: true };
+}
+
+// A sent-back copy's work is rejected: drop its worktree and branch so temp
+// folders don't pile up. The branch is deleted (the work was not merged).
+function cleanupRejected(j) {
+  if (!j.worktree) return "";
+  const did = dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true });
+  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.worktree = ""; x.cleaned = did.join("; "); } });
+  store.log({ kind: "note", job: j.id, agent: j.agent, worker: j.worker, text: `Job ${j.id} sent back; ${did.join("; ") || "worktree cleaned"}.` });
+  return did.join("; ");
 }
 
 function review() {
@@ -319,10 +409,17 @@ function review() {
   if (!["accept", "send-back"].includes(verdict)) fail("Usage: review ID accept|send-back --note TEXT");
   const j = store.update((s) => { const j = s.jobs.find((x) => x.id === id); if (j) { j.status = verdict === "accept" ? "accepted" : "sent back"; j.reviewNote = note; j.reviewedAt = Date.now(); } return j; });
   if (!j) fail(`No job ${id}.`);
-  store.log({ kind: "review", job: id, agent: j.agent, verdict, text: note });
-  // Accepted means the agent is free: hand it the next queued task for this
-  // project immediately, so free capacity never sits idle.
-  const extra = verdict === "accept" ? autoNext(j) : "";
+  store.log({ kind: "review", job: id, agent: j.agent, worker: j.worker, verdict, text: note });
+  // Accepted means the agent is free: merge its branch first (copies only),
+  // clean up, then hand it the next queued task for this project immediately.
+  if (verdict === "accept" && j.worktree) {
+    const m = withMergeLock(() => mergeAccepted(j));
+    if (!m.ok) {
+      out(`Job ${id} accepted, but merging ${j.branch} ${m.conflict ? "conflicted" : "failed"}: ${(m.output || "").trim().slice(-300)}. Nothing was forced; the worktree and branch were left in place.`);
+      return;
+    }
+  }
+  const extra = verdict === "accept" ? autoNext(j) : (j.worktree ? ` ${cleanupRejected(j)}` : "");
   out(`Job ${id} ${j.status}.${extra}`);
 }
 
@@ -333,6 +430,7 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - \`C pace\`: your own session/weekly pacing. Obey its mode. "normal": keep hard, risky or architectural work, delegate routine well-defined low-risk pieces. "delegate": you are burning your limits too fast, so delegate editing and testing too and keep only planning and review. You never run out of your own limits; the driver pauses you at 90% and resumes after the reset.
 - \`C agents\`: who is available right now (under their limits, signed in, readable, free). Re-check right before every handoff; availability changes as limits reset. No agent is the default: spread work over whoever has spare capacity. Never use an agent that isn't listed as available, and never anything that costs money.
 - \`C delegate --agent ID --files a,b --task "..."\`: hand off one small, clear task — the smaller and more self-contained, the better; give weaker agents smaller pieces. List every file it may edit; two editing jobs may never share files, and you must not edit a running job's files yourself. For read-only work (investigating a cause, summarizing a file) omit \`--files\`. The tool adds the folder check, git rules, tests/build and done file to the prompt, so the task text itself only needs to say what to do.
+- Devin may run as several copies at once (up to 4): each editing job gets its own worktree and branch, shows up as Devin 1..4, and merges into the project only after you accept it. Give copies tasks whose files never overlap; if a merge ever conflicts the job is marked and left for the owner — report it, don't force it.
 - When a bug's cause is unknown, the first handoff changes nothing: tell the agent to find the cause, report it in a few lines and stop. Send the fix as a second handoff once you know the cause.
 - When a large file needs reading, hand that to a free agent to summarize instead of reading it all yourself.
 - Some work stays with you, never delegated: live database changes, bugs tangled across many parts of the code, and anything involving secrets or credentials.
@@ -528,7 +626,7 @@ function stopAll() {
     for (const j of s.jobs) if (j.status === "running" || j.status === "waiting") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; }
     return JSON.parse(JSON.stringify(s));
   });
-  for (const j of s.jobs) if (j.status === "stopped") dropJobTmp(j);
+  for (const j of s.jobs) if (j.status === "stopped") { dropJobTmp(j); if (j.worktree) dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true }); }
   const g = s.goal;
   if (g && alive(g.brainPid, "claude")) killGroup(g.brainPid);
   if (g && alive(g.driverPid, "constance.mjs")) killGroup(g.driverPid);
