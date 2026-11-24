@@ -34,6 +34,13 @@ import { readAmpUsage } from "./amp-usage.mjs";
 import { maybeWriteHandoff } from "./handoff.mjs";
 import { createDiagnostics, checkAgentData } from "./diagnostics.mjs";
 import { immediateResetKind, surpriseStateFile, writeSurpriseState } from "./antigravity-surprise.mjs";
+import { loadHistory, saveHistory, recordDay, agentSeries } from "./usage-history.mjs";
+import { weeklySummary } from "./weekly-summary.mjs";
+import { readOpencodeUsage } from "./opencode-usage.mjs";
+import { readKimiUsage } from "./kimi-usage.mjs";
+import { readQwenUsage } from "./qwen-usage.mjs";
+import { readDshUsage } from "./dsh-usage.mjs";
+import { readMcodeUsage } from "./mcode-usage.mjs";
 
 const HOME = os.homedir();
 const STATE = path.join(process.env.XDG_STATE_HOME || path.join(HOME, ".local/state"), "omarchy");
@@ -418,6 +425,44 @@ const resetFired = readJson(RESET_FIRED) || {};
 applyResets(agents, prev?.agents, (a, windows, info) => pendingResets.push({ a, windows, info }), Date.now(), resetFired);
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(RESET_FIRED, JSON.stringify(resetFired) + "\n", { mode: 0o600 });
+
+// ------------------------------------------------------------- usage history
+// data.json gains a 30-day `history` per agent and a top-level `weekly`, built
+// from <state>/agent-usage-tabs/history.json (bin/usage-history.mjs). A fresh
+// install is backfilled from our own collectors' local logs for the days before
+// Omarchy's 7-day record reaches — only dates that have no tokens yet, so the
+// Omarchy record stays the primary source. A failure here is a diag line, never
+// a crashed run.
+const HISTORY_FILE = path.join(OUT_DIR, "history.json");
+const HISTORY_READERS = { opencode: readOpencodeUsage, kimi: readKimiUsage, qwen: readQwenUsage, dsh: readDshUsage, mcode: readMcodeUsage };
+const historyNow = Date.now();
+let history = { schemaVersion: 1, days: {} };
+try {
+  history = loadHistory(HISTORY_FILE);
+  for (const [id, read] of Object.entries(HISTORY_READERS)) {
+    if (!installedIds.has(id)) continue;
+    try {
+      const usage = read({ home: HOME, env: ENV });
+      for (const d of usage?.days || []) {
+        if (!d || typeof d.date !== "string" || typeof d.tokens !== "number" || !Number.isFinite(d.tokens)) continue;
+        const day = (history.days[d.date] ||= {});
+        const rec = (day[id] ||= { tokens: null, peaks: {}, resets: 0 });
+        if (rec.tokens === null || rec.tokens === undefined) rec.tokens = d.tokens;
+      }
+    } catch (e) { diag.add(id, `usage-history backfill failed: ${String(e.message || e)}`); }
+  }
+  const resetsByAgent = {};
+  for (const { a } of pendingResets) if (a && typeof a.id === "string") resetsByAgent[a.id] = (resetsByAgent[a.id] || 0) + 1;
+  history = recordDay(history, agents, historyNow, resetsByAgent);
+  saveHistory(HISTORY_FILE, history);
+} catch (e) {
+  diag.add("history", `usage history failed: ${String(e.message || e)}`);
+}
+const namesById = {};
+for (const a of agents) namesById[a.id] = a.name;
+for (const a of agents) a.history = agentSeries(history, a.id, historyNow).map(({ date, tokens }) => ({ date, tokens }));
+const weekly = weeklySummary(history, historyNow, namesById);
+
 let announcements = null;
 for (const { a, windows, info } of pendingResets) {
   if (info.kind === "surprise") {
@@ -451,5 +496,5 @@ handoffCheck(agents);
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const tmp = `${OUT}.${process.pid}.tmp`;
 diag.flush();
-fs.writeFileSync(tmp, JSON.stringify({ schemaVersion: 1, version: VERSION, generatedAt: Date.now(), agents }, null, 1) + "\n", { mode: 0o600 });
+fs.writeFileSync(tmp, JSON.stringify({ schemaVersion: 1, version: VERSION, generatedAt: Date.now(), agents, weekly }, null, 1) + "\n", { mode: 0o600 });
 fs.renameSync(tmp, OUT);
