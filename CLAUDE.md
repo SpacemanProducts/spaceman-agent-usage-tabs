@@ -168,6 +168,15 @@ keeps the developer in flow:
   records history, then either starts the next goal in the same driver or, when `needsOwner()` finds a
   problem, pauses the queue, logs `needs-you` and sends a silent notify-send. Stop never advances the
   queue; a goal started by hand or "Start next" clears a pause.
+  Since 1.49.0: a per-agent scorecard (`bin/constance-scorecard.mjs`, `scorecard.json`, recorded once per
+  reviewed job) ranks `agents` and gives size hints (advice, not enforced); the second-try rule
+  (`bin/constance-retry.mjs`) makes `delegate` refuse work sent back twice unless it is a strict-subset split
+  (`--again ID` links a redo). Use it or lose it (`bin/constance-spare.mjs` + `bin/constance-backlog.mjs`,
+  `<project>/.constance/backlog.md`): only in `afterGoal()` when the queue is empty, one backlog-only goal per
+  reset window (`spare.json`), Claude takes only review/bug/design; setting `constanceUseItOrLoseIt` (default on).
+  There is still no goal-less loop, so spare room is only checked when a goal ends. Morning report
+  (`bin/constance-morning.mjs`) when the queue empties after a queued or backlog goal. Copy jobs (own worktree)
+  are never excused by, and never excuse, other jobs' files. Lessons are tidied once (`tidied: 1` marker).
 
 ## Working rules
 
