@@ -22,22 +22,33 @@ const writeData = (claudeSession = 0.1, grokPct = 0.1) => fs.writeFileSync(path.
   { id: "grok", installed: true, signedIn: true, limits: [{ title: "Daily", percent: grokPct }] },
   { id: "copilot", installed: true, signedIn: true, limits: [{ title: "Monthly", percent: 0.94 }] }] }));
 writeData();
-// Fake grok: the done file path is in the prompt (last argument). Waits for a go-file so the test can look at a running job.
+// Fake grok: the done file path is in the prompt (last argument). Waits for a go-file so the test can
+// look at a running job. A read-only job only reports; an editing job writes b.txt, commits and
+// sleeps a moment first so the read-only job always finishes (and is reviewed) first.
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
-echo b > b.txt; git add b.txt; git commit -qm "grok: b"; echo "{\\"summary\\": \\"added b\\", \\"commit\\": \\"$(git rev-parse HEAD)\\"}" > "$f"
+if grep -qi "read-only job" <<<"$p"; then
+  echo '{"summary": "cause: a.txt has no b", "commit": "", "files": []}' > "$f"
+else
+  sleep 1
+  echo b > b.txt; git add b.txt; git commit -qm "grok: b"; echo "{\\"summary\\": \\"added b\\", \\"commit\\": \\"$(git rev-parse HEAD)\\", \\"files\\": [\\"b.txt\\"]}" > "$f"
+fi
 `, { mode: 0o755 });
-// Fake Constance: delegate, wait, review, report. Records its arguments.
+// Fake Constance: delegate (one read-only investigation, then the fix), wait, review, report.
+// Records its arguments.
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 echo "$@" > "${root}/claude-args"
 C="node ${CLI}"
+$C delegate --agent grok --task "why is b missing? find the cause, change nothing, report in a few lines" >> "${root}/brain.out" 2>&1
 $C delegate --agent grok --files b.txt --task "add b" >> "${root}/brain.out" 2>&1
 $C delegate --agent grok --files b.txt --task "again" >> "${root}/brain.out" 2>&1 || echo "refused-busy" >> "${root}/brain.out"
 $C delegate --agent copilot --files c.txt --task "c" >> "${root}/brain.out" 2>&1 || echo "refused-copilot" >> "${root}/brain.out"
 touch "${root}/go"
 $C wait --timeout 30 > "${root}/wait.json"
-$C review 1 accept --note "looks right"
+$C review 1 accept --note "cause confirmed"
+$C wait --timeout 30 > "${root}/wait2.json"
+$C review 2 accept --note "looks right"
 echo "Report: b added by grok."
 `, { mode: 0o755 });
 const env = { ...process.env, XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}` };
@@ -50,16 +61,25 @@ assert.equal(run("start", "--dir", repo, "--goal", "add b").status, 0);
 assert.match(run("start", "--dir", repo, "--goal", "other").stderr, /already on a goal/, "one goal at a time");
 assert.ok(await until(() => status().goal.status === "done"), "the goal finishes: " + JSON.stringify(status().goal));
 const s = status();
-assert.equal(s.jobs[0].agent, "grok"); assert.equal(s.jobs[0].status, "accepted"); assert.equal(s.jobs[0].summary, "added b");
+assert.equal(s.jobs.length, 2);
+assert.equal(s.jobs[0].agent, "grok"); assert.equal(s.jobs[0].status, "accepted");
+assert.equal(s.jobs[0].summary, "cause: a.txt has no b"); assert.deepEqual(s.jobs[0].files, [], "the first handoff was read-only");
+assert.equal(s.jobs[1].agent, "grok"); assert.equal(s.jobs[1].status, "accepted"); assert.equal(s.jobs[1].summary, "added b");
 const out = fs.readFileSync(path.join(root, "brain.out"), "utf8");
-assert.match(out, /refused-busy/, "two jobs never share files"); assert.match(out, /overlap job 1/);
+assert.match(out, /refused-busy/, "two jobs never share files"); assert.match(out, /overlap job 2/);
 assert.match(out, /refused-copilot/, "an agent near its limit is never tasked");
 const w = JSON.parse(fs.readFileSync(path.join(root, "wait.json"), "utf8"));
-assert.equal(w.review.id, 1); assert.deepEqual(w.review.changedFiles, ["b.txt"]);
+assert.equal(w.review.id, 1); assert.deepEqual(w.review.changedFiles, [], "a read-only job changes nothing");
+const w2 = JSON.parse(fs.readFileSync(path.join(root, "wait2.json"), "utf8"));
+assert.equal(w2.review.id, 2); assert.deepEqual(w2.review.changedFiles, ["b.txt"]);
 const args = fs.readFileSync(path.join(root, "claude-args"), "utf8");
 assert.match(args, /--model opus/); assert.match(args, /--dangerously-skip-permissions/); assert.match(args, /--session-id/);
 assert.match(s.goal.report, /Report: b added/);
-assert.deepEqual(s.log.map((l) => l.kind), ["goal", "handoff", "returned", "review", "report"], "the log shows every handoff and what came back");
+const kinds = s.log.map((l) => l.kind);
+assert.equal(kinds[0], "goal"); assert.equal(kinds.at(-1), "report");
+assert.equal(kinds.filter((k) => k === "handoff").length, 2, "two handoffs: investigate, then fix");
+assert.equal(kinds.filter((k) => k === "returned").length, 2);
+assert.equal(kinds.filter((k) => k === "review").length, 2);
 assert.match(fs.readFileSync(path.join(repo, ".git/info/exclude"), "utf8"), /^\.constance\/$/m, "done files are never committed");
 assert.equal(git("status", "--porcelain").trim(), "", "the repo is clean afterwards");
 

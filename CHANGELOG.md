@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.34.0 - 2026-11-23
+- **Constance's handoffs got stricter and her review got cheaper:** every handoff prompt is now fully self-contained — folder check, git status, the task, what not to touch, tests and build, its own commit, no push or deploy unless the task says so, a plain-text report (what changed, test results, files; no screenshots unless the look is the task) and the done file. She delegates one small, clear task at a time and gives weaker agents smaller pieces. A bug with an unknown cause is investigated first with a read-only handoff (omit `--files`: change nothing, find the cause, report in a few lines, stop); the fix is a second handoff. She reads the agent's report and checks it against the goal, and reads the full diff herself only when the change is risky or the report doesn't add up. Large files get summarized by a free agent instead of being read by her, while live database changes, tangled cross-part bugs and anything with secrets stay with her.
+
 ## 1.33.4 - 2026-11-23
 - **Dragging a tab into first spot selects it:** the first tab is the default agent, but a reorder left the panel showing the previously selected agent's limits until it was clicked. A drop that changes which tab is first now selects the new first tab right away, so the details and the top bar switch with the order; drops that leave the first tab alone keep the current selection.
 

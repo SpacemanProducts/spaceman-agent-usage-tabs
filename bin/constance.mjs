@@ -96,7 +96,7 @@ function delegate() {
   const agent = arg("--agent"), task = arg("--task"), files = arg("--files").split(",").map((x) => x.trim()).filter(Boolean);
   const g = store.read().goal;
   if (!g || g.status !== "running") fail("No goal is running (stopped or paused), so nothing is handed out.");
-  if (!agent || !task || files.length === 0) fail("Usage: delegate --agent ID --files a,b --task TEXT");
+  if (!agent || !task) fail("Usage: delegate --agent ID --task TEXT [--files a,b]  (no --files = read-only job)");
   const verdict = judgeAll(freshData()).find((a) => a.id === agent);
   if (!verdict?.available) fail(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
@@ -119,7 +119,7 @@ function delegate() {
   child.unref();
   store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "running"; j.pid = child.pid; j.startedAt = Date.now(); j.log = logPath; });
   store.log({ kind: "handoff", job: job.id, agent, files, text: task });
-  out(`Job ${job.id} handed to ${verdict.name} (${verdict.reason}). It writes ${doneFile(dir, job.id)} when done; run \`wait\`.`);
+  out(`Job ${job.id} handed to ${verdict.name} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."} It writes ${doneFile(dir, job.id)} when done; run \`wait\`.`);
 }
 
 async function waitJob() {
@@ -136,7 +136,7 @@ async function waitJob() {
       let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
       return out({ review: { id: next.id, agent: next.agent, dir: next.dir, files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
         checkAgainst: earlier, logTail: tail }, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent })),
-        next: "Review it now: read the diff, run the tests and build, fix or send back. Then `review " + next.id + " accept|send-back --note ...`." });
+        next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     if (!s.jobs.some((j) => j.status === "running")) return out({ review: null, stillRunning: [], next: "No jobs are running." });
     if (s.goal?.status === "stopped") return out({ review: null, next: "Stopped by the owner. End now." });
@@ -160,10 +160,13 @@ const ROLE = (dir) => `You are Constance, the quarterback of the owner's coding 
 Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir}.
 - \`C pace\`: your own session/weekly pacing. Obey its mode. "normal": keep hard, risky or architectural work, delegate routine well-defined low-risk pieces. "delegate": you are burning your limits too fast, so delegate editing and testing too and keep only planning and review. You never run out of your own limits; the driver pauses you at 90% and resumes after the reset.
 - \`C agents\`: who is available right now (under their limits, signed in, readable, free). Re-check right before every handoff; availability changes as limits reset. No agent is the default: spread work over whoever has spare capacity. Never use an agent that isn't listed as available, and never anything that costs money.
-- \`C delegate --agent ID --files a,b --task "..."\`: hand off one well-defined piece. List every file it may edit; two jobs may never share files, and you must not edit a running job's files yourself. The tool adds the folder check, git rules and done file to the prompt.
-- \`C wait --timeout 540\` (give your Bash tool a 600000 ms timeout for it; long waits save your limits): blocks until a job finishes and gives you the next one to review, oldest finish first. Review each fully before it counts: read the diff, run the tests and the build, compare with any earlier job it lists under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then \`C review ID accept|send-back --note "..."\`.
+- \`C delegate --agent ID --files a,b --task "..."\`: hand off one small, clear task — the smaller and more self-contained, the better; give weaker agents smaller pieces. List every file it may edit; two editing jobs may never share files, and you must not edit a running job's files yourself. For read-only work (investigating a cause, summarizing a file) omit \`--files\`. The tool adds the folder check, git rules, tests/build and done file to the prompt, so the task text itself only needs to say what to do.
+- When a bug's cause is unknown, the first handoff changes nothing: tell the agent to find the cause, report it in a few lines and stop. Send the fix as a second handoff once you know the cause.
+- When a large file needs reading, hand that to a free agent to summarize instead of reading it all yourself.
+- Some work stays with you, never delegated: live database changes, bugs tangled across many parts of the code, and anything involving secrets or credentials.
+- \`C wait --timeout 540\` (give your Bash tool a 600000 ms timeout for it; long waits save your limits): blocks until a job finishes and gives you the next one to review, oldest finish first. The agent runs the tests and build itself and reports in plain text what changed, the results and the files. Check the report against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare with any earlier job it lists under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then \`C review ID accept|send-back --note "..."\`.
 - \`C note "..."\`: a short line in the owner's log for anything he should know.
-Before you edit anything, run \`git status\`; commit only your own changes, never push. When the goal is done and every job is reviewed, finish with a short plain report for the owner: what was done, by whom, the commits, anything left open.`;
+Before you edit anything, run \`git status\`; commit only your own changes, never push or deploy. When the goal is done and every job is reviewed, finish with a short plain report for the owner: what was done, by whom, the commits, anything left open.`;
 
 function startGoal() {
   const text = arg("--goal").trim(), fresh = arg("--new");

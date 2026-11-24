@@ -61,9 +61,12 @@ export function conflicts(jobs, dir, files) {
 
 export const doneFile = (dir, id) => path.join(dir, ".constance", `done-${id}.json`);
 
-// The handoff prompt: a folder check first, git status, the task, the files it may touch, commit only
-// its own changes, and the done file last.
-export function handoffPrompt({ id, dir, task, files }) {
+// The handoff prompt, self-contained so the agent needs no other context: a folder check first, a git
+// status check and what not to touch, the task, tests and build, its own commit (never a push or
+// deploy unless the task says so), a plain-text report, and the done file last. With no files listed
+// the job is read-only: the agent changes nothing and only reports.
+export function handoffPrompt({ id, dir, task, files = [] }) {
+  const readOnly = !files || files.length === 0;
   return [
     `Check: this job is for the project folder ${dir}. Run \`pwd\` first; if it is not exactly ${dir}, stop now and change nothing.`,
     `Then run \`git status\`. Other agents may be working in this folder at the same time: never touch, stage, revert or commit changes you did not make.`,
@@ -71,10 +74,16 @@ export function handoffPrompt({ id, dir, task, files }) {
     `Task (job ${id}, from Constance):`,
     String(task).trim(),
     ``,
-    `Only edit these files: ${files.join(", ")}. If the task needs other files, say so in your summary instead of editing them.`,
-    `Run the project's tests if it has any. When you are done, commit only your own changes: \`git add\` the files you changed by name (never \`git add -A\` or \`git add .\`), then \`git commit\` with a short message. Do not push.`,
+    readOnly
+      ? `This is a read-only job: change nothing, create nothing, delete nothing.`
+      : `Only edit these files: ${files.join(", ")}. Everything else is off-limits; if the task needs other files, say so in your report instead of editing them.`,
+    `Run the project's tests and build, if it has them, and make sure they pass.`,
+    ...(readOnly ? [] : [`When you are done, commit only your own work in its own commit: \`git add\` the files you changed by name (never \`git add -A\` or \`git add .\`), then \`git commit\` with a short message.`]),
+    `Do not push or deploy unless the task explicitly says to.`,
     ``,
-    `Last step, even if you could not finish: write the file ${doneFile(dir, id)} containing JSON like {"summary": "one or two sentences on what you did or why you stopped", "commit": "the full hash of your commit, or empty if you made none"}. Do not commit that file.`,
+    `Report in plain text: what you changed, the test and build results, and which files you touched. No screenshots unless checking the look itself is the task. If you could not finish, say why in a few lines and stop.`,
+    ``,
+    `Last step, even if you could not finish: write the file ${doneFile(dir, id)} containing JSON like {"summary": "what you did or why you stopped, in a few lines", "commit": "the full hash of your commit, or empty if you made none", "files": ["the files you changed"]}. Do not commit that file.`,
   ].join("\n");
 }
 
