@@ -3,6 +3,10 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.47.0 - 2026-11-24
+- **Constance token meter:** her panel has a TOKENS section with one line per worker she's running (Devin 1–10, Grok, …) showing the tokens its current job has used, updating while it runs, and one total line: this goal split by agent, and today. Counts come from the same per-session usage records the agent tabs read (`folder-usage.json`, which now records each session's start time), matched to a job by its folder (a copy's worktree, or the project) and the session starting during the job. No single matching session, an overlap, or an agent that reports credits instead of tokens shows "can't tell", never a guess. A finished job keeps its last count, so totals survive the worktree being dropped. `bin/constance-tokens.mjs` + test; the end-to-end test matches a live Grok session.
+- **Constance tests run inside her sandbox:** the goal, sandbox and worktree tests use the system temp folder (TMPDIR / `os.tmpdir()`) instead of `/var/tmp`, which is read-only in the sandbox.
+
 ## 1.46.0 - 2026-11-24
 - **1.46.1 – six Constance review fixes:** every new commit is diff-checked whatever the agent reports; home/Projects changes are notices, not strikes; finish signals also come from a job's exit, done file and log; model fallback matches only Claude Code's exact rejection message; `review` refuses unfinished jobs (only `finished` may be accepted or sent back — practice jobs are born finished, so they still work); and Stop runs the guard on halted jobs, so a stopped agent's stray changes are still checked and logged before its worktree/tmp is dropped.
 - **Constance's pause follows the reset:** in the last fifth of a session or weekly window she no longer stops at 90% — she stays on delegate pace (planning, review and merges only, editing and testing go to the free agents) and stops only at 97%, so she never runs out before the reset. Far from a reset the 90% pause is unchanged. `bin/constance-pace.mjs` picks the stop line per window from its `resetsAt`.

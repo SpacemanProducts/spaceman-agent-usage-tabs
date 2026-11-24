@@ -974,6 +974,8 @@ Panel {
     }
     return rows
   }
+  // Token meter: shown while a worker runs or a goal is set (its total line also covers today).
+  readonly property bool constanceTokensShown: !!constance.tokens && (((constance.tokens.workers || []).length > 0) || !!constance.goal)
   // "Devin copies: 3 of 10 running · 2 held: machine busy: load 7.1 on 8 cores (starts under 6.4)".
   function constanceCopiesLine(c) {
     if (!c) return ""
@@ -2587,6 +2589,55 @@ Panel {
                 wrapMode: Text.WordWrap
                 text: root.constance.goal ? (root.constance.goal.status === "paused" ? String(root.constance.goal.pauseReason || "")
                   : (root.constanceActive && root.constance.pace ? "Her pace: " + root.constance.pace.reason : "")) + "  " + root.shortPath(root.constance.goal.dir) : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            // Token meter (bin/constance-tokens.mjs): one line per worker she's running with the tokens
+            // its current job has used (live, from the agents' own usage records matched by folder and
+            // start time, "can't tell" when no single session matches), then one total line: this goal
+            // split by agent, and today.
+            PanelSectionHeader { width: parent.width; text: "TOKENS"; visible: root.constanceTokensShown }
+            Column {
+              visible: root.constanceTokensShown
+              width: parent.width
+              spacing: Style.space(4)
+              Repeater {
+                model: (root.constance.tokens && root.constance.tokens.workers) || []
+                Item {
+                  required property var modelData
+                  width: parent.width
+                  height: Math.max(tokName.implicitHeight, tokCount.implicitHeight)
+                  Text {
+                    id: tokName
+                    anchors.left: parent.left
+                    anchors.right: tokCount.left
+                    anchors.rightMargin: Style.space(8)
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    text: modelData.name
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    id: tokCount
+                    anchors.right: parent.right
+                    textFormat: Text.PlainText
+                    text: modelData.count
+                    color: modelData.tokens === null ? root.dim : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: (root.constance.tokens && root.constance.tokens.line) || ""
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption

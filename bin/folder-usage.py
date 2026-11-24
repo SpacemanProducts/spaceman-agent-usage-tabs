@@ -75,7 +75,7 @@ class Usage:
 
   def add(
     self, agent: str, folder: Any, session: Any, amount: float, unit: str,
-    at: int | None, recorded_at: int | None = None,
+    at: int | None, recorded_at: int | None = None, started: int | None = None,
   ) -> None:
     folder_name = absolute_folder(folder)
     session_name = session_key(session)
@@ -83,10 +83,15 @@ class Usage:
     if not folder_name or not session_name or amount <= 0 or at is None or not self.cutoff <= at <= self.now:
       return
     recorded_at = recorded_at if recorded_at is not None and self.cutoff <= recorded_at <= self.now else at
+    # "start" is the session's earliest usage record (or, for Codex, its own start time), so a
+    # Constance job can be matched to the session it launched by folder and start time.
+    started = started if started is not None and self.cutoff <= started <= self.now else at
     key = (agent, folder_name, session_name)
     record = self.sessions.setdefault(key, {
       "folder": folder_name, "agent": agent, "session": session_name, "amount": 0.0, "unit": unit, "time": recorded_at,
+      "start": started,
     })
+    record["start"] = min(record["start"], started)
     if record["unit"] != unit:
       raise UsageError(f"{agent} reported inconsistent units in one session")
     record["amount"] += amount
@@ -367,8 +372,9 @@ def codex_home() -> Path:
   return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
 
-def codex_metadata(path: Path, collectors: Any) -> tuple[str | None, dict[str, int]]:
+def codex_metadata(path: Path, collectors: Any) -> tuple[str | None, dict[str, int], int | None]:
   folder = None
+  started = None
   latest: dict[str, int] = {}
   with collectors._codex_open(path) as handle:
     for raw in handle:
@@ -381,14 +387,16 @@ def codex_metadata(path: Path, collectors: Any) -> tuple[str | None, dict[str, i
       if not isinstance(entry, dict):
         continue
       if folder is None and entry.get("type") == "session_meta":
-        folder = obj(entry.get("payload")).get("cwd")
+        meta = obj(entry.get("payload"))
+        folder = meta.get("cwd")
+        started = time_ms(meta.get("timestamp")) or time_ms(entry.get("timestamp"))
       payload = obj(entry.get("payload"))
       if entry.get("type") == "token_usage_record" or payload.get("type") == "token_count":
         at = time_ms(entry.get("timestamp"))
         if at:
           day = datetime.fromtimestamp(at / 1000).astimezone().date().isoformat()
           latest[day] = max(latest.get(day, 0), at)
-  return absolute_folder(folder), latest
+  return absolute_folder(folder), latest, started
 
 
 def collect_codex(usage: Usage) -> None:
@@ -409,7 +417,7 @@ def collect_codex(usage: Usage) -> None:
     days = obj(record.get("days"))
     if not session or not days:
       continue
-    folder, latest = codex_metadata(Path(name), collectors)
+    folder, latest, started = codex_metadata(Path(name), collectors)
     if not folder:
       continue
     for day_name, models in days.items():
@@ -422,7 +430,7 @@ def collect_codex(usage: Usage) -> None:
       for totals in obj(models).values():
         if isinstance(totals, list):
           amount += sum(number(value) for value in totals[:4])
-      usage.add("codex", folder, session, amount, "tokens", day_time_ms, latest.get(day_name))
+      usage.add("codex", folder, session, amount, "tokens", day_time_ms, latest.get(day_name), started)
 
 
 def state_path() -> Path:

@@ -43,7 +43,7 @@ const codexUsage = {
   output_tokens: 30, reasoning_output_tokens: 0, total_tokens: 130,
 };
 fs.writeFileSync(path.join(codexDir, "rollout-2026-11-23T12-00-00-codex-session.jsonl"), [
-  { type: "session_meta", payload: { id: "codex-session", cwd: repo, model_provider: "openai" } },
+  { type: "session_meta", payload: { id: "codex-session", cwd: repo, model_provider: "openai", timestamp: iso(Date.parse(recent) - 60000) } },
   { type: "event_msg", payload: { type: "token_count", info: { last_token_usage: codexUsage, total_token_usage: codexUsage } }, timestamp: recent },
 ].map((row) => JSON.stringify(row)).join("\n") + "\n");
 
@@ -118,6 +118,10 @@ assert.equal(byAgent.get("claude").amount, 135, "Claude duplicate request rows c
 assert.equal(byAgent.get("grok").amount, 115, "Grok fork copies count once");
 assert.equal(byAgent.get("codex").amount, 130);
 assert.equal(byAgent.get("codex").time, Date.parse(recent), "Codex records retain the usage event time");
+// Each session also says when it started (earliest usage, or Codex's own session start), for Constance's token meter.
+assert.equal(byAgent.get("claude").start, Date.parse(recent), "a session starts at its first usage record");
+assert.equal(byAgent.get("codex").start, Date.parse(recent) - 60000, "a Codex session starts at its session_meta time");
+for (const record of snapshot.records) assert.ok(record.start <= record.time, `${record.agent} start is not after its last record`);
 assert.equal(byAgent.get("copilot").amount, 1.25);
 assert.equal(byAgent.get("copilot").unit, "AIC");
 assert.equal(byAgent.get("devin").amount, 135, "Devin only includes recent message usage");

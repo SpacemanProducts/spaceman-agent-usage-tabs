@@ -152,6 +152,12 @@ keeps the developer in flow:
   log lines, never strikes. Her own jobs' finish signals come from the done file, the process exit
   and the log tail (`recordSignal`, one per job). The model fallback matches only Claude Code's
   exact "issue with the selected model … may not exist / may not have access to it" message.
+  Since 1.47.0 the panel's TOKENS section (`bin/constance-tokens.mjs`) shows each running worker's
+  tokens and goal/today totals from `folder-usage.json` records (now with a session `start`). A job
+  matches a session by folder + start inside its run: all sessions in a copy's own worktree; exactly
+  one, with no overlapping same-agent job, in a shared folder. Anything else is "can't tell". Counts
+  are kept on the job (`tokens`) before worktrees are dropped. `status` starts a background rescan
+  at most every 30 s while a worker runs (`CONSTANCE_TOKENS_GAP_MS` shortens it in tests).
 
 ## Working rules
 

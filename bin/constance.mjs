@@ -37,6 +37,7 @@ import { addTask, peekNext, finishTask, removeTask, queueView } from "./constanc
 import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
 import { logText } from "./constance-logtext.mjs";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
+import { tokenMeter, matchJobs, snapshots, readRecords, usageFile, refreshInBackground, refreshNow } from "./constance-tokens.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -521,6 +522,7 @@ function withMergeLock(fn) {
 // forces anything.
 function mergeAccepted(j) {
   if (!j.worktree || !j.branch) return { ok: true };
+  keepTokens(true);
   const m = mergeBranch(j.dir, j.branch);
   if (!m.ok) {
     store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "conflict"; x.mergeError = m.output || ""; } });
@@ -537,6 +539,7 @@ function mergeAccepted(j) {
 // folders don't pile up. The branch is deleted (the work was not merged).
 function cleanupRejected(j) {
   if (!j.worktree) return "";
+  keepTokens(true);
   const did = dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true });
   store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.worktree = ""; x.cleaned = did.join("; "); } });
   store.log({ kind: "note", job: j.id, agent: j.agent, worker: j.worker, text: `Job ${j.id} sent back; ${did.join("; ") || "worktree cleaned"}.` });
@@ -773,9 +776,11 @@ function stopAll() {
   const halted = new Set(store.read().jobs.filter((j) => j.status === "running").map((j) => j.id));
   const s = store.update((s) => {
     if (s.goal && ["running", "paused"].includes(s.goal.status)) { s.goal.status = "stopped"; s.goal.finishedAt = Date.now(); }
-    for (const j of s.jobs) if (j.status === "running" || j.status === "waiting" || j.status === "held") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; }
+    for (const j of s.jobs) if (j.status === "running" || j.status === "waiting" || j.status === "held") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; j.stoppedAt = Date.now(); }
     return JSON.parse(JSON.stringify(s));
   });
+  // Keep the halted workers' token counts before their worktrees go (only when any ran).
+  if (halted.size) keepTokens(true);
   for (const j of s.jobs) if (j.status === "stopped") { if (halted.has(j.id)) guardFinished(j); dropJobTmp(j); if (j.worktree) dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true }); }
   const g = s.goal;
   if (g && alive(g.brainPid, "claude")) killGroup(g.brainPid);
@@ -795,9 +800,28 @@ function recover() {
   out("ok");
 }
 
+// Token meter: keep each launched job's last matched count on the job (worktrees are
+// dropped after review and their records with them). `fresh` rescans the usage
+// records first; otherwise a background rescan is started while a worker runs.
+function keepTokens(fresh = false) {
+  if (fresh) refreshNow(ENV);
+  const s = store.read();
+  if (!fresh && s.jobs.some((j) => j.status === "running")) refreshInBackground({ env: ENV, gap: ENV.CONSTANCE_TOKENS_GAP_MS ? Number(ENV.CONSTANCE_TOKENS_GAP_MS) : undefined });   // tests shorten the 30 s gap
+  const { records } = readRecords(usageFile(ENV));
+  const keep = snapshots(s.jobs, matchJobs(s.jobs, records));
+  if (Object.keys(keep).length) store.update((x) => { for (const j of x.jobs) if (keep[j.id]) j.tokens = keep[j.id]; });
+  return records;
+}
+function tokensView(s, d, records) {
+  const names = Object.fromEntries((d.agents || []).filter((a) => a.name).map((a) => [a.id, a.name]));
+  const { live, ...view } = tokenMeter({ jobs: s.jobs, goal: s.goal, records, name: (id) => names[id] || (id ? id[0].toUpperCase() + id.slice(1) : id) });
+  return view;
+}
+
 function status() {
+  const records = keepTokens();
   const s = store.read(), d = readData();
-  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
+  out({ goal: s.goal, tokens: tokensView(s, d, records), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(80) });
 }
 

@@ -111,7 +111,7 @@ fs.writeFileSync(path.join(proc, "meminfo"), "MemTotal:       33554432 kB\nMemFr
 // Copy worktrees go in this test's own folder (removed with root), never the real
 // /var/tmp/constance-worktrees, where a real Constance run may have copies going.
 const worktrees = path.join(root, "worktrees");
-const env = { ...process.env, CONSTANCE_WORKTREES: worktrees, HOME: fakeHome, SQUAD_PROJECTS: path.join(fakeHome, "Projects"), XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}`, CONSTANCE_PROC: proc, CONSTANCE_RAMP_GAP_MS: "0" };
+const env = { ...process.env, CONSTANCE_WORKTREES: worktrees, HOME: fakeHome, SQUAD_PROJECTS: path.join(fakeHome, "Projects"), XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}`, CONSTANCE_PROC: proc, CONSTANCE_RAMP_GAP_MS: "0", CONSTANCE_TOKENS_GAP_MS: "500", XDG_DATA_HOME: path.join(fakeHome, ".local", "share") };
 const run = (...a) => spawnSync("node", [CLI, ...a], { env, encoding: "utf8" });
 const status = () => JSON.parse(run("status").stdout);
 const until = async (fn, ms = 20000) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
@@ -158,6 +158,22 @@ fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash\nnode ${CLI} delegate --
 assert.equal(run("start", "--dir", repo, "--goal", "second").status, 0);
 assert.ok(await until(() => status().jobs.some((j) => j.status === "running")), "the job runs");
 const g = status().goal, job = status().jobs.find((j) => j.status === "running");
+// Token meter: before Grok records anything the worker is "can't tell"; once its session (in the
+// project folder, started during the job) is in Grok's usage records, the background rescan
+// matches it and status shows the count, live.
+{
+  const t0 = status().tokens;
+  assert.deepEqual(t0.workers.map((w) => w.text), ["Grok  can't tell"], "no session yet: can't tell, never a guess");
+  const sess = path.join(fakeHome, ".grok", "sessions", "ws", "grok-e2e");
+  fs.mkdirSync(sess, { recursive: true });
+  fs.writeFileSync(path.join(sess, "summary.json"), JSON.stringify({ info: { cwd: repo } }));
+  fs.writeFileSync(path.join(sess, "usage.json"), JSON.stringify({ sessionId: "grok-e2e", turns: [
+    { endedAt: new Date().toISOString(), modelUsage: { m: { inputTokens: 1000, cachedReadTokens: 0, outputTokens: 234, cacheCreationTokens: 0 } } }] }));
+  assert.ok(await until(() => status().tokens.workers[0]?.tokens === 1234, 15000), "the running worker's tokens show: " + JSON.stringify(status().tokens));
+  const t1 = status().tokens;
+  assert.equal(t1.workers[0].text, "Grok  1.2K tokens");
+  assert.match(t1.line, /^This goal 1\.2K \(Grok 1\.2K\) · Today /);
+}
 // A restart: the driver dies, recover brings it back on the same goal (and her session resumes).
 process.kill(-g.driverPid, "SIGKILL");
 await until(() => { try { process.kill(g.driverPid, 0); return false; } catch { return true; } }, 3000);
@@ -166,6 +182,8 @@ assert.ok(await until(() => status().goal.driverPid !== g.driverPid), "a new dri
 assert.equal(run("stop").status, 0);
 const after = status();
 assert.equal(after.goal.status, "stopped"); assert.equal(after.jobs.find((j) => j.id === job.id).status, "stopped");
+assert.equal(after.jobs.find((j) => j.id === job.id).tokens.n, 1234, "a stopped worker keeps its count");
+assert.deepEqual(after.tokens.workers, [], "no worker lines once nothing runs");
 assert.ok(await until(() => { try { process.kill(job.pid, 0); return false; } catch { return true; } }, 5000), "the agent process is gone");
 assert.ok(await until(() => { try { process.kill(g.brainPid, 0); return false; } catch { return true; } }, 5000), "Constance is gone");
 assert.match(run("delegate", "--agent", "grok", "--files", "e", "--task", "e").stderr, /No goal is running/, "nothing is handed out after Stop");
