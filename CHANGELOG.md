@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.33.2 - 2026-11-23
+- **The bar splits session and weekly again:** the percentage beside the robot is the default agent's session usage in the session's own color, and the robot itself is colored by the weekly's level — Claude at 62% session and 38% weekly shows "62%" in amber and a green robot. Both readings come from the same `chipMeters` session/weekly meters the tab chip's borders use (one limit serves both when that is all the agent reports), and each level uses the same `meterColorFor` thresholds as the tab's limit bars, so 100% is always red. The button's active state follows the robot, and the tooltip shows both numbers.
+
 ## 1.33.1 - 2026-11-23
 - **The bar robot follows the tab again:** 1.32.0's separate severity table hid the percentage below 90% (Claude at 51% showed nothing) and used its own 90% red line while the tab bars turn red above 85%. The robot now reads the same session/weekly meters the chip colors from and uses the same `meterColorFor` thresholds as the tab's limit bars — the percentage always shows when the agent reports a limit, and 100% is always red. The tooltip shows both session and weekly, naming the real meter (a cap, monthly, credits) when that is what is maxed out.
 

@@ -25,33 +25,36 @@ assert.deepEqual(cm([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "2026-1
 assert.deepEqual(cm([L("Session", 0.2), L("Weekly", 0.1), L("Monthly", 1)]), { session: 1, weekly: 1 }, "any full limit colors both");
 assert.deepEqual(cm([{ title: "Free grok-4.7 (24 h)", percent: 0.7, cap: true }, L("Weekly", 0.1)]), { session: 0.7, weekly: 0.7 }, "a cap colors both");
 
-// barReadings: the bar icon's reading — value is the worst session/weekly meter
-// (the same meters the tab chip colors from), session/weekly are the real
-// titled ones for the tooltip, and other/otherTitle name a driving meter of
-// another kind (cap, monthly, credits) instead of inventing a session/weekly.
-const br = (agent) => JSON.parse(JSON.stringify(ctx.barReadings(agent)));
+// The bar's two readings are chipMeters' {session, weekly} — the percentage is
+// the session meter, the robot the weekly one, each with the tab chip's own
+// fallbacks (one meter serves both; session-only serves both; other-kind
+// meters stand in only when neither exists).
+const bm = (agent) => JSON.parse(JSON.stringify(ctx.chipMeters(agent)));
 const A = (limits, accounts) => ({ limits, accounts });
 
-// Each installed agent's real limit shape -> the number the robot shows.
-assert.equal(br(A([L("Session", 0.51), L("Weekly", 0.37)])).value, 0.51, "Claude: session wins");
-assert.deepEqual(br(A([L("Claude/GPT Weekly", 0.9937)])), { value: 0.9937, session: -1, weekly: 0.9937, other: -1, otherTitle: "" }, "Antigravity: weekly only");
-assert.deepEqual(br(A([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "x", cap: true }])).otherTitle, "Free grok-4.7 (24 h)", "Grok: the cap is named, not called session/weekly");
-assert.equal(br(A([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "x", cap: true }])).value, 1, "Grok: 100% cap -> 100%");
-assert.equal(br(A([{ title: "Cursor limit", percent: 1, hitAt: "x", cap: true }])).value, 1, "Cursor: 100% cap -> 100%");
-assert.equal(br(A([L("Chat and agent requests", 0.943), L("Editor autocomplete", 0)])).value, 0.943, "Copilot: requests meter -> 94%");
-assert.equal(br(A([L("Monthly", 1)])).value, 1, "Codex: monthly only still reaches the bar through the chip fallback");
-assert.equal(br(A([L("Daily", 0), L("Weekly", 0), L("Prompt credits", 0), L("Flow credits", 0)])).value, 0, "Devin: reported zeros are data");
-assert.deepEqual(br(A([])), { value: -1, session: -1, weekly: -1, other: -1, otherTitle: "" }, "no meters -> no data");
-assert.deepEqual(br(null), { value: -1, session: -1, weekly: -1, other: -1, otherTitle: "" });
-assert.equal(br(A([L("Session", "x"), L("Weekly", null)])).value, -1, "non-numeric ignored");
-assert.equal(br(A([L("Session", 0.1)], [{ limits: [L("Weekly", 0.95)] }])).value, 0.95, "accounts count");
+// Each installed agent's real limit shape -> the pair the bar shows.
+assert.deepEqual(bm(A([L("Session", 0.62), L("Weekly", 0.38)])), { session: 0.62, weekly: 0.38 }, "Claude: session and weekly are independent");
+assert.deepEqual(bm(A([L("Claude/GPT Weekly", 0.99)])), { session: 0.99, weekly: 0.99 }, "Antigravity: one meter serves both");
+assert.deepEqual(bm(A([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "x", cap: true }])), { session: 1, weekly: 1 }, "Grok: the cap is 100% for both");
+assert.deepEqual(bm(A([{ title: "Cursor limit", percent: 1, hitAt: "x", cap: true }])), { session: 1, weekly: 1 }, "Cursor: the cap is 100% for both");
+assert.deepEqual(bm(A([L("Chat and agent requests", 0.943), L("Editor autocomplete", 0)])), { session: 0.943, weekly: 0.943 }, "Copilot: the requests meter stands in for both");
+assert.deepEqual(bm(A([L("Monthly", 1)])), { session: 1, weekly: 1 }, "Codex: monthly only still reaches the bar through the fallback");
+assert.deepEqual(bm(A([L("Daily", 0), L("Weekly", 0), L("Prompt credits", 0), L("Flow credits", 0)])), { session: 0, weekly: 0 }, "Devin: reported zeros are data");
+assert.deepEqual(bm(A([])), { session: -1, weekly: -1 }, "no meters -> no data");
+assert.deepEqual(bm(null), { session: -1, weekly: -1 });
+assert.deepEqual(bm(A([L("Session", "x"), L("Weekly", null)])), { session: -1, weekly: -1 }, "non-numeric ignored");
+assert.deepEqual(bm(A([L("Session", 0.1)], [{ limits: [L("Weekly", 0.95)] }])), { session: 0.1, weekly: 0.95 }, "accounts count");
+assert.deepEqual(bm(A([L("Session", 0.51)])), { session: 0.51, weekly: 0.51 }, "session only -> the one limit serves both");
+assert.deepEqual(bm(A([L("Weekly", 0.37)])), { session: 0.37, weekly: 0.37 }, "weekly only -> the one limit serves both");
 
-// The percentages the bar must label: 51, 94, 99, 100 — value is what the label shows.
+// The percentages the bar must label: 51, 94, 99, 100 — the session reading is
+// what the label shows, the weekly reading colors the robot.
 for (const pct of [0.51, 0.94, 0.99, 1]) {
-  assert.equal(br(A([L("Session", pct), L("Weekly", pct / 2)])).value, pct, pct * 100 + "% -> value " + pct);
+  assert.equal(bm(A([L("Session", pct), L("Weekly", pct / 2)])).session, pct, "session " + pct * 100 + "%");
+  assert.equal(bm(A([L("Session", pct / 2), L("Weekly", pct)])).weekly, pct, "weekly " + pct * 100 + "%");
 }
-// Weekly can be the closer one: it wins the value when it is fuller.
-assert.equal(br(A([L("Session", 0.37), L("Weekly", 0.51)])).value, 0.51, "weekly wins when fuller");
+// The user's example: 62% session, 38% weekly -> "62%" in 62%'s color, robot in 38%'s.
+assert.deepEqual(bm(A([L("Session", 0.62), L("Weekly", 0.38)])), { session: 0.62, weekly: 0.38 }, "62/38 split");
 
 // The color table is meterColorFor in Panel.qml — the same one the tab's limit
 // bars use. Evaluate the real functions so the thresholds can't drift apart.
@@ -71,11 +74,15 @@ assert.equal(colorOf(0.6), "#f2a900", "60% boundary -> amber");
 assert.equal(colorOf(0.85), "#f2a900", "85% stays amber (> 85% is red)");
 assert.equal(colorOf(0.851), "#e5484d", "just over 85% -> red, matching the tab");
 
-// The panel wires the shared reading to the icon, the label and the tooltip.
-assert.match(qml, /ChipMeters\.barReadings\(barAgent\)/, "the bar reads the shared session/weekly meters");
-assert.match(qml, /meterColorFor\(root\.barValue, root\.lightBar\)/, "the robot color uses the tab's threshold table");
-assert.match(qml, /labelText: root\.barHasData/, "the percentage label shows whenever the agent reports a limit");
-assert.doesNotMatch(qml, /BAR_LEVELS|barLevel\(|barWorst|barShowPercent/, "the divergent severity table is gone");
+// The panel wires the two readings to the percent, the robot and the tooltip.
+assert.match(qml, /ChipMeters\.chipMeters\(barAgent\)/, "the bar reads the shared session/weekly meters");
+assert.match(qml, /meterColorFor\(barSession, root\.lightBar\)/, "the percentage color uses the tab's threshold table");
+assert.match(qml, /meterColorFor\(barWeekly, root\.lightBar\)/, "the robot color uses the tab's threshold table");
+assert.match(qml, /color: root\.barSessionColor/, "the percentage takes the session color");
+assert.match(qml, /color: root\.barRobotColor/, "the robot takes the weekly color");
+assert.match(qml, /activeColor: root\.barRobotColor/, "the button's active state follows the robot");
+assert.match(qml, /text: Math\.round\(root\.barSession \* 100\) \+ "%"/, "the percentage is the session reading");
+assert.doesNotMatch(qml, /BAR_LEVELS|barLevel\(|barWorst|barShowPercent|barReadings|barValue|barIconColor/, "the divergent severity paths are gone");
 assert.match(qml, /tooltipText: root\.barTooltip/, "the tooltip names the agent the bar represents");
 assert.match(qml, /" — session "/, "the tooltip shows session and weekly");
 console.log("bar-meters: all tests passed");

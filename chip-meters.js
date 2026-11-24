@@ -27,28 +27,8 @@ function chipMeters(agent) {
   return { session: session, weekly: weekly }
 }
 
-// The bar icon's reading of an agent: {value, session, weekly, other, otherTitle}.
-// `value` is the worst of the session and weekly meters — whichever is closer to
-// running out — through the same chipMeters rules the tab chip colors from, so
-// the bar and the tab can never disagree; -1 when the agent reports nothing.
-// session and weekly are only the real meters titled that way (-1 = not
-// reported), so the tooltip never invents one. When `value` is driven by a
-// meter of another kind (a cap, monthly, credits) `other`/`otherTitle` carry it
-// so the tooltip can name what is actually maxed out. The panel colors `value`
-// with the same meterColorFor thresholds the tab's limit bars use.
-function barReadings(agent) {
-  var m = chipMeters(agent)
-  var session = -1, weekly = -1, other = -1, otherTitle = ""
-  var limits = ((agent && agent.limits) || []).slice()
-  var accts = (agent && agent.accounts) || []
-  for (var a = 0; a < accts.length; a++) limits = limits.concat((accts[a] && accts[a].limits) || [])
-  for (var i = 0; i < limits.length; i++) {
-    var p = limits[i] ? limits[i].percent : NaN
-    if (typeof p !== "number" || !isFinite(p) || p < 0) continue
-    var t = String(limits[i].title || "")
-    if (/session/i.test(t)) { if (p > session) session = p }
-    else if (/weekly/i.test(t)) { if (p > weekly) weekly = p }
-    else if (p > other) { other = p; otherTitle = t }
-  }
-  return { value: Math.max(m.session, m.weekly), session: session, weekly: weekly, other: other, otherTitle: otherTitle }
-}
+// The bar icon's two readings are exactly chipMeters' {session, weekly}: the
+// percentage beside the robot is the session meter and the robot itself the
+// weekly one, each falling back the same way the tab chip's two borders do —
+// one meter serves both, and the panel colors each with the same
+// meterColorFor thresholds the tab's limit bars use.

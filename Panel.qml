@@ -138,7 +138,7 @@ Panel {
   readonly property bool angryRobot: userSettings.angryRobot !== undefined
     ? userSettings.angryRobot !== false : root.setting("angryRobot", true) !== false
   property bool testAngry: false   // set for 8 s by the testAngry IPC hook, to check the look in the real bar
-  readonly property bool robotAngry: angryRobot && (barValue >= 1 || testAngry)
+  readonly property bool robotAngry: angryRobot && (Math.max(barSession, barWeekly) >= 1 || testAngry)
   Timer { id: testAngryTimer; interval: 8000; onTriggered: root.testAngry = false }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
@@ -222,32 +222,27 @@ Panel {
     return agents.length > 0 ? agents[0] : null
   }
   readonly property string defaultAgentName: barAgent && barAgent.name ? barAgent.name : "the default agent"
-  // The bar icon is one severity readout of the agent it represents (the
-  // default agent, or the first tab when none is set): the percentage is the
-  // worst of its session and weekly meters, and the color comes from the same
-  // meterColorFor thresholds the tab's limit bars use — one table for every
-  // agent. -1 means the agent reports nothing.
-  readonly property var barReadings: ChipMeters.barReadings(barAgent)
-  readonly property real barValue: barReadings.value
-  readonly property real barSession: barReadings.session
-  readonly property real barWeekly: barReadings.weekly
-  readonly property real barOther: barReadings.other
-  readonly property string barOtherTitle: barReadings.otherTitle || ""
-  readonly property bool barHasData: barValue >= 0
-  readonly property color barIconColor: root.barHasData
-    ? (root.robotAngry ? Color.urgent : root.meterColorFor(root.barValue, root.lightBar))
+  // The bar icon is two readings of the agent it represents (the default
+  // agent, or the first tab when none is set): the percentage beside the
+  // robot is its session meter, colored by the session's level, and the robot
+  // itself is colored by the weekly's level. Both come from chipMeters — the
+  // same session/weekly meters the tab chip's borders color from — and each
+  // level uses the same meterColorFor thresholds the tab's limit bars use, so
+  // 100% is always red. -1 means the agent reports nothing.
+  readonly property var barMeters: ChipMeters.chipMeters(barAgent)
+  readonly property real barSession: barMeters.session
+  readonly property real barWeekly: barMeters.weekly
+  readonly property bool barHasData: barSession >= 0 || barWeekly >= 0
+  readonly property color barSessionColor: barSession >= 0
+    ? root.meterColorFor(barSession, root.lightBar) : root.barForeground
+  readonly property color barRobotColor: barWeekly >= 0
+    ? (root.robotAngry ? Color.urgent : root.meterColorFor(barWeekly, root.lightBar))
     : root.barForeground
-  // The tooltip names the agent the bar represents and shows both session and
-  // weekly; when the number comes from a meter of another kind (a cap,
-  // monthly, credits) it names that meter instead of inventing a session or
-  // weekly reading.
+  // The tooltip names the agent the bar represents and shows both numbers.
   readonly property string barTooltip: !barAgent ? "No agent selected"
     : "Bar shows " + defaultAgentName + (barHasData
       ? " — session " + (barSession >= 0 ? Math.round(barSession * 100) + "%" : "not reported")
         + " · weekly " + (barWeekly >= 0 ? Math.round(barWeekly * 100) + "%" : "not reported")
-        + (barValue > Math.max(barSession, barWeekly) && barOther >= 0
-          ? " · " + (barOtherTitle || "usage") + " " + Math.round(barOther * 100) + "%"
-          : "")
       : " — no limits reported")
   onFirstIdChanged: applyDefault()
   onFirstInstalledChanged: applyDefault()
@@ -1759,14 +1754,17 @@ Panel {
     PanelToolTip { visible: hbArea.containsMouse; text: hb.tip; fontFamily: root.fontFamily }
   }
 
+  // The icon canvas BarIconButton centers in the button: the percent text sits
+  // just left of it, where the button's own label would.
+  readonly property real barIconCanvas: Math.max(Style.bar.iconSize, Style.bar.iconCanvas)
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // One severity readout for every agent: the robot is colored from the
-    // worst session/weekly meter through the same meterColorFor thresholds the
-    // tab's limit bars use; angry eyes when a limit is used up. Neutral when
-    // the agent reports nothing.
+    // Two readings, two colors: the percentage is the session meter in the
+    // session's level color, the robot is the weekly meter in the weekly's
+    // level color — the same meterColorFor thresholds the tab's limit bars
+    // use. activeColor (the button's active state) follows the robot.
     iconComponent: Component {
       OpticalGlyph {
         implicitWidth: Style.bar.iconCanvas
@@ -1775,15 +1773,32 @@ Panel {
         fontFamily: root.fontFamily
         fontSize: Style.bar.iconFont
         paintedSize: Style.bar.iconSize
-        color: root.barIconColor
+        color: root.barRobotColor
       }
     }
-    // The percentage is the same reading the color comes from, shown whenever
-    // the agent reports a limit.
-    labelText: root.barHasData ? Math.round(root.barValue * 100) + "%" : ""
+    // The percentage is the session meter in the session's own color. It is
+    // drawn here rather than via labelText, whose color is tied to the
+    // button's active (robot) color.
+    Text {
+      id: barPercent
+      visible: root.barSession >= 0
+      textFormat: Text.PlainText
+      text: Math.round(root.barSession * 100) + "%"
+      color: root.barSessionColor
+      font.family: root.fontFamily
+      font.pixelSize: Style.bar.iconFont
+      renderType: Text.NativeRendering
+      x: (button.width - root.barIconCanvas) / 2 - implicitWidth - Style.space(4)
+      y: (button.height - implicitHeight) / 2
+        + (barPercentMetrics.descent - barPercentMetrics.ascent + barPercentMetrics.tightBoundingRect("0").height) / 2
+    }
+    FontMetrics {
+      id: barPercentMetrics
+      font: barPercent.font
+    }
     slotSize: Style.bar.iconSlot * (root.barHasData ? 2 : 1)
     active: root.barHasData
-    activeColor: root.barIconColor
+    activeColor: root.barRobotColor
     tooltipText: root.barTooltip
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) root.selectIndex(root.selectedIndex + 1)
