@@ -24,3 +24,17 @@ console.log("chip-meters: all tests passed");
 assert.deepEqual(cm([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "2026-11-23T01:18:32Z" }, L("Weekly", 0)]), { session: 1, weekly: 1 }, "hit limit colors both");
 assert.deepEqual(cm([L("Session", 0.2), L("Weekly", 0.1), L("Monthly", 1)]), { session: 1, weekly: 1 }, "any full limit colors both");
 assert.deepEqual(cm([{ title: "Free grok-4.7 (24 h)", percent: 0.7, cap: true }, L("Weekly", 0.1)]), { session: 0.7, weekly: 0.7 }, "a cap colors both");
+
+// barMeters: the bar's session/weekly split has no fallback — only real session
+// and weekly meters fill in, everything else reports -1.
+const bm = (limits) => JSON.parse(JSON.stringify(ctx.barMeters({ limits })));
+assert.deepEqual(bm([L("Session", 0.92), L("Weekly", 0.38)]), { session: 0.92, weekly: 0.38 }, "both distinct");
+assert.deepEqual(bm([L("Session", 0.5)]), { session: 0.5, weekly: -1 }, "session only: no invented weekly");
+assert.deepEqual(bm([L("Weekly", 0.3)]), { session: -1, weekly: 0.3 }, "weekly only: no invented session");
+assert.deepEqual(bm([L("Monthly", 0.2), L("Daily", 0.1), L("Prompt credits", 0.9)]), { session: -1, weekly: -1 }, "other meters report nothing");
+assert.deepEqual(bm([]), { session: -1, weekly: -1 }, "no meters -> no data");
+assert.deepEqual(bm([L("Gemini Session", 0.2), L("Gemini Weekly", 0.7), L("Claude/GPT Session", 0.4), L("Claude/GPT Weekly", 0.1)]), { session: 0.4, weekly: 0.7 }, "fullest of each kind");
+assert.deepEqual(bm([{ title: "Free grok-4.7 (24 h)", percent: 1, hitAt: "x" }, L("Weekly", 0)]), { session: 1, weekly: 1 }, "a hit limit counts as both");
+assert.deepEqual(JSON.parse(JSON.stringify(ctx.barMeters(null))), { session: -1, weekly: -1 });
+assert.deepEqual(JSON.parse(JSON.stringify(ctx.barMeters({ limits: [L("Session", 0.2), L("Weekly", 0.2)], accounts: [{ limits: [L("Session", 0.9), L("Weekly", 0.1)] }] }))), { session: 0.9, weekly: 0.2 }, "worst meter across accounts");
+console.log("bar-meters: all tests passed");

@@ -134,11 +134,11 @@ Panel {
     handoffAnswerer.running = true
     handoffPending = null
   }
-  // The bar robot looks angry (theme red) while the default agent is at 100%.
+  // The bar robot looks angry (theme red) while the default agent's weekly limit is used up.
   readonly property bool angryRobot: userSettings.angryRobot !== undefined
     ? userSettings.angryRobot !== false : root.setting("angryRobot", true) !== false
   property bool testAngry: false   // set for 8 s by the testAngry IPC hook, to check the look in the real bar
-  readonly property bool robotAngry: angryRobot && (barValue >= 1 || testAngry)
+  readonly property bool robotAngry: angryRobot && (barWeekly >= 1 || testAngry)
   Timer { id: testAngryTimer; interval: 8000; onTriggered: root.testAngry = false }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
@@ -222,10 +222,18 @@ Panel {
     return agents.length > 0 ? agents[0] : null
   }
   readonly property string defaultAgentName: barAgent && barAgent.name ? barAgent.name : "the default agent"
-  readonly property real barValue: {
-    if (!barAgent) return -1
-    var m = ChipMeters.chipMeters(barAgent)
-    return Math.max(m.session, m.weekly)
+  // The bar shows two independent readings of the default agent: the percentage
+  // is its session limit, the robot its weekly limit. -1 means the agent
+  // doesn't report that kind of limit — nothing is invented for it.
+  readonly property var barReadings: ChipMeters.barMeters(barAgent)
+  readonly property real barSession: barReadings.session
+  readonly property real barWeekly: barReadings.weekly
+  readonly property bool barHasData: barSession >= 0 || barWeekly >= 0
+  // What the bar tooltip says: which reading is which, for this agent.
+  readonly property string barTooltip: {
+    var s = barSession >= 0 ? Math.round(barSession * 100) + "%" : "not reported"
+    var w = barWeekly >= 0 ? Math.round(barWeekly * 100) + "%" : "not reported"
+    return defaultAgentName + " — session " + s + " · weekly " + w
   }
   onFirstIdChanged: applyDefault()
   onFirstInstalledChanged: applyDefault()
@@ -1656,13 +1664,27 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // Angry robot (angry eyes, the theme's red) while the default agent is at 100%; back by itself at the reset.
-    text: root.robotAngry ? "\u{f169d}" : "\u{f16a3}"
-    // The default agent's number beside the icon, colored like its chip (green, amber from 60%, red above 85%).
-    labelText: root.barValue >= 0 ? Math.round(root.barValue * 100) + "%" : ""
-    slotSize: Style.bar.iconSlot * (root.barValue >= 0 ? 2 : 1)
-    active: root.barValue >= 0
-    activeColor: root.robotAngry ? Color.urgent : root.meterColorFor(root.barValue, root.lightBar)
+    // The robot is the weekly meter: its own color from the weekly percentage,
+    // angry eyes when the weekly limit is used up. Neutral when unreported.
+    iconComponent: Component {
+      OpticalGlyph {
+        implicitWidth: Style.bar.iconCanvas
+        implicitHeight: Style.bar.iconCanvas
+        text: root.robotAngry ? "\u{f169d}" : "\u{f16a3}"
+        fontFamily: root.fontFamily
+        fontSize: Style.bar.iconFont
+        paintedSize: Style.bar.iconSize
+        color: root.barWeekly >= 0
+          ? (root.robotAngry ? Color.urgent : root.meterColorFor(root.barWeekly, root.lightBar))
+          : root.barForeground
+      }
+    }
+    // The percentage beside it is the session meter, colored by session usage.
+    labelText: root.barSession >= 0 ? Math.round(root.barSession * 100) + "%" : ""
+    slotSize: Style.bar.iconSlot * (root.barHasData ? 2 : 1)
+    active: root.barHasData
+    activeColor: root.barSession >= 0 ? root.meterColorFor(root.barSession, root.lightBar) : root.barForeground
+    tooltipText: root.barTooltip
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) root.selectIndex(root.selectedIndex + 1)
       else root.toggle()
@@ -2330,7 +2352,7 @@ Panel {
             }
             SettingSwitch {
               width: parent.width
-              label: "Angry robot when the default agent is out"
+              label: "Angry robot when the weekly limit is hit"
               checked: root.angryRobot
               onToggled: root.writeSetting(["angryRobot", String(!root.angryRobot)])
             }

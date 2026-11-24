@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.31.0 - 2026-11-23
+- **The bar shows session and weekly separately:** the percentage is now the default agent's session limit and the robot its weekly limit, each with its own color (green/amber/red). Agents that don't report one kind show nothing invented for it — no percent, a neutral robot — and the tooltip says which is which ("Devin — session 42% · weekly 67%"). The angry robot now means the weekly limit is used up.
+
 ## 1.30.1 - 2026-11-23
 - **Models no longer double-count:** a used record went to every row whose name prefix-matched it, so Devin's `swe-2-flash-medium` showed the same total under both SWE-2 and SWE-2 Flash. Each record now belongs to the single best-matching row (SWE-2 Flash), and compactor stays its own line.
 

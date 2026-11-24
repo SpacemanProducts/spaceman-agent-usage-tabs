@@ -26,3 +26,25 @@ function chipMeters(agent) {
   if (weekly < 0) return { session: session, weekly: session }
   return { session: session, weekly: weekly }
 }
+
+// The bar's two indicators: {session, weekly} as 0..1 fractions, or -1 for
+// "no data". Unlike chipMeters there is no fallback — the percentage is only a
+// real session meter and the robot only a real weekly meter, so the bar never
+// invents a value for a limit the agent doesn't report. A limit at 100%, one
+// the agent reported hitting, or a cap that walls the agent off counts as both:
+// the agent can't work either way.
+function barMeters(agent) {
+  var session = -1, weekly = -1
+  var limits = ((agent && agent.limits) || []).slice()
+  var accts = (agent && agent.accounts) || []
+  for (var a = 0; a < accts.length; a++) limits = limits.concat((accts[a] && accts[a].limits) || [])
+  for (var i = 0; i < limits.length; i++) {
+    var p = limits[i] ? limits[i].percent : NaN
+    if (typeof p !== "number" || !isFinite(p) || p < 0) continue
+    var t = String(limits[i].title || "")
+    if (p >= 1 || limits[i].hitAt || limits[i].cap) { if (p > session) session = p; if (p > weekly) weekly = p }
+    else if (/session/i.test(t)) { if (p > session) session = p }
+    else if (/weekly/i.test(t)) { if (p > weekly) weekly = p }
+  }
+  return { session: session, weekly: weekly }
+}
