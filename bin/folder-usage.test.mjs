@@ -156,7 +156,8 @@ assert.match(qml, /text: root\.folderName\(hiddenRepoChip\.modelData\)[\s\S]*eli
 assert.match(repoLabel, /horizontalAlignment: fp\.forSquad \? Text\.AlignHCenter : Text\.AlignLeft/, "Start folder names are all left-aligned");
 assert.match(qml, /anchors\.left: parent\.left[\s\S]*text: "No project"/, "No project follows the same left alignment");
 assert.match(qml, /text: root\.safeTooltipText\(repoChip\.modelData\)/, "hover tooltips retain the full sanitized path");
-assert.match(qml, /border\.width: fp\.forSquad \? \(pinned \? 2 : \(on \? 1 : 0\)\) : \(on \? 1 : 0\)/, "Start selection uses only a subtle border, not a pinned-card highlight");
+assert.match(qml, /border\.width: fp\.forSquad \? \(fp\.plainOthers \? \(on \? 2 : 1\) : \(pinned \? 2 : \(on \? 1 : 0\)\)\) : \(on \? 1 : 0\)/, "Start selection uses only a subtle border, not a pinned-card highlight");
+assert.match(qml, /fp\.plainOthers \? \(on \? root\.green : root\.soft\(root\.foreground, 0\.3\)\)/, "plain-others pickers highlight only the selected folder, in green");
 assert.match(qml, /border\.width: on \? 1 : 0[\s\S]*border\.color: root\.soft\(Color\.accent, 0\.5\)/, "hidden-folder selection also uses a subtle border");
 assert.match(qml, /visible: !fp\.forSquad && \(repoHover\.hovered \|\| repoChip\.pinned\)/, "folder actions appear on hover while pinned folders retain a pin");
 assert.match(qml, /visible: repoHover\.hovered/, "the hide action only appears while hovering");
