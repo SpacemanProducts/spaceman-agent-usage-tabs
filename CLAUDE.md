@@ -147,6 +147,11 @@ keeps the developer in flow:
   Since 1.46.1 `review` refuses anything but a finished job (it sweeps first, so a just-landed
   done file counts), and `stop` runs the guard on every job that was running before its
   worktree/tmp is dropped, so a halted agent's stray changes are still checked and logged.
+  The guard diff-checks every commit since the pre-run HEAD, reported or not (work another job
+  running in the same folder was allowed to do is excused); home/Projects changes are `guard-notice`
+  log lines, never strikes. Her own jobs' finish signals come from the done file, the process exit
+  and the log tail (`recordSignal`, one per job). The model fallback matches only Claude Code's
+  exact "issue with the selected model … may not exist / may not have access to it" message.
 
 ## Working rules
 
