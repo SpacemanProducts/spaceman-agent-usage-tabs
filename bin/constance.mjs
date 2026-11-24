@@ -32,7 +32,7 @@ import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
 import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
-import { NotifyParser, handleNotification, recentSignals } from "./constance-notify.mjs";
+import { NotifyParser, handleNotification, recentSignals, recordSignal, jobFinishSignal, logSaysFinished } from "./constance-notify.mjs";
 import { addTask, peekNext, finishTask, removeTask, queueView } from "./constance-queue.mjs";
 import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
 import { logText } from "./constance-logtext.mjs";
@@ -112,51 +112,100 @@ function dropJobTmp(j) {
   if (t.startsWith(path.join(os.tmpdir(), "constance-job-"))) { try { fs.rmSync(t, { recursive: true, force: true }); } catch {} }
 }
 
+// The last `n` bytes of a file as text ("" when unreadable) — a job log can be
+// megabytes, but only its tail can say the run finished.
+function tailFile(f, n = 8192) {
+  try {
+    const fd = fs.openSync(f, "r");
+    try {
+      const size = fs.fstatSync(fd).size, len = Math.min(n, size), buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      return buf.toString("utf8");
+    } finally { fs.closeSync(fd); }
+  } catch { return ""; }
+}
+
 function sweep() {
+  const signals = [];
   const changed = store.update((s) => {
     const changed = [];
     for (const j of s.jobs) {
       if (j.status !== "running") continue;
       const f = doneFile(runDir(j), j.id);
-      let done = null;
-      try { done = JSON.parse(fs.readFileSync(f, "utf8")); j.finishedAt = fs.statSync(f).mtimeMs; }
+      let done = null, source = "";
+      try { done = JSON.parse(fs.readFileSync(f, "utf8")); j.finishedAt = fs.statSync(f).mtimeMs; source = "done-file"; }
       catch {
-        if (fs.existsSync(f)) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); }
+        if (fs.existsSync(f)) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
       }
-      if (!done && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); }
-      if (done) { j.status = "finished"; j.summary = String(done.summary || ""); j.commit = String(done.commit || ""); changed.push(j); }
+      if (!done && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
+      if (done) { j.status = "finished"; j.summary = String(done.summary || ""); j.commit = String(done.commit || ""); changed.push(j); signals.push({ j, source }); }
+      // Still running, but its own log says it finished: record the signal
+      // (deduped in notify.jsonl) without touching its status.
+      else if (j.log && logSaysFinished(tailFile(j.log))) signals.push({ j, source: "log" });
     }
     return changed;
   });
   for (const j of changed) { guardFinished(j); dropJobTmp(j); }
+  for (const { j, source } of signals) recordSignal(store.dir, jobFinishSignal(j, { source, runDir: runDir(j) }));
   return changed;
+}
+
+// Same containment rule the guard uses: a changed path is covered by a file
+// entry when they match, the entry is "." or names the path's folder.
+const normRel = (p) => String(p).replace(/^\.\//, "").replace(/\/+$/, "");
+function coversPath(files, p) {
+  const b = normRel(p);
+  return files.some((f) => { const a = normRel(f); return a === b || a === "." || b === a + "/" || a.startsWith(b + "/"); });
 }
 
 // After a delegated run ends, check it stayed inside its guardrails: only its
 // allowed files changed, and the home/projects lists match the pre-run
-// snapshot. A violation reverts the run's own bad commit (nothing is ever deleted or
+// snapshot. A violation reverts the run's bad commits (nothing is ever deleted or
 // moved), reports the rest, logs a lesson, counts a
 // strike (smaller tasks from then on) and marks the job so her review sees it.
+// Home/projects-only differences are notices: logged, never a strike.
 function guardFinished(j) {
   if (!j.guardBefore || j.guardChecked) return;
-  const res = checkRun({ dir: runDir(j), files: j.files || [], commit: j.commit, before: j.guardBefore, env: ENV });
+  const dir = runDir(j);
+  const res = checkRun({ dir, files: j.files || [], commit: j.commit, before: j.guardBefore, env: ENV });
   store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.guardChecked = true; });
-  if (res.ok) return;
-  // Revert the commit only when the commit itself touched disallowed files; a
+  // Concurrent jobs share the folder and its git history, and the guard sees
+  // every commit since the snapshot: work another overlapping job was allowed
+  // to do is that job's, never this one's violation.
+  const jStart = j.startedAt || 0, jEnd = j.finishedAt || Date.now();
+  const others = store.read().jobs.filter((k) => k.id !== j.id && k.startedAt && runDir(k) === dir &&
+    k.startedAt <= jEnd && jStart <= (k.finishedAt || Infinity));
+  const allowed = (k) => [...(k.files || []), ".constance/"];
+  const excusedCommits = new Set(), excusedPaths = new Set();
+  for (const c of res.badCommits || []) {
+    const cfiles = changedFiles(dir, c);
+    if (others.some((k) => k.commit === c || (cfiles.length > 0 && cfiles.every((p) => coversPath(allowed(k), p))))) {
+      excusedCommits.add(c);
+      cfiles.forEach((p) => excusedPaths.add(p));
+    }
+  }
+  for (const p of res.badPaths || []) if (others.some((k) => coversPath(allowed(k), p))) excusedPaths.add(p);
+  const badPaths = (res.badPaths || []).filter((p) => !excusedPaths.has(p));
+  const badCommits = (res.badCommits || []).filter((c) => !excusedCommits.has(c));
+  const violations = [...res.violations.filter((v) => v.startsWith("reported commit"))];
+  if (badPaths.length) violations.push(`changed files outside its list: ${badPaths.join(", ")}`);
+  if ((res.notices || []).length) store.log({ kind: "guard-notice", job: j.id, agent: j.agent, text: res.notices.join("; ") });
+  if (!violations.length) return;
+  // Revert a commit only when the commit itself touched disallowed files; a
   // home/projects-only or dirty-leftover violation leaves committed work alone.
-  // Only a commit the guard verified as this run's own is ever reverted.
-  const commitBad = !!res.ownCommit && changedFiles(runDir(j), res.ownCommit).some((p) => (res.badPaths || []).includes(p));
-  const did = restoreRun({ dir: runDir(j), commit: commitBad ? res.ownCommit : "", badPaths: res.badPaths || [], addedProjects: res.addedProjects || [],
+  // Only commits the guard verified as this run's own are ever reverted.
+  const commitBad = !!res.ownCommit && changedFiles(dir, res.ownCommit).some((p) => badPaths.includes(p));
+  const did = restoreRun({ dir, commit: commitBad ? res.ownCommit : "", commits: badCommits, badPaths, addedProjects: res.addedProjects || [],
     addedHome: res.addedHome || [], removedHome: res.removedHome || [], removedProjects: res.removedProjects || [] });
-  const lesson = `${j.agent} broke a guardrail on job ${j.id}: ${res.violations.join("; ")}.`;
+  const lesson = `${j.agent} broke a guardrail on job ${j.id}: ${violations.join("; ")}.`;
   addLesson(lesson, store.dir);
   store.update((s) => {
     const x = s.jobs.find((k) => k.id === j.id);
-    if (x) x.guardViolation = res.violations;
+    if (x) x.guardViolation = violations;
     const g = (s.guards ||= {})[j.agent] ||= { strikes: 0, violations: [] };
-    g.strikes += 1; g.violations.push({ job: j.id, at: Date.now(), what: res.violations });
+    g.strikes += 1; g.violations.push({ job: j.id, at: Date.now(), what: violations });
   });
-  store.log({ kind: "guard", job: j.id, agent: j.agent, text: `${res.violations.join("; ")}. Restored: ${did.join("; ") || "nothing to restore"}. Lesson logged; ${j.agent} gets smaller tasks now.` });
+  store.log({ kind: "guard", job: j.id, agent: j.agent, text: `${violations.join("; ")}. Restored: ${did.join("; ") || "nothing to restore"}. Lesson logged; ${j.agent} gets smaller tasks now.` });
 }
 
 function changedFiles(dir, commit) {

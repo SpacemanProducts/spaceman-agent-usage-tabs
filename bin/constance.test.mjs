@@ -10,8 +10,13 @@ import { execFileSync, spawnSync } from "node:child_process";
 
 const CLI = new URL("./constance.mjs", import.meta.url).pathname;
 // Jobs run sandboxed, where /tmp is a fresh folder per job: the fake agents and the go-file live in
-// /var/tmp, which the sandbox shows read-only (the repo itself is the job's writable project).
-const root = fs.mkdtempSync(path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-e2e-"));
+// /var/tmp (or ~/.cache where /var/tmp is read-only), which the sandbox shows read-only — the repo
+// itself is the job's writable project.
+let root = "";
+for (const base of ["/var/tmp", path.join(os.homedir(), ".cache")]) {
+  try { fs.mkdirSync(base, { recursive: true }); root = fs.mkdtempSync(path.join(base, "constance-e2e-")); break; } catch {}
+}
+if (!root) root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-e2e-"));
 const state = path.join(root, "state"), bin = path.join(root, "bin"), repo = path.join(root, "repo");
 const tabs = path.join(state, "omarchy/agent-usage-tabs");
 fs.mkdirSync(tabs, { recursive: true }); fs.mkdirSync(bin); fs.mkdirSync(repo);
@@ -34,8 +39,14 @@ fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
 [[ -e "${root}/home/home-marker" ]] && echo "sandboxed=no" || echo "sandboxed=yes"
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
-if grep -qi "read-only job" <<<"$p"; then
+if grep -q "exit now" <<<"$p"; then
+  exit 0
+elif grep -qi "read-only job" <<<"$p"; then
   echo '{"summary": "cause: a.txt has no b", "commit": "", "files": []}' > "$f"
+elif grep -q "sneaky commit" <<<"$p"; then
+  sleep 1
+  echo s > sneaky.txt; git add sneaky.txt; git commit -qm "grok: sneaky"
+  echo '{"summary": "committed outside its list and reported nothing", "commit": "", "files": []}' > "$f"
 elif grep -q "add g" <<<"$p"; then
   sleep 1
   echo g > g.txt; git add g.txt; git commit -qm "grok: g"; echo stray > evil.txt
@@ -534,6 +545,60 @@ for (const w of fs.existsSync(worktrees) ? fs.readdirSync(worktrees) : []) { try
 git("worktree", "prune");
 for (const b of git("branch", "--list", "constance/*", "--format=%(refname:short)").split("\n").filter(Boolean)) git("branch", "-D", b);
 
+// Guard wiring, end to end: an agent that commits a file outside its list and
+// reports no commit still gets a violation and the bad commit is reverted; a
+// folder the owner makes in the home folder while a job runs is only a
+// guard-notice (no strike, no lesson); and a job that exits without its done
+// file records an "exit" finish signal.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent grok --files ok1.txt --task "sneaky commit: also add ok1" >> "${root}/guard2.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 30 > "${root}/wait-sneaky.json"
+id1=$(grep -o '"id": [0-9]*' "${root}/wait-sneaky.json" | head -1 | grep -o '[0-9]*')
+$C review "$id1" accept --note "ok" >> "${root}/guard2.out" 2>&1
+$C delegate --agent grok --files nb.txt --task "add nb" >> "${root}/guard2.out" 2>&1
+mkdir -p "${root}/home/owner-made-this"
+$C wait --timeout 30 > "${root}/wait-nb.json"
+id2=$(grep -o '"id": [0-9]*' "${root}/wait-nb.json" | head -1 | grep -o '[0-9]*')
+$C review "$id2" accept --note "ok" >> "${root}/guard2.out" 2>&1
+$C delegate --agent grok --task "exit now" >> "${root}/guard2.out" 2>&1
+$C wait --timeout 30 > "${root}/wait-exit.json"
+id3=$(grep -o '"id": [0-9]*' "${root}/wait-exit.json" | head -1 | grep -o '[0-9]*')
+$C review "$id3" accept --note "ok" >> "${root}/guard2.out" 2>&1
+echo "Guard2 report: all three checked."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "guard wiring goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the guard wiring goal finishes: " + JSON.stringify(status().goal));
+{
+  const gs2 = status();
+  const mine2 = gs2.jobs.filter((j) => j.goal === gs2.goal.id);
+  const sneaky = mine2.find((j) => /sneaky commit/.test(j.task));
+  const nb = mine2.find((j) => j.task === "add nb");
+  const ex = mine2.find((j) => /exit now/.test(j.task));
+  assert.ok(sneaky && nb && ex, "all three jobs ran: " + JSON.stringify(mine2.map((j) => [j.id, j.task, j.status])));
+  assert.equal(sneaky.status, "accepted");
+  assert.ok(sneaky.guardViolation && sneaky.guardViolation.some((v) => v.includes("sneaky.txt")), "an unreported bad commit is still a violation: " + JSON.stringify(sneaky.guardViolation));
+  assert.ok(!fs.existsSync(path.join(repo, "sneaky.txt")), "the bad commit was reverted");
+  assert.match(git("log", "--oneline", "-3"), /Revert/, "the revert is a normal commit, nothing was reset");
+  assert.equal(gs2.guards.grok.strikes, 2, "the stray file and the sneaky commit are the only strikes: " + JSON.stringify(gs2.guards));
+  assert.equal(nb.status, "accepted");
+  assert.ok(!nb.guardViolation, "the home-folder change is not a violation");
+  const notices = gs2.log.filter((l) => l.kind === "guard-notice");
+  assert.equal(notices.length, 1, "one guard-notice in the log");
+  assert.match(notices[0].text, /owner-made-this/, "it names the folder the owner made");
+  assert.equal(ex.status, "accepted");
+  assert.match(ex.summary, /exited without writing its done file/);
+  const sig2 = JSON.parse(run("signals").stdout);
+  const exSig = sig2.find((s) => s.job === ex.id);
+  assert.ok(exSig, "the exit was recorded as a signal: " + JSON.stringify(sig2.slice(-5)));
+  assert.equal(exSig.source, "exit");
+  assert.equal(sig2.find((s) => s.job === sneaky.id)?.source, "done-file", "a normal finish records done-file");
+  assert.equal(git("status", "--porcelain").trim(), "", "the repo is clean afterwards");
+}
+
 // The watcher: a fake busctl feeds it real-format Notify blocks. With no job
 // running for the named agent, the notification is logged as the owner's own —
 // noted and left alone — and `signals` shows it.
@@ -574,11 +639,11 @@ fs.writeFileSync(path.join(bin, "busctl"), `#!/bin/bash\ncat "${root}/notify-fix
 const { spawn } = await import("node:child_process");
 const watcher = spawn("node", [CLI, "watch"], { env, stdio: "ignore" });
 const notifyJsonl = path.join(tabs, "constance", "notify.jsonl");
-assert.ok(await until(() => { try { return fs.readFileSync(notifyJsonl, "utf8").includes('"agent":"devin"'); } catch { return false; } }, 10000), "the watcher recorded the notification");
+assert.ok(await until(() => { try { return fs.readFileSync(notifyJsonl, "utf8").includes('"kind":"foreign"'); } catch { return false; } }, 10000), "the watcher recorded the notification");
 watcher.kill("SIGKILL");
 {
   const sig = JSON.parse(run("signals").stdout);
-  const mine = sig.find((s) => s.agent === "devin");
+  const mine = sig.find((s) => s.agent === "devin" && s.kind === "foreign");
   assert.ok(mine, "the fake notification was recorded: " + JSON.stringify(sig));
   assert.equal(mine.kind, "foreign", "no job of hers -> the owner's own agent");
   assert.equal(mine.summary, undefined, "the owner's own run keeps no notification text");
