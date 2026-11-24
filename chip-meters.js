@@ -27,34 +27,28 @@ function chipMeters(agent) {
   return { session: session, weekly: weekly }
 }
 
-// The bar icon's one severity table, shared by every agent: the color and
-// whether the percentage label shows come from the same reading, so no agent
-// can disagree with its own tab. >= 90% is red and shows the number, >= 60%
-// is amber, below that green; nothing reported is neutral (null level).
-var BAR_LEVELS = [
-  { min: 0.9, color: "red", showPercent: true },
-  { min: 0.6, color: "amber", showPercent: false },
-  { min: 0, color: "green", showPercent: false }
-];
-function barLevel(value) {
-  if (typeof value !== "number" || !isFinite(value) || value < 0) return null
-  for (var i = 0; i < BAR_LEVELS.length; i++) if (value >= BAR_LEVELS[i].min) return BAR_LEVELS[i]
-  return null
-}
-
-// The worst limit an agent reports — the fullest meter across its accounts —
-// as {percent, title}, or percent -1 when it reports nothing. This is the
-// reading the bar icon colors and labels from; it matches the fullest limit
-// bar in the agent's tab.
-function barWorst(agent) {
-  var worst = -1, title = ""
+// The bar icon's reading of an agent: {value, session, weekly, other, otherTitle}.
+// `value` is the worst of the session and weekly meters — whichever is closer to
+// running out — through the same chipMeters rules the tab chip colors from, so
+// the bar and the tab can never disagree; -1 when the agent reports nothing.
+// session and weekly are only the real meters titled that way (-1 = not
+// reported), so the tooltip never invents one. When `value` is driven by a
+// meter of another kind (a cap, monthly, credits) `other`/`otherTitle` carry it
+// so the tooltip can name what is actually maxed out. The panel colors `value`
+// with the same meterColorFor thresholds the tab's limit bars use.
+function barReadings(agent) {
+  var m = chipMeters(agent)
+  var session = -1, weekly = -1, other = -1, otherTitle = ""
   var limits = ((agent && agent.limits) || []).slice()
   var accts = (agent && agent.accounts) || []
   for (var a = 0; a < accts.length; a++) limits = limits.concat((accts[a] && accts[a].limits) || [])
   for (var i = 0; i < limits.length; i++) {
     var p = limits[i] ? limits[i].percent : NaN
     if (typeof p !== "number" || !isFinite(p) || p < 0) continue
-    if (p > worst) { worst = p; title = String(limits[i].title || "") }
+    var t = String(limits[i].title || "")
+    if (/session/i.test(t)) { if (p > session) session = p }
+    else if (/weekly/i.test(t)) { if (p > weekly) weekly = p }
+    else if (p > other) { other = p; otherTitle = t }
   }
-  return { percent: worst, title: title }
+  return { value: Math.max(m.session, m.weekly), session: session, weekly: weekly, other: other, otherTitle: otherTitle }
 }

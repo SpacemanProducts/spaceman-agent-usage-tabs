@@ -48,8 +48,6 @@ Panel {
   function soft(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
   function meterColorFor(p, light) { return p > 0.85 ? redFor(light) : (p >= 0.6 ? amberFor(light) : greenFor(light)) }
   function meterColor(p) { return meterColorFor(p, lightPanel) }
-  // The bar icon's color for a BAR_LEVELS entry (chip-meters.js owns the table).
-  function barLevelColorFor(name) { return name === "red" ? redFor(lightBar) : name === "amber" ? amberFor(lightBar) : greenFor(lightBar) }
   // A reading the collector couldn't confirm is current and complete never shows green: it shows gray
   // ("unsure"). Amber and red still show, since a high reading is a real warning either way.
   readonly property color unsureColor: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.45)
@@ -140,7 +138,7 @@ Panel {
   readonly property bool angryRobot: userSettings.angryRobot !== undefined
     ? userSettings.angryRobot !== false : root.setting("angryRobot", true) !== false
   property bool testAngry: false   // set for 8 s by the testAngry IPC hook, to check the look in the real bar
-  readonly property bool robotAngry: angryRobot && (barWorst >= 1 || testAngry)
+  readonly property bool robotAngry: angryRobot && (barValue >= 1 || testAngry)
   Timer { id: testAngryTimer; interval: 8000; onTriggered: root.testAngry = false }
   readonly property bool resetAnimation: userSettings.resetAnimation !== undefined
     ? userSettings.resetAnimation !== false : root.setting("resetAnimation", true) !== false
@@ -225,22 +223,31 @@ Panel {
   }
   readonly property string defaultAgentName: barAgent && barAgent.name ? barAgent.name : "the default agent"
   // The bar icon is one severity readout of the agent it represents (the
-  // default agent, or the first tab when none is set): the color and the
-  // percentage label both come from the worst limit that agent reports,
-  // through the shared BAR_LEVELS table — the same worst bar its tab shows.
-  readonly property var barWorstReading: ChipMeters.barWorst(barAgent)
-  readonly property real barWorst: barWorstReading.percent
-  readonly property string barWorstTitle: barWorstReading.title || ""
-  readonly property var barLevel: ChipMeters.barLevel(barWorst)
-  readonly property bool barHasData: barWorst >= 0
-  readonly property bool barShowPercent: !!barLevel && barLevel.showPercent === true
+  // default agent, or the first tab when none is set): the percentage is the
+  // worst of its session and weekly meters, and the color comes from the same
+  // meterColorFor thresholds the tab's limit bars use — one table for every
+  // agent. -1 means the agent reports nothing.
+  readonly property var barReadings: ChipMeters.barReadings(barAgent)
+  readonly property real barValue: barReadings.value
+  readonly property real barSession: barReadings.session
+  readonly property real barWeekly: barReadings.weekly
+  readonly property real barOther: barReadings.other
+  readonly property string barOtherTitle: barReadings.otherTitle || ""
+  readonly property bool barHasData: barValue >= 0
   readonly property color barIconColor: root.barHasData
-    ? (root.robotAngry ? Color.urgent : root.barLevelColorFor(root.barLevel.color))
+    ? (root.robotAngry ? Color.urgent : root.meterColorFor(root.barValue, root.lightBar))
     : root.barForeground
-  // The tooltip names the agent the bar represents and the limit behind the color.
+  // The tooltip names the agent the bar represents and shows both session and
+  // weekly; when the number comes from a meter of another kind (a cap,
+  // monthly, credits) it names that meter instead of inventing a session or
+  // weekly reading.
   readonly property string barTooltip: !barAgent ? "No agent selected"
-    : "Bar shows " + defaultAgentName + (barWorst >= 0
-      ? " — " + (barWorstTitle || "usage") + " " + Math.round(barWorst * 100) + "%"
+    : "Bar shows " + defaultAgentName + (barHasData
+      ? " — session " + (barSession >= 0 ? Math.round(barSession * 100) + "%" : "not reported")
+        + " · weekly " + (barWeekly >= 0 ? Math.round(barWeekly * 100) + "%" : "not reported")
+        + (barValue > Math.max(barSession, barWeekly) && barOther >= 0
+          ? " · " + (barOtherTitle || "usage") + " " + Math.round(barOther * 100) + "%"
+          : "")
       : " — no limits reported")
   onFirstIdChanged: applyDefault()
   onFirstInstalledChanged: applyDefault()
@@ -1756,9 +1763,10 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // One severity readout for every agent: the shared BAR_LEVELS table colors
-    // the robot from the worst reported limit; angry eyes when a limit is used
-    // up. Neutral when the agent reports nothing.
+    // One severity readout for every agent: the robot is colored from the
+    // worst session/weekly meter through the same meterColorFor thresholds the
+    // tab's limit bars use; angry eyes when a limit is used up. Neutral when
+    // the agent reports nothing.
     iconComponent: Component {
       OpticalGlyph {
         implicitWidth: Style.bar.iconCanvas
@@ -1770,8 +1778,9 @@ Panel {
         color: root.barIconColor
       }
     }
-    // The percentage shows only in the red zone (>= 90%), from the same reading.
-    labelText: root.barShowPercent ? Math.round(root.barWorst * 100) + "%" : ""
+    // The percentage is the same reading the color comes from, shown whenever
+    // the agent reports a limit.
+    labelText: root.barHasData ? Math.round(root.barValue * 100) + "%" : ""
     slotSize: Style.bar.iconSlot * (root.barHasData ? 2 : 1)
     active: root.barHasData
     activeColor: root.barIconColor
