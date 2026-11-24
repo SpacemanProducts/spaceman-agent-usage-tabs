@@ -21,8 +21,8 @@ export function openStore(dir = stateDir()) {
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "jobs.json"), logFile = path.join(dir, "log.jsonl"), lock = path.join(dir, "jobs.lock");
   const read = () => {
-    try { const d = JSON.parse(fs.readFileSync(file, "utf8")); return { goal: d.goal || null, jobs: Array.isArray(d.jobs) ? d.jobs : [], next: d.next || 1 }; }
-    catch { return { goal: null, jobs: [], next: 1 }; }
+    try { const d = JSON.parse(fs.readFileSync(file, "utf8")); return { goal: d.goal || null, jobs: Array.isArray(d.jobs) ? d.jobs : [], next: d.next || 1, guards: d.guards || {} }; }
+    catch { return { goal: null, jobs: [], next: 1, guards: {} }; }
   };
   const write = (d) => { const tmp = file + "." + process.pid + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n"); fs.renameSync(tmp, file); };
   // Run fn(state) under the lock and save what it returns state as. A lock older than 10 s is stale.
@@ -65,7 +65,7 @@ export const doneFile = (dir, id) => path.join(dir, ".constance", `done-${id}.js
 // status check and what not to touch, the task, tests and build, its own commit (never a push or
 // deploy unless the task says so), a plain-text report, and the done file last. With no files listed
 // the job is read-only: the agent changes nothing and only reports.
-export function handoffPrompt({ id, dir, task, files = [], account = null }) {
+export function handoffPrompt({ id, dir, task, files = [], account = null }, extra = "") {
   const readOnly = !files || files.length === 0;
   return [
     `Check: this job is for the project folder ${dir}. Run \`pwd\` first; if it is not exactly ${dir}, stop now and change nothing.`,
@@ -85,6 +85,7 @@ export function handoffPrompt({ id, dir, task, files = [], account = null }) {
     `Report in plain text: what you changed, the test and build results, and which files you touched. No screenshots unless checking the look itself is the task. If you could not finish, say why in a few lines and stop.`,
     ``,
     `Last step, even if you could not finish: write the file ${doneFile(dir, id)} containing JSON like {"summary": "what you did or why you stopped, in a few lines", "commit": "the full hash of your commit, or empty if you made none", "files": ["the files you changed"]}. Do not commit that file.`,
+    ...(extra ? ["", extra] : []),
   ].join("\n");
 }
 

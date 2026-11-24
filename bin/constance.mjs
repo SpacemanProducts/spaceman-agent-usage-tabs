@@ -9,6 +9,7 @@
 //   agents | pace | jobs        what she reads before every handoff
 //   delegate --agent ID --task TEXT [--files a,b]   hand one task to one free agent (re-checks it first;
 //                                                   no --files = read-only; in practice mode it only logs the prompt)
+//   lesson TEXT                   add a short lesson to her lessons file (advice for later goals)
 //   wait [--timeout S]          block until a job finishes; prints the next one to review, oldest first
 //   review ID accept|send-back --note TEXT        record her verdict
 //   note TEXT                   a line in the owner's log
@@ -24,6 +25,8 @@ import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.
 import { pace } from "./constance-pace.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
+import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
+import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -71,7 +74,7 @@ function practiceMode() {
 // Bring statuses up to date: a done file means finished; a process that ended without one is finished too
 // (with a note), so it still gets reviewed.
 function sweep() {
-  return store.update((s) => {
+  const changed = store.update((s) => {
     const changed = [];
     for (const j of s.jobs) {
       if (j.status !== "running") continue;
@@ -86,6 +89,32 @@ function sweep() {
     }
     return changed;
   });
+  for (const j of changed) guardFinished(j);
+  return changed;
+}
+
+// After a delegated run ends, check it stayed inside its guardrails: only its
+// allowed files changed, and the home/projects lists match the pre-run
+// snapshot. A violation restores what can be restored, logs a lesson, counts a
+// strike (smaller tasks from then on) and marks the job so her review sees it.
+function guardFinished(j) {
+  if (!j.guardBefore || j.guardChecked) return;
+  const res = checkRun({ dir: j.dir, files: j.files || [], commit: j.commit, before: j.guardBefore, env: ENV });
+  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.guardChecked = true; });
+  if (res.ok) return;
+  // Revert the commit only when the commit itself touched disallowed files; a
+  // home/projects-only or dirty-leftover violation leaves committed work alone.
+  const commitBad = changedFiles(j.dir, j.commit).some((p) => (res.badPaths || []).includes(p));
+  const did = restoreRun({ dir: j.dir, commit: commitBad ? j.commit : "", badPaths: res.badPaths || [], addedProjects: res.addedProjects || [], projectsDir: res.projectsDir });
+  const lesson = `${j.agent} broke a guardrail on job ${j.id}: ${res.violations.join("; ")}.`;
+  addLesson(lesson, store.dir);
+  store.update((s) => {
+    const x = s.jobs.find((k) => k.id === j.id);
+    if (x) x.guardViolation = res.violations;
+    const g = (s.guards ||= {})[j.agent] ||= { strikes: 0, violations: [] };
+    g.strikes += 1; g.violations.push({ job: j.id, at: Date.now(), what: res.violations });
+  });
+  store.log({ kind: "guard", job: j.id, agent: j.agent, text: `${res.violations.join("; ")}. Restored: ${did.join("; ") || "nothing to restore"}. Lesson logged; ${j.agent} gets smaller tasks now.` });
 }
 
 function changedFiles(dir, commit) {
@@ -110,15 +139,23 @@ function delegate() {
   const verdict = judgeAll(freshData()).find((a) => a.id === agent);
   if (!verdict?.available) fail(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
+  // Guardrail strikes shrink what this agent may touch: after a violation it gets
+  // smaller tasks only, enforced here rather than left to her judgment.
+  const strikes = Number(store.read().guards?.[agent]?.strikes) || 0;
+  const cap = fileCap(strikes);
+  if (files.length > cap) fail(`${agent} broke a guardrail before, so it gets smaller tasks: at most ${cap} file${cap === 1 ? "" : "s"} per job (it asked for ${files.length}). Split the work or pick another agent.`);
   const practice = practiceMode();
   const account = verdict.accountId ? { id: verdict.accountId, label: verdict.account } : null;
   const who = verdict.name + (verdict.account ? ` (${verdict.account})` : "");
+  // Per-project rules are read fresh for every handoff; guardrails go to every
+  // delegated agent (they are all fast/free models).
+  const extra = rulesBlock(readProjectRules(dir)) + "\n" + guardrailBlock(files);
   const job = store.update((s) => {
     const busy = conflicts(s.jobs, dir, files);
     if (busy.length) return { busy };
     const j = { id: s.next++, goal: g.id, agent, account, dir, files, task, status: practice ? "finished" : "waiting", createdAt: Date.now() };
     if (practice) { j.finishedAt = Date.now(); j.summary = "(practice run: the prompt is in the log, nothing was launched)"; }
-    j.prompt = handoffPrompt(j);
+    j.prompt = handoffPrompt(j, extra);
     s.jobs.push(j);
     return j;
   });
@@ -131,6 +168,10 @@ function delegate() {
   excludeDoneFiles(dir);
   fs.mkdirSync(path.join(dir, ".constance"), { recursive: true });
   try { fs.rmSync(doneFile(dir, job.id)); } catch {}
+  // Snapshot the world before the run: the post-run guard checks the diff and
+  // these lists against it.
+  const before = guardSnapshot(ENV);
+  store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.guardBefore = before; });
   const logPath = path.join(store.dir, `job-${job.id}.log`);
   const fd = fs.openSync(logPath, "w");
   const [cmd, ...args] = launchCommand(agent, job.prompt);
@@ -155,6 +196,7 @@ async function waitJob() {
         .map((j) => ({ id: j.id, agent: j.agent, commit: j.commit, shared: overlaps(changedFiles(j.dir, j.commit), files) })).filter((x) => x.shared.length);
       let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
       return out({ review: { id: next.id, agent: next.agent, dir: next.dir, files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
+        guardViolation: next.guardViolation || null,
         checkAgainst: earlier, logTail: tail }, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent })),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
@@ -187,6 +229,7 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - \`C wait --timeout 540\` (give your Bash tool a 600000 ms timeout for it; long waits save your limits): blocks until a job finishes and gives you the next one to review, oldest finish first. The agent runs the tests and build itself and reports in plain text what changed, the results and the files. Check the report against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare with any earlier job it lists under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then \`C review ID accept|send-back --note "..."\`.
 - \`C status\` shows \`practice: true\` during a dry run (the panel's Practice switch, on by default for now): plan and delegate exactly as usual — the tool logs each handoff's agent, reason and full prompt instead of launching it — but don't edit files yourself, and say in your report that it was a practice run.
 - \`C note "..."\`: a short line in the owner's log for anything he should know.
+- \`C lesson "..."\`: add one short lesson to your lessons file — something you learned the hard way this goal (a skipped check, a surprise an agent caused, a rule that saved time). It is advice for your future goals, never a rule that overrides the ones above. Read your lessons before each goal; they are already in your first message.
 Before you edit anything, run \`git status\`; commit only your own changes, never push or deploy. When the goal is done and every job is reviewed, finish with a short plain report for the owner: what was done, by whom, the commits, anything left open.`;
 
 function startGoal() {
@@ -245,9 +288,11 @@ async function drive() {
       if (!st || st.status !== "running" || killed) continue;
     }
     const resume = g.started;
+    // Fresh lessons and this project's own rules go into the first message of
+    // every goal (advice only — her core rules above never change).
     const prompt = resume
       ? "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal."
-      : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}`;
+      : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + rulesBlock(readProjectRules(g.dir));
     const args = ["-p", "--model", g.model || "opus", "--dangerously-skip-permissions", "--output-format", "text", "--append-system-prompt", ROLE(g.dir),
       ...(resume ? ["--resume", g.session] : ["--session-id", g.session]), prompt];
     const reportPath = path.join(store.dir, `report-${g.id}.txt`);
@@ -316,7 +361,7 @@ function recover() {
 
 function status() {
   const s = store.read(), d = readData();
-  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, ...j }) => j), agents: judgeAll(d), pace: pace(claudeOf(d)), practice: practiceMode(), log: store.readLog(80) });
+  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judgeAll(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, log: store.readLog(80) });
 }
 
 const cmd = process.argv[2];
@@ -324,14 +369,24 @@ if (process.argv[1] === SELF) {
   if (cmd === "start") startGoal();
   else if (cmd === "drive") await drive();
   else if (cmd === "status") status();
-  else if (cmd === "agents") { const d = freshData(); out(judgeAll(d).map((a) => `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}`).join("\n")); }
+  else if (cmd === "agents") {
+    const d = freshData(), guards = store.read().guards || {};
+    out(judgeAll(d).map((a) => `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}`).join("\n"));
+  }
   else if (cmd === "pace") out(pace(claudeOf(freshData())));
-  else if (cmd === "jobs") { sweep(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, jobs: s.jobs.map(({ prompt, ...j }) => j) }); }
+  else if (cmd === "jobs") { sweep(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
   else if (cmd === "delegate") delegate();
   else if (cmd === "wait") await waitJob();
   else if (cmd === "review") review();
   else if (cmd === "note") { store.log({ kind: "note", text: process.argv.slice(3).join(" ") }); out("noted"); }
+  else if (cmd === "lesson") {
+    const text = process.argv.slice(3).join(" ").trim();
+    if (!text) fail("Usage: lesson TEXT");
+    addLesson(text, store.dir);
+    store.log({ kind: "lesson", text });
+    out("lesson added");
+  }
   else if (cmd === "stop") stopAll();
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|agents|pace|jobs|delegate|wait|review|note|stop|recover");
+  else fail("Usage: constance.mjs start|status|agents|pace|jobs|delegate|wait|review|note|lesson|stop|recover");
 }

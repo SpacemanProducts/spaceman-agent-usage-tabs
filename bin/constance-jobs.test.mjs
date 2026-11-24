@@ -50,7 +50,7 @@ assert.deepEqual(reviewQueue([{ id: 1, status: "finished", finishedAt: 20 }, { i
 assert.match(stateDir({ XDG_STATE_HOME: "/s" }), /^\/s\/omarchy\/agent-usage-tabs\/constance$/);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-test-"));
 const s = openStore(dir);
-assert.deepEqual(s.read(), { goal: null, jobs: [], next: 1 });
+assert.deepEqual(s.read(), { goal: null, jobs: [], next: 1, guards: {} });
 const id = s.update((d) => { d.jobs.push({ id: d.next++, status: "waiting" }); return d.next - 1; });
 assert.equal(id, 1);
 assert.equal(openStore(dir).read().jobs[0].status, "waiting", "the job file survives a restart");

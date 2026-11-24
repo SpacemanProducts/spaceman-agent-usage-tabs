@@ -32,6 +32,13 @@ p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 if grep -qi "read-only job" <<<"$p"; then
   echo '{"summary": "cause: a.txt has no b", "commit": "", "files": []}' > "$f"
+elif grep -q "add f" <<<"$p"; then
+  sleep 1
+  echo f > f.txt; git add f.txt; git commit -qm "grok: f"; echo "{\\"summary\\": \\"added f\\", \\"commit\\": \\"$(git rev-parse HEAD)\\", \\"files\\": [\\"f.txt\\"]}" > "$f"
+elif grep -q "add g" <<<"$p"; then
+  sleep 1
+  echo g > g.txt; git add g.txt; git commit -qm "grok: g"; echo stray > evil.txt
+  echo "{\\"summary\\": \\"added g and left a stray\\", \\"commit\\": \\"$(git rev-parse HEAD)\\", \\"files\\": [\\"g.txt\\"]}" > "$f"
 else
   sleep 1
   echo b > b.txt; git add b.txt; git commit -qm "grok: b"; echo "{\\"summary\\": \\"added b\\", \\"commit\\": \\"$(git rev-parse HEAD)\\", \\"files\\": [\\"b.txt\\"]}" > "$f"
@@ -171,6 +178,55 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   assert.match(fs.readFileSync(path.join(root, "claude-args-fallback"), "utf8"), /--model sonnet/, "the retry ran on sonnet");
   assert.match(fs2.goal.report, /Fallback report/);
   assert.equal(fs2.jobs.find((j) => j.id === 6).status, "accepted", "the delegated job still ran and was reviewed");
+}
+
+// Learning layer + guardrails: the lessons file seeded itself, every handoff
+// prompt carries the project rules and the guardrail block, and a run that
+// leaves a stray file is caught after it finishes — restored, lesson logged,
+// strike counted, and the agent is capped to smaller tasks.
+fs.mkdirSync(path.join(repo, ".constance"), { recursive: true });
+fs.writeFileSync(path.join(repo, ".constance", "rules.md"), "Never touch generated files.\n");
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+echo "$@" > "${root}/claude-args-guard"
+C="node ${CLI}"
+$C delegate --agent grok --files g.txt --task "add g" >> "${root}/guard.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 30 > "${root}/wait-guard.json"
+$C review 7 accept --note "ok despite the stray"
+$C delegate --agent grok --files a.txt,b.txt,c.txt,d.txt --task "too big" >> "${root}/guard.out" 2>&1 || echo "refused-cap" >> "${root}/guard.out"
+$C lesson "always check for stray files before reporting" >> "${root}/guard.out" 2>&1
+echo "Guard report: one violation caught."
+`, { mode: 0o755 });
+assert.equal(run("start", "--dir", repo, "--goal", "guard goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done"), "the guard goal finishes: " + JSON.stringify(status().goal));
+{
+  const gs = status();
+  const job7 = gs.jobs.find((j) => j.id === 7);
+  assert.ok(job7, "job 7 exists");
+  assert.ok(Array.isArray(job7.guardViolation) && job7.guardViolation.some((v) => v.includes("evil.txt")), "the stray file is flagged: " + JSON.stringify(job7.guardViolation));
+  assert.equal(gs.guards.grok.strikes, 1, "one strike counted");
+  assert.equal(job7.status, "accepted", "she still reviewed and accepted it");
+  assert.ok(!fs.existsSync(path.join(repo, "evil.txt")), "the stray file was cleaned up");
+  assert.ok(fs.existsSync(path.join(repo, "g.txt")), "the allowed commit was left alone");
+  assert.match(fs.readFileSync(path.join(root, "guard.out"), "utf8"), /refused-cap/, "a 4-file job is refused after one strike");
+  const kinds = gs.log.map((l) => l.kind);
+  assert.ok(kinds.includes("guard"), "a guard event is in the log");
+  assert.ok(kinds.includes("lesson"), "the lesson command logged");
+  // The handoff prompt carried the project rules and the guardrail block.
+  const stored = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "jobs.json"), "utf8"));
+  const p7 = stored.jobs.find((j) => j.id === 7).prompt;
+  assert.match(p7, /Never touch generated files/, "project rules are in the handoff");
+  assert.match(p7, /Guardrails:/, "guardrails are in the handoff");
+  assert.match(p7, /rm -rf/, "the hard bans are in the handoff");
+  assert.match(p7, /g\.txt/, "the allowed-files list names g.txt");
+  // Lessons: seeded file exists, the violation lesson was appended, her own too.
+  const lessons = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "lessons.json"), "utf8")).lessons;
+  assert.ok(lessons.length >= 9, "seeded lessons are there");
+  assert.ok(lessons.some((l) => l.includes("broke a guardrail")), "the violation became a lesson");
+  assert.ok(lessons.includes("always check for stray files before reporting"), "her lesson command worked");
+  // Her first message carried the lessons and the project rules.
+  assert.match(fs.readFileSync(path.join(root, "claude-args-guard"), "utf8"), /Lessons from your earlier goals/);
+  assert.match(fs.readFileSync(path.join(root, "claude-args-guard"), "utf8"), /Never touch generated files/);
 }
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance: tests passed");
