@@ -56,16 +56,14 @@ for (const pct of [0.51, 0.94, 0.99, 1]) {
 // The user's example: 62% session, 38% weekly -> "62%" in 62%'s color, robot in 38%'s.
 assert.deepEqual(bm(A([L("Session", 0.62), L("Weekly", 0.38)])), { session: 0.62, weekly: 0.38 }, "62/38 split");
 
-// The color table is meterColorFor in Panel.qml — the same one the tab's limit
-// bars use. Evaluate the real functions so the thresholds can't drift apart.
-const qml = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "Panel.qml"), "utf8");
-const mctx = {}; vm.createContext(mctx);
-for (const name of ["greenFor", "amberFor", "redFor", "meterColorFor"]) {
-  const m = qml.match(new RegExp("function " + name + "\\([^)]*\\) \\{[^}]*\\}"));
-  assert.ok(m, "Panel.qml defines " + name);
-  vm.runInContext(m[0], mctx);
-}
-const colorOf = (p) => vm.runInContext("meterColorFor(" + p + ", false)", mctx);
+// The color table is UsageColors.forLevel — the same one the tab's limit bars
+// use, fed by the surface's palette. Evaluate the real module so the thresholds
+// can't drift apart.
+const ucsrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "usage-colors.js"), "utf8").replace(/^\.pragma library\s*$/m, "");
+const uctx = {}; vm.createContext(uctx); vm.runInContext(ucsrc, uctx);
+const { palette, forLevel } = uctx;
+const darkPal = palette("#101315");   // a dark surface keeps the bright set
+const colorOf = (p) => forLevel(p, darkPal);
 assert.equal(colorOf(0.51), "#4caf50", "51% -> green, same as the tab bar");
 assert.equal(colorOf(0.94), "#e5484d", "94% -> red, same as the tab bar");
 assert.equal(colorOf(0.99), "#e5484d", "99% -> red");
@@ -79,8 +77,9 @@ assert.equal(colorOf(0.851), "#e5484d", "just over 85% -> red, matching the tab"
 // its inside fill the weekly one, so the bar's percentage and active state
 // (its underline) take the session tint and the robot takes the weekly tint —
 // both through the chip's own tintFor rule (unsure readings never go green).
+const qml = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "Panel.qml"), "utf8");
 assert.match(qml, /ChipMeters\.chipMeters\(barAgent\)/, "the bar reads the shared session/weekly meters");
-assert.match(qml, /barUnsure && p < 0\.6 \? root\.unsureColor : root\.meterColorFor\(p, root\.lightBar\)/, "the bar tint is the chip's tintFor rule on the bar's lightness");
+assert.match(qml, /barUnsure && p < 0\.6 \? root\.unsureColor : root\.meterColorFor\(p, root\.barUsage\)/, "the bar tint is the chip's tintFor rule on the bar's palette");
 assert.match(qml, /barSessionColor: barSession >= 0 \? barTintFor\(barSession\)/, "the percentage color is the session tint");
 assert.match(qml, /barRobotColor: barWeekly >= 0 \? barTintFor\(barWeekly\)/, "the robot color is the weekly tint");
 assert.match(qml, /color: root\.barRobotColor/, "the robot takes the weekly color");

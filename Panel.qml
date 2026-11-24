@@ -9,6 +9,7 @@ import qs.Ui
 import "chip-meters.js" as ChipMeters
 import "tab-order.js" as TabOrder
 import "fixes.js" as Fixes
+import "usage-colors.js" as UsageColors
 
 // Cook Meter (plugin id spaceman.agent-usage-tabs). Display only: bin/collect.mjs writes data.json, this file
 // watches it. Written from scratch; shares no code or state with other plugins.
@@ -20,8 +21,9 @@ Panel {
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
   // Everything follows the active Omarchy theme live: text, background and border come from the
-  // theme's popup colors, icons from its accent. Nothing here is a fixed color except the meter and
-  // celebration palettes below, which have a dark-background and a light-background variant.
+  // theme's popup colors, icons from its accent, meter colors from usage-colors.js palettes that
+  // adapt to each surface. The only fixed colors left are the celebration palettes below, which
+  // have a dark-background and a light-background variant.
   readonly property color foreground: Color.popups.text
   readonly property color panelBackground: Color.popups.background
   // Secondary text: the text color pulled toward the background (works on dark and light themes).
@@ -33,21 +35,19 @@ Panel {
   }
   function pluginText(key) { return strings.t(key) }
 
-  // Meter colors: green < 60%, amber 60-85%, red > 85%.
-  // Each has a bright set for dark backgrounds and a deeper set for light ones (all >= 4.8:1
-  // against #fff, #eff1f5 and #fffcf0, and >= 4.8:1 for the bright set against #101315).
-  function isLightColor(c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b > 0.55 }
-  readonly property bool lightPanel: isLightColor(panelBackground)
-  readonly property bool lightBar: isLightColor(Color.bar.background)
-  function greenFor(light) { return light ? "#1b7a31" : "#4caf50" }
-  function amberFor(light) { return light ? "#9a5b00" : "#f2a900" }
-  function redFor(light) { return light ? "#c0262d" : "#e5484d" }
-  readonly property color green: greenFor(lightPanel)
-  readonly property color amber: amberFor(lightPanel)
-  readonly property color red: redFor(lightPanel)
+  // Meter colors: green < 60%, amber 60-85%, red > 85%. Each surface gets its own
+  // palette from usage-colors.js, which picks the bright or deep set for the
+  // theme's background and adjusts any color that wouldn't read (>= 4.5:1).
+  readonly property var panelUsage: UsageColors.palette(panelBackground, Color.background)
+  readonly property var barUsage: UsageColors.palette(Color.bar.background, Color.background)
+  readonly property bool lightPanel: panelUsage.light
+  readonly property bool lightBar: barUsage.light
+  readonly property color green: panelUsage.low
+  readonly property color amber: panelUsage.mid
+  readonly property color red: panelUsage.high
   function soft(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
-  function meterColorFor(p, light) { return p > 0.85 ? redFor(light) : (p >= 0.6 ? amberFor(light) : greenFor(light)) }
-  function meterColor(p) { return meterColorFor(p, lightPanel) }
+  function meterColorFor(p, pal) { return UsageColors.forLevel(p, pal || panelUsage) }
+  function meterColor(p) { return meterColorFor(p, panelUsage) }
   // A reading the collector couldn't confirm is current and complete never shows green: it shows gray
   // ("unsure"). Amber and red still show, since a high reading is a real warning either way.
   readonly property color unsureColor: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.45)
@@ -240,7 +240,7 @@ Panel {
   readonly property real barWeekly: barMeters.weekly
   readonly property bool barHasData: barSession >= 0 || barWeekly >= 0
   readonly property bool barUnsure: root.unsureReason(barAgent) !== ""
-  function barTintFor(p) { return barUnsure && p < 0.6 ? root.unsureColor : root.meterColorFor(p, root.lightBar) }
+  function barTintFor(p) { return barUnsure && p < 0.6 ? root.unsureColor : root.meterColorFor(p, root.barUsage) }
   readonly property color barSessionColor: barSession >= 0 ? barTintFor(barSession) : root.barForeground
   readonly property color barRobotColor: barWeekly >= 0 ? barTintFor(barWeekly) : root.barForeground
   // The tooltip names the agent the bar represents and shows both numbers.

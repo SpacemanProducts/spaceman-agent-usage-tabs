@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.37.0 - 2026-11-24
+- **The whole plugin now follows the active Omarchy theme like the stock panels:** meter colors moved into `usage-colors.js`, which picks the bright or deep set for each surface's actual background and verifies WCAG contrast — any color that wouldn't read is adjusted toward black or white, and a mid-tone background that would collapse the three levels triggers a hue-preserving rebuild so low, medium and high stay tellable apart. The panel popups, tab chips, limit bars, top-bar percentage and robot, Start picker, Constance panel and settings all draw from the same live `Color`/`Style` sources, so a theme switch updates everything without a restart. Celebrations keep their dark/light variants.
+
 ## 1.36.0 - 2026-11-24
 - **Constance's panel got a layout pass:** the goal is a multi-line box that grows as you type, the folder picker highlights only the selected folder, "Give it to Constance" is a full-width button disabled only while the goal is empty, and the Practice switch sits right beside it. Constance's own row now shows her session and weekly percentages instead of delegate pace. The agents are grouped Ready / Waiting on limits / Can't use — waiting rows name the blocking limit and when it resets, and Can't use collapses to a count. The log moved above the agents and keeps the most room, newest entry first.
 
