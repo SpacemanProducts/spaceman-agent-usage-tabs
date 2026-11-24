@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.36.0 - 2026-11-24
+- **Constance's panel got a layout pass:** the goal is a multi-line box that grows as you type, the folder picker highlights only the selected folder, "Give it to Constance" is a full-width button disabled only while the goal is empty, and the Practice switch sits right beside it. Constance's own row now shows her session and weekly percentages instead of delegate pace. The agents are grouped Ready / Waiting on limits / Can't use — waiting rows name the blocking limit and when it resets, and Can't use collapses to a count. The log moved above the agents and keeps the most room, newest entry first.
+
 ## 1.35.0 - 2026-11-23
 - **Constance has a Practice switch and a model fallback:** Practice mode (on by default for now, in her panel under PRACTICE) is a dry run — she still plans the goal and picks agents, but every handoff only writes the agent, the reason and the full prompt into her log; nothing launches and nothing changes, and she can still review each piece. If Opus isn't allowed on the Claude plan, she drops to the best model that is (Sonnet, then Haiku), says so in the log and starts the goal over on the new model instead of failing — other errors never downgrade her. Her panel shows the model she's actually on.
 

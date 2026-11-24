@@ -15,6 +15,12 @@ assert.equal(judge(ag("grok", { limits: [] }), at).reason, "reports no limits", 
 assert.equal(judge(ag("copilot", { limits: [{ percent: 0.943 }] }), at).available, false, "Copilot at 94% is near the wall");
 assert.equal(judge(ag("copilot", { limits: [{ percent: RED - 0.01 }] }), at).available, true);
 assert.equal(judge(ag("cursor", { limits: [{ percent: 1, hitAt: "x" }] }), at).reason, "hit its limit");
+// A blocked agent carries the fullest limit's reset time and title, so the panel can say when it frees up.
+{
+  const v = judge(ag("grok", { limits: [{ title: "Daily", percent: 0.4, resetsAt: "d1" }, { title: "Weekly", percent: 0.99, resetsAt: "w1" }] }), at);
+  assert.equal(v.available, false); assert.equal(v.resetsAt, "w1"); assert.equal(v.blockTitle, "Weekly");
+  assert.equal(judge(ag("grok"), at).resetsAt, null, "an available agent has no blocker");
+}
 assert.equal(judge(ag("antigravity", { limits: [{ percent: 0.1 }], accounts: [{ limits: [{ percent: 0.9 }] }] }), at).available, false, "any account's limit counts");
 assert.equal(judge(ag("grok"), { now, generatedAt: now - 20 * 60e3 }).reason, "usage reading is out of date");
 assert.equal(judge(ag("kimi"), at).reason, "no headless launch known");

@@ -948,6 +948,30 @@ Panel {
     if (e.kind === "practice") line += "\n" + String(e.prompt || "")   // the whole handoff prompt, so the owner can check it
     return line
   }
+  // Constance's own row: the model she runs on and her session/weekly percentages (from her pace
+  // windows), instead of a pace-mode word.
+  function constanceClaudeLine() {
+    var p = root.constance.pace, parts = []
+    if (p && p.windows) for (var i = 0; i < p.windows.length; i++) parts.push(p.windows[i].title + " " + Math.round(Number(p.windows[i].used) * 100) + "%")
+    if (parts.length) return "Claude Code (" + root.constanceModel + ") — " + parts.join(" · ")
+    return "Claude Code (" + root.constanceModel + ")" + (p && p.mode && p.mode !== "normal" ? " — " + p.mode + " pace" : "")
+  }
+  // The agent list split for display: Constance herself, agents she can use right now (free agents
+  // plus anyone holding a running job), agents waiting on a limit to reset, and the rest.
+  readonly property var constanceGroups: {
+    var me = null, ready = [], waiting = [], cant = []
+    var list = root.constance.agents || []
+    for (var i = 0; i < list.length; i++) {
+      var a = list[i]
+      if (a.reason === "not installed") continue
+      if (a.id === "claude") { me = a; continue }
+      if (root.constanceJobOf(a.id) || a.available) ready.push(a)
+      else if (/of a limit|hit its limit/.test(String(a.reason))) waiting.push(a)
+      else cant.push(a)
+    }
+    return { me: me, ready: ready, waiting: waiting, cant: cant }
+  }
+  property bool constanceCantOpen: false   // "Can't use" starts collapsed with a count
   Process {
     id: constanceReader
     command: ["node", root.pluginDir + "/bin/constance.mjs", "status"]
@@ -961,7 +985,7 @@ Panel {
     stderr: StdioCollector { id: constanceStarterErr }
     onExited: function(code) {
       if (code !== 0) root.constanceError = String(constanceStarterErr.text).trim() || ("Constance couldn't start (exit " + code + ").")
-      else goalField.text = ""
+      else goalArea.text = ""
       root.refreshConstance()
     }
   }
@@ -1272,6 +1296,57 @@ Panel {
     }
   }
 
+  // One agent row on Constance's screen: dot, name, and what she can do with it right now. A waiting
+  // agent's reason is followed by when its fullest limit resets; a running job shows the task.
+  component ConstanceAgentRow: Item {
+    id: car
+    required property var modelData
+    readonly property var job: modelData && modelData.id ? root.constanceJobOf(modelData.id) : null
+    readonly property bool me: modelData && modelData.id === "claude"
+    width: parent.width
+    height: Math.max(cName.implicitHeight, cWhat.implicitHeight)
+    Rectangle {
+      id: cDot
+      anchors.left: parent.left
+      anchors.verticalCenter: cName.verticalCenter
+      width: Style.space(8); height: width; radius: width / 2
+      color: job ? Color.accent : (me ? Color.accent : (modelData.available ? root.green : root.unsureColor))
+    }
+    Text {
+      id: cName
+      anchors.left: cDot.right
+      anchors.leftMargin: Style.space(8)
+      anchors.top: parent.top
+      width: Style.space(130)
+      textFormat: Text.PlainText
+      elide: Text.ElideRight
+      text: me ? "Constance" : root.constanceAgentName(modelData.id)
+      color: modelData.available || job || me ? root.foreground : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      font.bold: !!job || me
+    }
+    Text {
+      id: cWhat
+      anchors.left: cName.right
+      anchors.leftMargin: Style.space(8)
+      anchors.right: parent.right
+      anchors.top: parent.top
+      textFormat: Text.PlainText
+      wrapMode: Text.WordWrap
+      maximumLineCount: 2
+      elide: Text.ElideRight
+      text: job ? "Job " + job.id + ": " + job.task
+        : me ? root.constanceClaudeLine()
+        : (modelData.available ? "free: " : "")
+          + (modelData.resetsAt ? (modelData.blockTitle ? modelData.blockTitle + ": " : "") + modelData.reason + " · " + root.countdown(modelData.resetsAt)
+                                : modelData.reason)
+      color: job ? root.foreground : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+  }
+
   // Sound volume: - / + in steps of 10, the level, and a play button to hear it.
   component VolumeRow: Item {
     id: vr
@@ -1460,6 +1535,9 @@ Panel {
   component FolderPicker: Column {
     id: fp
     property bool forSquad: true
+    // Constance's folder row: only the picked folder stands out (green border, check and name);
+    // every other chip stays plain, pins included.
+    property bool plainOthers: false
     readonly property real folderGridSpacing: Style.space(8)
     readonly property real folderChipWidth: Math.max(0, Math.floor((width - folderGridSpacing) / 2))
     readonly property real folderNameRowHeight: Style.font.bodySmall * 1.25 + Style.space(12)
@@ -1506,12 +1584,16 @@ Panel {
           height: fp.forSquad ? repoContent.implicitHeight + Style.space(14) : fp.folderChipHeight
           radius: Style.cornerRadius
           color: fp.forSquad
-            ? (on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
-                  : pinned ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.12)
-                  : (repoArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)))
+            ? (fp.plainOthers
+                ? (on ? Qt.rgba(root.green.r, root.green.g, root.green.b, 0.14)
+                      : repoArea.containsMouse ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.07)
+                      : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04))
+                : (on ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.22)
+                      : pinned ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.12)
+                      : (repoArea.containsMouse ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.1) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06))))
             : (repoHover.hovered ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05))
-          border.width: fp.forSquad ? (pinned ? 2 : (on ? 1 : 0)) : (on ? 1 : 0)
-          border.color: fp.forSquad ? (on || pinned ? Color.accent : root.soft(root.foreground, 0.3)) : root.soft(Color.accent, 0.5)
+          border.width: fp.forSquad ? (fp.plainOthers ? (on ? 2 : 1) : (pinned ? 2 : (on ? 1 : 0))) : (on ? 1 : 0)
+          border.color: fp.forSquad ? (fp.plainOthers ? (on ? root.green : root.soft(root.foreground, 0.3)) : (on || pinned ? Color.accent : root.soft(root.foreground, 0.3))) : root.soft(Color.accent, 0.5)
           Column {
             id: repoContent
             anchors.centerIn: parent
@@ -1523,7 +1605,7 @@ Panel {
               horizontalAlignment: fp.forSquad ? Text.AlignHCenter : Text.AlignLeft
               textFormat: Text.PlainText
               text: fp.forSquad ? ((repoChip.on ? "\u2713 " : "") + root.shortPath(repoChip.modelData)) : root.folderName(repoChip.modelData)
-              color: fp.forSquad && repoChip.on ? Color.accent : root.foreground
+              color: fp.forSquad && repoChip.on ? (fp.plainOthers ? root.green : Color.accent) : root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               font.bold: fp.forSquad && repoChip.on
@@ -2218,38 +2300,102 @@ Panel {
               width: parent.width
               spacing: Style.space(10)
               PanelSectionHeader { width: parent.width; text: "GOAL" }
-              TextField {
-                id: goalField
-                width: parent.width
-                placeholderText: "Tell her once, in plain words: e.g. add a dark mode switch"
-                foreground: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                onActiveFocusChanged: root.constanceTyping = activeFocus
-                onAccepted: root.startConstance(text)
-                Keys.onEscapePressed: { goalField.focus = false; keyCatcher.forceActiveFocus() }
-              }
-              FolderPicker { width: parent.width }
               Rectangle {
-                id: goTile
-                readonly property bool ready: goalField.text.trim() !== "" && !constanceStarter.running
-                width: goLabel.implicitWidth + Style.space(28)
-                height: goLabel.implicitHeight + Style.space(14)
+                id: goalBox
+                width: parent.width
+                readonly property real vPad: Style.space(9)
+                readonly property real lineH: goalArea.font.pixelSize * 1.35
+                // About three lines tall, growing with the text (capped so the panel stays usable).
+                height: Math.max(lineH * 3 + vPad * 2, Math.min(lineH * 8 + vPad * 2, goalArea.contentHeight + vPad * 2))
                 radius: Style.cornerRadius
-                opacity: ready ? 1 : 0.4
-                color: goArea.containsMouse && ready ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
-                Text {
-                  id: goLabel
-                  anchors.centerIn: parent
-                  textFormat: Text.PlainText
-                  text: constanceStarter.running ? "Starting..." : "Give it to Constance"
-                  color: Color.accent
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, goalArea.activeFocus ? 0.07 : 0.045)
+                border.width: 1
+                border.color: goalArea.activeFocus ? Color.accent : root.soft(root.foreground, 0.3)
+                clip: true
+                TextArea {
+                  id: goalArea
+                  anchors.fill: parent
+                  anchors.margins: goalBox.vPad
+                  wrapMode: TextEdit.Wrap
+                  color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
-                  font.bold: true
+                  placeholderText: "Tell her once, in plain words: e.g. add a dark mode switch"
+                  placeholderTextColor: root.dim
+                  onActiveFocusChanged: root.constanceTyping = activeFocus
+                  Keys.onEscapePressed: { goalArea.focus = false; keyCatcher.forceActiveFocus() }
+                  // Enter makes a new line; Ctrl+Enter hands it to her (the button always works).
+                  Keys.onReturnPressed: function(event) { if (event.modifiers & Qt.ControlModifier) { event.accepted = true; root.startConstance(goalArea.text) } }
                 }
-                MouseArea { id: goArea; anchors.fill: parent; enabled: goTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.startConstance(goalField.text) }
-                PanelToolTip { visible: goArea.containsMouse; text: "She plans it, hands pieces to free agents under their limits, reviews everything and reports here"; fontFamily: root.fontFamily }
+              }
+              FolderPicker { width: parent.width; plainOthers: true }
+              Row {
+                width: parent.width
+                spacing: Style.space(10)
+                Rectangle {
+                  id: goTile
+                  readonly property bool ready: goalArea.text.trim() !== "" && !constanceStarter.running
+                  width: parent.width - practiceToggle.width - parent.spacing
+                  height: goLabel.implicitHeight + Style.space(20)
+                  radius: Style.cornerRadius
+                  opacity: ready ? 1 : 0.4
+                  color: goArea.containsMouse && ready ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                  border.width: 1
+                  border.color: root.soft(Color.accent, ready ? 0.9 : 0.4)
+                  Text {
+                    id: goLabel
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: constanceStarter.running ? "Starting..." : "Give it to Constance"
+                    color: Color.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                  }
+                  MouseArea { id: goArea; anchors.fill: parent; enabled: goTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.startConstance(goalArea.text) }
+                  PanelToolTip { visible: goArea.containsMouse; text: "She plans it, hands pieces to free agents under their limits, reviews everything and reports here. Ctrl+Enter works too."; fontFamily: root.fontFamily }
+                }
+                Item {
+                  id: practiceToggle
+                  width: pracText.implicitWidth + Style.space(10) + Style.space(38)
+                  height: Math.max(goTile.height, Style.space(24))
+                  Text {
+                    id: pracText
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: "Practice"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  Rectangle {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(38)
+                    height: Style.space(20)
+                    radius: height / 2
+                    color: root.constancePractice ? root.green : root.track
+                    border.width: 1
+                    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
+                    Rectangle {
+                      width: parent.height - Style.space(6)
+                      height: width
+                      radius: width / 2
+                      anchors.verticalCenter: parent.verticalCenter
+                      x: root.constancePractice ? parent.width - width - Style.space(3) : Style.space(3)
+                      color: root.foreground
+                    }
+                  }
+                  MouseArea {
+                    id: pracArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.writeSetting(["constancePractice", String(!root.constancePractice)])
+                  }
+                  PanelToolTip { visible: pracArea.containsMouse; text: "Dry run, on for now: she plans and writes every handoff prompt to the log, but launches nothing and changes no files"; fontFamily: root.fontFamily }
+                }
               }
               Text {
                 visible: root.constanceError !== ""
@@ -2323,61 +2469,8 @@ Panel {
               }
             }
 
-            PanelSectionHeader { width: parent.width; text: "AGENTS" }
-            Column {
-              width: parent.width
-              spacing: Style.space(4)
-              Repeater {
-                model: (root.constance.agents || []).filter(function(a) { return a.reason !== "not installed" })
-                Item {
-                  id: cRow
-                  required property var modelData
-                  readonly property var job: root.constanceJobOf(modelData.id)
-                  readonly property bool me: modelData.id === "claude"
-                  width: parent.width
-                  height: Math.max(cName.implicitHeight, cWhat.implicitHeight)
-                  Rectangle {
-                    id: cDot
-                    anchors.left: parent.left
-                    anchors.verticalCenter: cName.verticalCenter
-                    width: Style.space(8); height: width; radius: width / 2
-                    color: cRow.job ? Color.accent : (cRow.me ? Color.accent : (cRow.modelData.available ? root.green : root.unsureColor))
-                  }
-                  Text {
-                    id: cName
-                    anchors.left: cDot.right
-                    anchors.leftMargin: Style.space(8)
-                    anchors.top: parent.top
-                    width: Style.space(130)
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    text: cRow.me ? "Constance" : root.constanceAgentName(cRow.modelData.id)
-                    color: cRow.modelData.available || cRow.job || cRow.me ? root.foreground : root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: !!cRow.job || cRow.me
-                  }
-                  Text {
-                    id: cWhat
-                    anchors.left: cName.right
-                    anchors.leftMargin: Style.space(8)
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    textFormat: Text.PlainText
-                    wrapMode: Text.WordWrap
-                    maximumLineCount: 2
-                    elide: Text.ElideRight
-                    text: cRow.job ? "Job " + cRow.job.id + ": " + cRow.job.task
-                      : (cRow.me ? ("Claude Code (" + root.constanceModel + ")" + (root.constance.pace ? ", " + root.constance.pace.mode + " pace" : ""))
-                      : (cRow.modelData.available ? "free: " : "") + cRow.modelData.reason)
-                    color: cRow.job ? root.foreground : root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-              }
-            }
-
+            // The log comes before the agent list: it is the biggest section and must be visible
+            // without scrolling past the agents. Newest entry on top.
             PanelSectionHeader { width: parent.width; text: "LOG" }
             Text {
               visible: (root.constance.log || []).length === 0
@@ -2408,21 +2501,76 @@ Panel {
               }
             }
 
-            PanelSectionHeader { width: parent.width; text: "PRACTICE" }
-            SettingSwitch {
+            // Agents in three groups: who she can use now, who is waiting on a limit to reset (with
+            // when), and who can't be used at all — collapsed to a count until asked.
+            Column {
               width: parent.width
-              label: "Practice mode"
-              checked: root.constancePractice
-              onToggled: root.writeSetting(["constancePractice", String(!root.constancePractice)])
-            }
-            Text {
-              width: parent.width
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: "Dry run, on for now: she plans the goal and writes every handoff prompt to the log — which agent, why, and the full prompt — but launches nothing and changes no files."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              spacing: Style.space(8)
+              PanelSectionHeader { width: parent.width; text: "AGENTS" }
+              ConstanceAgentRow {
+                visible: !!root.constanceGroups.me
+                modelData: root.constanceGroups.me || ({ id: "claude" })
+              }
+
+              PanelSectionHeader { width: parent.width; text: "READY" }
+              Repeater {
+                model: root.constanceGroups.ready
+                ConstanceAgentRow { }
+              }
+              Text {
+                visible: root.constanceGroups.ready.length === 0
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "none"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              PanelSectionHeader { width: parent.width; text: "WAITING ON LIMITS" }
+              Repeater {
+                model: root.constanceGroups.waiting
+                ConstanceAgentRow { }
+              }
+              Text {
+                visible: root.constanceGroups.waiting.length === 0
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "none"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Item {
+                width: parent.width
+                height: cantHead.implicitHeight + Style.space(4)
+                Text {
+                  id: cantHead
+                  textFormat: Text.PlainText
+                  text: "CAN'T USE (" + root.constanceGroups.cant.length + ") " + (root.constanceCantOpen ? "▾" : "▸")
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  topPadding: Math.ceil(Style.font.caption * 0.15)
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.constanceCantOpen = !root.constanceCantOpen
+                }
+              }
+              Column {
+                visible: root.constanceCantOpen && root.constanceGroups.cant.length > 0
+                width: parent.width
+                spacing: Style.space(4)
+                Repeater {
+                  model: root.constanceGroups.cant
+                  ConstanceAgentRow { }
+                }
+              }
             }
           }
 

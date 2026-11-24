@@ -40,7 +40,7 @@ function limitsOf(a) {
 
 // { id, name, available, reason, worst } for one agent.
 export function judge(a, { now = Date.now(), generatedAt = now } = {}) {
-  const base = { id: a.id, name: a.name || a.id, available: false, worst: null };
+  const base = { id: a.id, name: a.name || a.id, available: false, worst: null, resetsAt: null, blockTitle: null };
   const no = (reason) => ({ ...base, reason });
   if (a.id === "claude") return no("Constance herself (the paid plan)");
   if (a.installed === false) return no("not installed");
@@ -55,8 +55,11 @@ export function judge(a, { now = Date.now(), generatedAt = now } = {}) {
   if (ls.length === 0) return no("reports no limits");
   const worst = Math.max(...ls.map((l) => Number(l.percent)));
   const r = { ...base, worst };
-  if (ls.some((l) => l.hitAt && Number(l.percent) >= 1)) return { ...r, reason: "hit its limit" };
-  if (worst >= RED) return { ...r, reason: `at ${Math.round(worst * 100)}% of a limit` };
+  // The limit that blocks her (the fullest one, or the hit one) brings its reset time along, so the
+  // panel can say "at 99%, resets in 3h" instead of just "at 99%".
+  const blocker = (l) => ({ resetsAt: l?.resetsAt || null, blockTitle: l?.title || null });
+  if (ls.some((l) => l.hitAt && Number(l.percent) >= 1)) return { ...r, ...blocker(ls.find((l) => l.hitAt && Number(l.percent) >= 1)), reason: "hit its limit" };
+  if (worst >= RED) return { ...r, ...blocker(ls.reduce((m, l) => (Number(l.percent) > Number(m.percent) ? l : m), ls[0])), reason: `at ${Math.round(worst * 100)}% of a limit` };
   return { ...r, available: true, reason: `under its limits (fullest ${Math.round(worst * 100)}%)` };
 }
 
