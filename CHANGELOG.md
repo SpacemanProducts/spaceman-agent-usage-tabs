@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.35.0 - 2026-11-23
+- **Constance has a Practice switch and a model fallback:** Practice mode (on by default for now, in her panel under PRACTICE) is a dry run — she still plans the goal and picks agents, but every handoff only writes the agent, the reason and the full prompt into her log; nothing launches and nothing changes, and she can still review each piece. If Opus isn't allowed on the Claude plan, she drops to the best model that is (Sonnet, then Haiku), says so in the log and starts the goal over on the new model instead of failing — other errors never downgrade her. Her panel shows the model she's actually on.
+
 ## 1.34.0 - 2026-11-23
 - **Constance's handoffs got stricter and her review got cheaper:** every handoff prompt is now fully self-contained — folder check, git status, the task, what not to touch, tests and build, its own commit, no push or deploy unless the task says so, a plain-text report (what changed, test results, files; no screenshots unless the look is the task) and the done file. She delegates one small, clear task at a time and gives weaker agents smaller pieces. A bug with an unknown cause is investigated first with a read-only handoff (omit `--files`: change nothing, find the cause, report in a few lines, stop); the fix is a second handoff. She reads the agent's report and checks it against the goal, and reads the full diff herself only when the change is risky or the report doesn't add up. Large files get summarized by a free agent instead of being read by her, while live database changes, tangled cross-part bugs and anything with secrets stay with her.
 

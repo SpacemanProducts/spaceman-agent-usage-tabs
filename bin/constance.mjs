@@ -7,7 +7,8 @@
 //   start --dir D --goal TEXT   new goal (refused while one is active); starts the driver in the background
 //   status                      JSON for the panel: goal, jobs, agents, pace, log
 //   agents | pace | jobs        what she reads before every handoff
-//   delegate --agent ID --files a,b --task TEXT   hand one task to one free agent (re-checks it first)
+//   delegate --agent ID --task TEXT [--files a,b]   hand one task to one free agent (re-checks it first;
+//                                                   no --files = read-only; in practice mode it only logs the prompt)
 //   wait [--timeout S]          block until a job finishes; prints the next one to review, oldest first
 //   review ID accept|send-back --note TEXT        record her verdict
 //   note TEXT                   a line in the owner's log
@@ -21,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { judgeAll, launchCommand, LAUNCH } from "./constance-agents.mjs";
 import { pace } from "./constance-pace.mjs";
+import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -56,6 +58,14 @@ function freshData() {
   return d;
 }
 const claudeOf = (d) => (d.agents || []).find((a) => a.id === "claude");
+
+// Practice mode (the panel's switch, on by default for now): a dry run. She still plans the goal and
+// picks agents, but delegate() only writes each handoff's agent, reason and full prompt into the log —
+// nothing launches and nothing changes. Missing settings.json means practice is on.
+function practiceMode() {
+  try { return JSON.parse(fs.readFileSync(path.join(STATE, "settings.json"), "utf8")).constancePractice !== false; }
+  catch { return true; }
+}
 
 // ---------------------------------------------------------------- jobs
 // Bring statuses up to date: a done file means finished; a process that ended without one is finished too
@@ -100,15 +110,22 @@ function delegate() {
   const verdict = judgeAll(freshData()).find((a) => a.id === agent);
   if (!verdict?.available) fail(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
+  const practice = practiceMode();
   const job = store.update((s) => {
     const busy = conflicts(s.jobs, dir, files);
     if (busy.length) return { busy };
-    const j = { id: s.next++, goal: g.id, agent, dir, files, task, status: "waiting", createdAt: Date.now() };
+    const j = { id: s.next++, goal: g.id, agent, dir, files, task, status: practice ? "finished" : "waiting", createdAt: Date.now() };
+    if (practice) { j.finishedAt = Date.now(); j.summary = "(practice run: the prompt is in the log, nothing was launched)"; }
     j.prompt = handoffPrompt(j);
     s.jobs.push(j);
     return j;
   });
   if (job.busy) fail(`Those files overlap job ${job.busy.map((b) => `${b.id} (${b.agent}: ${b.files.join(", ")})`).join("; ")}. Wait for it, or split the work differently.`);
+  if (practice) {
+    store.log({ kind: "practice", job: job.id, agent, reason: verdict.reason, files, text: task, prompt: job.prompt });
+    out(`Practice job ${job.id}: ${verdict.name} would take it (${verdict.reason}). Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
+    return;
+  }
   excludeDoneFiles(dir);
   fs.mkdirSync(path.join(dir, ".constance"), { recursive: true });
   try { fs.rmSync(doneFile(dir, job.id)); } catch {}
@@ -165,6 +182,7 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - When a large file needs reading, hand that to a free agent to summarize instead of reading it all yourself.
 - Some work stays with you, never delegated: live database changes, bugs tangled across many parts of the code, and anything involving secrets or credentials.
 - \`C wait --timeout 540\` (give your Bash tool a 600000 ms timeout for it; long waits save your limits): blocks until a job finishes and gives you the next one to review, oldest finish first. The agent runs the tests and build itself and reports in plain text what changed, the results and the files. Check the report against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare with any earlier job it lists under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then \`C review ID accept|send-back --note "..."\`.
+- \`C status\` shows \`practice: true\` during a dry run (the panel's Practice switch, on by default for now): plan and delegate exactly as usual — the tool logs each handoff's agent, reason and full prompt instead of launching it — but don't edit files yourself, and say in your report that it was a practice run.
 - \`C note "..."\`: a short line in the owner's log for anything he should know.
 Before you edit anything, run \`git status\`; commit only your own changes, never push or deploy. When the goal is done and every job is reviewed, finish with a short plain report for the owner: what was done, by whom, the commits, anything left open.`;
 
@@ -227,7 +245,7 @@ async function drive() {
     const prompt = resume
       ? "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal."
       : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}`;
-    const args = ["-p", "--model", "opus", "--dangerously-skip-permissions", "--output-format", "text", "--append-system-prompt", ROLE(g.dir),
+    const args = ["-p", "--model", g.model || "opus", "--dangerously-skip-permissions", "--output-format", "text", "--append-system-prompt", ROLE(g.dir),
       ...(resume ? ["--resume", g.session] : ["--session-id", g.session]), prompt];
     const reportPath = path.join(store.dir, `report-${g.id}.txt`);
     const fd = fs.openSync(reportPath, "w");
@@ -249,6 +267,16 @@ async function drive() {
       store.update((s) => { s.goal.status = "done"; s.goal.finishedAt = Date.now(); s.goal.report = report.slice(-4000); });
       store.log({ kind: "report", text: report.slice(-4000) || "(no report)" });
       return;
+    }
+    // Opus (or whatever she is on) isn't allowed on this Claude plan: drop to the best model that is
+    // and restart the goal fresh — a rejected run leaves no session, so --resume can't be used. This
+    // doesn't count as a failure.
+    const cur = store.read().goal;
+    const next = cur && cur.status === "running" ? nextModel(cur.model || "opus", report) : null;
+    if (next) {
+      store.update((s) => { if (s.goal) { s.goal.model = next; s.goal.session = randomUUID(); s.goal.started = false; } });
+      store.log({ kind: "model", text: `${modelName(cur.model || "opus")} isn't allowed on this Claude plan; Constance switched to ${modelName(next)} and started the goal over.` });
+      continue;
     }
     if (++failures >= 3) {
       store.update((s) => { s.goal.status = "failed"; s.goal.finishedAt = Date.now(); });
@@ -285,7 +313,7 @@ function recover() {
 
 function status() {
   const s = store.read(), d = readData();
-  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, ...j }) => j), agents: judgeAll(d), pace: pace(claudeOf(d)), log: store.readLog(80) });
+  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, ...j }) => j), agents: judgeAll(d), pace: pace(claudeOf(d)), practice: practiceMode(), log: store.readLog(80) });
 }
 
 const cmd = process.argv[2];

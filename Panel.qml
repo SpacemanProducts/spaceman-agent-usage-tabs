@@ -891,8 +891,16 @@ Panel {
   // She keeps working with the panel closed; the job file lets her pick up after a shell restart (recover, at load).
   property bool constanceOpen: false
   property bool constanceTyping: false
-  property var constance: ({ goal: null, jobs: [], agents: [], pace: null, log: [] })
+  property var constance: ({ goal: null, jobs: [], agents: [], pace: null, log: [], practice: true })
   property string constanceError: ""
+  // Practice mode (on by default for now): she plans and logs every handoff prompt but launches nothing.
+  readonly property bool constancePractice: userSettings.constancePractice !== undefined
+    ? userSettings.constancePractice !== false : root.setting("constancePractice", true) !== false
+  // The model she is actually running on (Opus unless the plan made her drop to a fallback).
+  readonly property string constanceModel: {
+    var m = root.constance.goal && root.constance.goal.model ? String(root.constance.goal.model) : "opus"
+    return m.charAt(0).toUpperCase() + m.slice(1)
+  }
   readonly property bool constanceActive: !!constance.goal && (constance.goal.status === "running" || constance.goal.status === "paused")
   function toggleConstance() {
     constanceOpen = !constanceOpen
@@ -932,10 +940,13 @@ Panel {
   }
   function constanceLogLine(e) {
     var who = e.agent ? constanceAgentName(e.agent) : ""
-    var head = { goal: "Goal", handoff: "Job " + e.job + " → " + who, returned: "Job " + e.job + " back from " + who,
+    var head = { goal: "Goal", handoff: "Job " + e.job + " → " + who, practice: "Practice job " + e.job + " → " + who + (e.reason ? " (" + e.reason + ")" : ""),
+                 returned: "Job " + e.job + " back from " + who, model: "Model",
                  review: "Job " + e.job + (e.verdict === "accept" ? " accepted" : " sent back"), report: "Report", paused: "Paused",
                  resumed: "Resumed", stopped: "Stopped", failed: "Failed", note: "Note" }[e.kind] || e.kind
-    return Qt.formatDateTime(new Date(Number(e.at)), "h:mm AP") + "  " + head + (e.text ? ": " + e.text : "")
+    var line = Qt.formatDateTime(new Date(Number(e.at)), "h:mm AP") + "  " + head + (e.text ? ": " + e.text : "")
+    if (e.kind === "practice") line += "\n" + String(e.prompt || "")   // the whole handoff prompt, so the owner can check it
+    return line
   }
   Process {
     id: constanceReader
@@ -2357,7 +2368,7 @@ Panel {
                     maximumLineCount: 2
                     elide: Text.ElideRight
                     text: cRow.job ? "Job " + cRow.job.id + ": " + cRow.job.task
-                      : (cRow.me ? (root.constance.pace ? "Claude Code (Opus), " + root.constance.pace.mode + " pace" : "Claude Code (Opus)")
+                      : (cRow.me ? ("Claude Code (" + root.constanceModel + ")" + (root.constance.pace ? ", " + root.constance.pace.mode + " pace" : ""))
                       : (cRow.modelData.available ? "free: " : "") + cRow.modelData.reason)
                     color: cRow.job ? root.foreground : root.dim
                     font.family: root.fontFamily
@@ -2387,7 +2398,7 @@ Panel {
                   width: parent.width
                   textFormat: Text.PlainText
                   wrapMode: Text.WordWrap
-                  maximumLineCount: modelData.kind === "report" ? 30 : 4
+                  maximumLineCount: modelData.kind === "report" ? 30 : (modelData.kind === "practice" ? 40 : 4)
                   elide: Text.ElideRight
                   text: root.constanceLogLine(modelData)
                   color: modelData.kind === "report" || modelData.kind === "review" ? root.foreground : root.dim
@@ -2395,6 +2406,23 @@ Panel {
                   font.pixelSize: Style.font.caption
                 }
               }
+            }
+
+            PanelSectionHeader { width: parent.width; text: "PRACTICE" }
+            SettingSwitch {
+              width: parent.width
+              label: "Practice mode"
+              checked: root.constancePractice
+              onToggled: root.writeSetting(["constancePractice", String(!root.constancePractice)])
+            }
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: "Dry run, on for now: she plans the goal and writes every handoff prompt to the log — which agent, why, and the full prompt — but launches nothing and changes no files."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
           }
 

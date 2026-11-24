@@ -60,3 +60,4 @@ assert.deepEqual(applyOrder({}, "qwen,claude").tabOrder, ["qwen", "claude"]);
 assert.equal(DEFAULT_ORDER.indexOf("claude"), 0); assert.ok(DEFAULT_ORDER.indexOf("mcode") > DEFAULT_ORDER.indexOf("amp"), "catalog agents come after the core eleven");
 console.log("settings-set: catalog ids ok");
 assert.deepEqual(applySetting({}, "angryRobot", "false"), { angryRobot: false }, "angry robot switch");
+assert.deepEqual(applySetting({}, "constancePractice", "false"), { constancePractice: false }, "Constance practice switch");

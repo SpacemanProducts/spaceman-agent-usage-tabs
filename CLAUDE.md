@@ -101,6 +101,12 @@ keeps the developer in flow:
   free date). Pacing is `bin/constance-pace.mjs` (delegate when burn > 1 or >= 70%, pause at 90%).
   She only runs on a goal the owner gives; the goal-less background loop is a later version.
   `bin/constance.test.mjs` runs the whole loop with fake `claude`/`grok`.
+  Practice mode (`constancePractice` setting, panel switch, ON by default for now): `delegate` only
+  logs the agent, reason and full prompt (kind `practice`) and the job is born finished — nothing
+  launches, nothing changes. Model fallback (`bin/constance-model.mjs`): a plan rejection of the
+  model ("issue with the selected model … may not have access") drops her opus→sonnet→haiku, logs
+  kind `model`, and restarts the goal on a fresh session (a rejected run leaves no session, so
+  `--resume` can't be used); other errors never downgrade her.
 
 ## Working rules
 

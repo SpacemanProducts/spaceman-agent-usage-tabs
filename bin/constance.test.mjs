@@ -22,6 +22,8 @@ const writeData = (claudeSession = 0.1, grokPct = 0.1) => fs.writeFileSync(path.
   { id: "grok", installed: true, signedIn: true, limits: [{ title: "Daily", percent: grokPct }] },
   { id: "copilot", installed: true, signedIn: true, limits: [{ title: "Monthly", percent: 0.94 }] }] }));
 writeData();
+// Practice mode is on by default; this first goal runs for real, so switch it off for now.
+fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
 // Fake grok: the done file path is in the prompt (last argument). Waits for a go-file so the test can
 // look at a running job. A read-only job only reports; an editing job writes b.txt, commits and
 // sleeps a moment first so the read-only job always finishes (and is reviewed) first.
@@ -108,5 +110,67 @@ assert.equal(run("start", "--dir", repo, "--goal", "third").status, 0);
 assert.ok(await until(() => status().goal.status === "paused"), "paused at her own limit");
 assert.match(status().goal.pauseReason, /Session at 92%/);
 run("stop");
+
+// Practice mode (the panel switch, on by default): she plans and delegates as usual, but nothing
+// launches and nothing changes — each handoff lands in the log with the agent, the reason and the
+// full prompt, and the job is born finished so she can still review it.
+fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: true }));
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent grok --files z.txt --task "add z" >> "${root}/practice.out" 2>&1
+$C delegate --agent grok --task "summarize a.txt in a few lines" >> "${root}/practice.out" 2>&1
+$C wait --timeout 30 > "${root}/practice-wait.json"
+$C review 4 accept --note "fine"
+$C wait --timeout 30 > "${root}/practice-wait2.json"
+$C review 5 accept --note "fine"
+echo "Practice report: two pieces planned, nothing launched."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "practice goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done"), "the practice goal finishes: " + JSON.stringify(status().goal));
+{
+  const ps = status();
+  assert.equal(ps.practice, true, "status reports practice mode");
+  assert.equal(ps.jobs.length, 2);
+  assert.ok(ps.jobs.every((j) => j.status === "accepted" && /practice run/.test(j.summary)), "practice jobs are born finished and reviewed");
+  assert.deepEqual(ps.jobs.map((j) => j.files), [["z.txt"], []], "one editing and one read-only handoff");
+  const plogs = ps.log.filter((l) => l.kind === "practice");
+  assert.equal(plogs.length, 2, "every handoff prompt is logged");
+  assert.equal(plogs[0].agent, "grok");
+  assert.match(plogs[0].reason, /under its limits/, "the log says why she picked that agent");
+  assert.ok(plogs[0].prompt.includes("Check:") && plogs[0].prompt.includes("done-"), "the full prompt is in the log");
+  assert.equal(plogs[1].agent, "grok"); assert.deepEqual(plogs[1].files, []);
+  assert.ok(!fs.existsSync(path.join(repo, "z.txt")), "practice launched nothing");
+  assert.equal(git("status", "--porcelain").trim(), "", "practice changed no files");
+  assert.match(ps.goal.report, /Practice report/);
+}
+
+// Model fallback: Opus isn't allowed on this plan, so she drops to Sonnet, says so in the log and
+// starts the goal over on the new model instead of failing.
+fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+if [[ "$*" == *"--model opus"* && "$*" == *"fallback goal"* ]]; then
+  echo "There's an issue with the selected model (opus). It may not exist or you may not have access to it." >&2
+  exit 1
+fi
+echo "$@" > "${root}/claude-args-fallback"
+C="node ${CLI}"
+$C delegate --agent grok --files f.txt --task "add f" >> "${root}/brain2.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 30 > "${root}/wait-fallback.json"
+$C review 6 accept --note "ok"
+echo "Fallback report: done on sonnet."
+`, { mode: 0o755 });
+assert.equal(run("start", "--dir", repo, "--goal", "fallback goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done"), "the fallback goal finishes: " + JSON.stringify(status().goal));
+{
+  const fs2 = status();
+  assert.equal(fs2.goal.model, "sonnet", "she dropped to the best allowed model");
+  const mlog = fs2.log.find((l) => l.kind === "model");
+  assert.ok(mlog && /Opus/.test(mlog.text) && /Sonnet/.test(mlog.text), "the switch is in the log: " + JSON.stringify(mlog));
+  assert.match(fs.readFileSync(path.join(root, "claude-args-fallback"), "utf8"), /--model sonnet/, "the retry ran on sonnet");
+  assert.match(fs2.goal.report, /Fallback report/);
+  assert.equal(fs2.jobs.find((j) => j.id === 6).status, "accepted", "the delegated job still ran and was reviewed");
+}
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance: tests passed");
