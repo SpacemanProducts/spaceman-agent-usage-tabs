@@ -2337,30 +2337,43 @@ Panel {
                 id: goalBox
                 width: parent.width
                 readonly property real vPad: Style.space(9)
-                readonly property real lineH: goalArea.font.pixelSize * 1.35
-                // About three lines tall, growing with the text (capped so the panel stays usable).
-                height: Math.max(lineH * 3 + vPad * 2, Math.min(lineH * 8 + vPad * 2, goalArea.contentHeight + vPad * 2))
+                // The real line height (measured), so twelve lines fit exactly before it scrolls.
+                readonly property real lineH: goalArea.contentHeight / Math.max(1, goalArea.lineCount)
+                // About three lines tall, growing with the text up to about twelve lines; past that it scrolls
+                // inside the box. There is no line or length limit: the whole goal is kept and sent.
+                height: Math.max(lineH * 3, Math.min(lineH * 12, goalArea.contentHeight)) + vPad * 2
                 radius: Style.cornerRadius
                 color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, goalArea.activeFocus ? 0.07 : 0.045)
                 border.width: 1
                 border.color: goalArea.activeFocus ? Color.accent : root.soft(root.foreground, 0.3)
                 clip: true
-                TextArea {
-                  id: goalArea
+                Flickable {
+                  id: goalFlick
                   anchors.fill: parent
                   anchors.margins: goalBox.vPad
-                  wrapMode: TextEdit.Wrap
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  placeholderText: "Tell her once, in plain words: e.g. add a dark mode switch"
-                  placeholderTextColor: root.dim
-                  activeFocusOnPress: true
-                  onActiveFocusChanged: root.constanceTyping = activeFocus
-                  Keys.onPressed: function(event) { if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) { event.accepted = true; goalArea.paste() } }
-                  Keys.onEscapePressed: { goalArea.focus = false; keyCatcher.forceActiveFocus() }
-                  // Enter makes a new line; Ctrl+Enter hands it to her (the button always works).
-                  Keys.onReturnPressed: function(event) { if (event.modifiers & Qt.ControlModifier) { event.accepted = true; root.startConstance(goalArea.text) } }
+                  clip: true
+                  contentWidth: width
+                  boundsBehavior: Flickable.StopAtBounds
+                  ScrollBar.vertical: ScrollBar { policy: goalFlick.contentHeight > goalFlick.height + 1 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
+                  // Attached so the view follows the cursor while typing or after a paste.
+                  TextArea.flickable: TextArea {
+                    id: goalArea
+                    padding: 0
+                    rightPadding: goalFlick.contentHeight > goalFlick.height + 1 ? Style.space(10) : 0
+                    background: null
+                    wrapMode: TextEdit.Wrap
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    placeholderText: "Tell her once, in plain words: e.g. add a dark mode switch"
+                    placeholderTextColor: root.dim
+                    activeFocusOnPress: true
+                    onActiveFocusChanged: root.constanceTyping = activeFocus
+                    Keys.onPressed: function(event) { if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) { event.accepted = true; goalArea.paste() } }
+                    Keys.onEscapePressed: { goalArea.focus = false; keyCatcher.forceActiveFocus() }
+                    // Enter makes a new line; Ctrl+Enter hands it to her (the button always works).
+                    Keys.onReturnPressed: function(event) { if (event.modifiers & Qt.ControlModifier) { event.accepted = true; root.startConstance(goalArea.text) } }
+                  }
                 }
                 TapHandler { acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton; onPressedChanged: if (pressed) goalArea.forceActiveFocus() }
               }
