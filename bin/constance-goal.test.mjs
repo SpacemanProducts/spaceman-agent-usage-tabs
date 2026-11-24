@@ -8,7 +8,7 @@ import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 
 const CLI = new URL("./constance.mjs", import.meta.url).pathname;
-const root = fs.mkdtempSync(path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-goal-"));
+const root = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), "constance-goal-"));
 const state = path.join(root, "state"), bin = path.join(root, "bin"), home = path.join(root, "home"), repo = path.join(home, "Projects", "repo");
 const tabs = path.join(state, "omarchy/agent-usage-tabs");
 for (const d of [tabs, bin, repo]) fs.mkdirSync(d, { recursive: true });

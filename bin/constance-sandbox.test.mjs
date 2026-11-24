@@ -4,7 +4,7 @@
 // toolchain, the rest of the system) refuse. It can write its project, its own
 // config folder and /tmp; it can't plant git hooks, reach the session bus or
 // see the ssh-agent. Stop's group kill ends a sandboxed job. Agents that can't
-// be sandboxed are refused. Uses a fake home under /var/tmp, never the real one.
+// be sandboxed are refused. Uses a fake home under the system temp folder (TMPDIR), never the real one.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -28,7 +28,7 @@ assert.equal(j.available, false); assert.match(j.reason, /can't run sandboxed: b
 
 if (!bwrapWorks()) { console.log("constance-sandbox: bwrap can't run here — escape tests skipped (and no agent would launch)"); process.exit(0); }
 
-const base = fs.mkdtempSync(path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-box-"));
+const base = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), "constance-box-"));
 const home = path.join(base, "home"), proj = path.join(home, "Projects", "app"), other = path.join(home, "Projects", "other");
 const tmp = path.join(base, "jobtmp"); fs.mkdirSync(tmp);
 const put = (p, t = "keep\n") => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, t); };
@@ -46,6 +46,8 @@ execFileSync("git", ["-C", proj, "init", "-q"]);
 const env = { ...process.env, HOME: home, SSH_AUTH_SOCK: "/run/user/1000/ssh-agent.sock" };
 
 // The "agent": a shell that tries everything and reports, one line per attempt.
+// rm -rf succeeds on a path it can't see (when the temp folder is /tmp, the sandbox's own /tmp
+// hides it), so that attempt only counts as "ok" if the victim was visible and is really gone.
 const attempts = `
 try() { if eval "$2" 2>/dev/null; then echo "$1=ok"; else echo "$1=blocked"; fi; }
 try rm-docs "rm -f '${home}/Documents/taxes.txt' && [ ! -e '${home}/Documents/taxes.txt' ] && ls '${home}/Documents' >/dev/null"
@@ -59,7 +61,7 @@ try rm-tool "rm '${home}/.local/bin/tool'"
 try mv-tool "mv '${home}/.local/bin/tool' '${proj}/stolen'"
 try rm-outside "rm '${base}/outside/victim.txt'"
 try mv-outside "mv '${base}/outside/victim.txt' '${proj}/moved.txt'"
-try rmrf-outside "rm -rf '${base}/outside'"
+try rmrf-outside "[ -e '${base}/outside/victim.txt' ] && rm -rf '${base}/outside' && [ ! -e '${base}/outside' ]"
 try write-project "echo hi > '${proj}/hello.txt'"
 try write-own-config "echo x > '${home}/.grok/note'"
 try write-tmp "echo x > /tmp/scratch"

@@ -9,7 +9,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
 
-const root = fs.mkdtempSync(path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-wt-test-"));
+const root = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), "constance-wt-test-"));
 const repo = path.join(root, "repo");
 // Worktrees go in this test's own folder, never the real /var/tmp/constance-worktrees.
 process.env.CONSTANCE_WORKTREES = path.join(root, "worktrees");
