@@ -3,6 +3,11 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.40.0 - 2026-11-24
+- **Constance learns between goals:** a lessons file in her state folder (outside any repo) is seeded with nine hard-won rules — keep free agents busy with a ready-task queue, watch the terminal's "finished" notification as well as the done file, check every report against its handoff, demand proof for "it's just an artifact" and "nothing's wrong", agents never touch the real home (tests use a mktemp fake home, backups never /tmp), one agent per project folder, per-project rules live in the project's own rules file, weaker models get one narrow task. She reads the lessons before every goal, adds short lessons herself with `C lesson`, and they are advice only — they can never override her core rules.
+- **Per-project rules:** a `.constance/rules.md` in a project is read fresh and added to her goal prompt and every handoff for that project.
+- **Guardrails for the free agents:** every handoff now carries an allowed-files list, bans on `mv`/`rm` outside the project, `rm -rf`, `git reset --hard`, force-push and branch deletes, and a stop-and-report rule for surprises or scope growth. After each run she checks the diff touched only allowed files and that the home and project lists match a pre-run snapshot; a violation reverts the bad commit (never a reset), cleans stray files, quarantines folders created in the projects dir, logs a lesson and counts a strike — struck agents get smaller tasks only (3 files, then 1). `C agents` and `C status` show the strikes.
+
 ## 1.39.0 - 2026-11-24
 - **First-run welcome screen:** the first time the panel opens after install it shows a Welcome screen with three tips (the glanceable meters and celebrations, tabs/models/drag-order and the header buttons, and the privacy rules) and a "Got it" button that dismisses it for good. Until then it reappears on each open; auto-opened reset panels never trigger it.
 - **Durable backups:** `bin/backup.sh` writes a timestamped tarball of the plugin folder plus `shell.json` into `~/.local/share/agent-usage-tabs-backups/` (keeping the newest 10) instead of /tmp, and CLAUDE.md now requires it before editing.
