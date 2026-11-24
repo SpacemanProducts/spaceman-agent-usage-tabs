@@ -904,6 +904,7 @@ Panel {
   // She keeps working with the panel closed; the job file lets her pick up after a shell restart (recover, at load).
   property bool constanceOpen: false
   property bool constanceTyping: false
+  onConstanceOpenChanged: if (!constanceOpen) { goalArea.focus = false; constanceTyping = false }
   property var constance: ({ goal: null, jobs: [], agents: [], pace: null, log: [], practice: true, queue: [], signals: [] })
   property string constanceError: ""
   // Practice mode (on by default for now): she plans and logs every handoff prompt but launches nothing.
@@ -1077,7 +1078,7 @@ Panel {
     onTriggered: if (root.autoOpened && root.opened) root.close()
   }
 
-  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false; settingsLoaded = false } else {
+  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false; welcomeOpen = false; settingsLoaded = false; goalArea.focus = false; constanceTyping = false } else {
     daysOpen = false
     modelsExpanded = false
     settingsOpen = false
@@ -2339,11 +2340,14 @@ Panel {
                   font.pixelSize: Style.font.bodySmall
                   placeholderText: "Tell her once, in plain words: e.g. add a dark mode switch"
                   placeholderTextColor: root.dim
+                  activeFocusOnPress: true
                   onActiveFocusChanged: root.constanceTyping = activeFocus
+                  Keys.onPressed: function(event) { if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) { event.accepted = true; goalArea.paste() } }
                   Keys.onEscapePressed: { goalArea.focus = false; keyCatcher.forceActiveFocus() }
                   // Enter makes a new line; Ctrl+Enter hands it to her (the button always works).
                   Keys.onReturnPressed: function(event) { if (event.modifiers & Qt.ControlModifier) { event.accepted = true; root.startConstance(goalArea.text) } }
                 }
+                TapHandler { acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton; onPressedChanged: if (pressed) goalArea.forceActiveFocus() }
               }
               FolderPicker { width: parent.width; plainOthers: true }
               Row {

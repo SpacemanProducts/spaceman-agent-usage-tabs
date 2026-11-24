@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.42.1 - 2026-11-24
+- **Constance's goal box takes keyboard input again:** clicking it focuses the text area, so typing, Ctrl+V, Ctrl+Shift+V and right-click paste work, and leaving the view or closing the panel releases the keys back to the panel.
+
 ## 1.42.0 - 2026-11-24
 - **Constance's agents run sandboxed:** every worker she launches runs inside bubblewrap. It can write only the project, its own config and login folders, and a fresh temp folder. Your home starts empty inside (no `~/.ssh`, `~/.config`, Documents, other projects, or other agents' or Claude's logins), the rest of the system is read-only, and it gets no session bus, ssh-agent or display. The project's `.git/config` and `.git/hooks` are read-only. An agent that can't be sandboxed is never launched with its prompts off, and without `bwrap` none are. Copilot, Cursor and Antigravity keep their logins in the desktop keyring, so they stay off until you allow each one (`constanceKeyringAgents` in settings.json). Allowing one gives it read access to the whole keyring. Checked live with all six CLIs; `bin/constance-sandbox.test.mjs` shows a sandboxed process can't delete or move anything outside its project.
 
