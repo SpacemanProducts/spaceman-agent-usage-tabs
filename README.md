@@ -240,6 +240,14 @@ you give her a goal.
 - **Who she uses:** only agents that are installed, signed in, readable, under every limit (below the red line, 85%) and free. Claude
   is Constance herself, so it is never a worker; bring-your-own-key agents are never used, and Devin only on its free SWE-2 Flash model
   while that is free. She re-checks right before every handoff, and no agent is the default.
+- **Sandbox:** every agent she starts runs inside bubblewrap (`bwrap`), because its permission prompts are off. It can write only
+  the project folder, its own config and login folders, and a fresh temp folder. The rest of the system is read-only and your home
+  starts empty: `~/.ssh`, `~/.config` (outside its own folder), Documents, your other projects, other agents' logins and Claude's
+  login aren't there. It gets no session bus, ssh-agent or display, and the project's `.git/config` and `.git/hooks` are read-only so
+  it can't plant a command that runs later outside. Copilot, Cursor and Antigravity keep their logins in the desktop keyring, and
+  the Linux keyring can't limit an app to its own entry. So they are off until you list them in `settings.json`, for example
+  `"constanceKeyringAgents": ["copilot"]`. A listed agent reaches the keyring through a filtered bus proxy, which means it can read
+  every secret in your keyring. An agent that can't be sandboxed is never launched. Without `bwrap`, none are.
 - **Handoffs:** each agent starts headless in the project folder with the same skip-permissions flag as Start. The prompt starts with a
   folder check, tells it to run `git status` first and commit only its own changes, lists the only files it may edit (two jobs never
   share files), and ends with a done file (`.constance/done-<job>.json`, kept out of git) holding a summary and the commit.
@@ -431,7 +439,7 @@ agent's live list decides. Delete a model that is truly gone. Edits apply on the
 - Everything the plugin keeps is in `~/.local/state/omarchy/agent-usage-tabs/`, with two exceptions it is told to make: the
   handoff note (`handoff/` and one line in `AGENTS.md`, in the repo you are working in; off switch in the gear settings) and
   `~/.claude-squad/config.json` and `~/.config/omarchy/defaults/agent`, which Claude Squad and the default-agent link write.
-- Constance runs agents only after you give her a goal, with permission prompts off, in the folder you picked. Their done files go
+- Constance runs agents only after you give her a goal, with permission prompts off, inside a bubblewrap sandbox, in the folder you picked. Their done files go
   in that folder's `.constance/` (added to `.git/info/exclude`); her jobs, log and agent output stay in the state folder above.
 - The sounds (the cha-ching and the surprise jackpot) and the notification pictures (the
   cash-burst and the surprise lightning-burst) are self-made (see `sounds/make-*.py` and

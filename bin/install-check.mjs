@@ -56,6 +56,8 @@ else missing(`state folder ${STATE_DIR}`, "not writable — check permissions on
 // Optional pieces, each with what it unlocks.
 const optional = [
   ["notify-send", "desktop notifications (alerts and celebrations)"],
+  ["bwrap", "Constance's sandbox: without bubblewrap she launches no agents"],
+  ["xdg-dbus-proxy", "Constance's sandbox: keyring-login agents (Copilot, Cursor, Antigravity) when you allow them"],
   ["pw-play", "reset sound via PipeWire"],
   ["paplay", "reset sound via PulseAudio"],
   ["ffplay", "reset sound via ffmpeg"],

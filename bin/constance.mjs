@@ -20,6 +20,7 @@
 //   recover                     panel load: restart the driver if a goal is active and it isn't running
 //   drive                       (internal) the background loop that runs her and paces her
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -32,6 +33,7 @@ import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, gua
 import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
 import { NotifyParser, handleNotification, recentSignals } from "./constance-notify.mjs";
 import { addTask, peekNext, finishTask, removeTask, queueView } from "./constance-queue.mjs";
+import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -67,6 +69,20 @@ function freshData() {
 }
 const claudeOf = (d) => (d.agents || []).find((a) => a.id === "claude");
 
+// Agents the owner lets reach the desktop keyring from inside the sandbox
+// (settings.json constanceKeyringAgents; none by default — see constance-sandbox.mjs).
+function keyringAgents() {
+  try { const v = JSON.parse(fs.readFileSync(path.join(STATE, "settings.json"), "utf8")).constanceKeyringAgents; return Array.isArray(v) ? v.map(String) : []; }
+  catch { return []; }
+}
+// Why an agent can't run sandboxed right now ("" when it can): judge() refuses it otherwise.
+function boxProblem(id) {
+  if (!LAUNCH[id]) return "";
+  if (!bwrapWorks()) return "bubblewrap (bwrap) is missing or can't run here";
+  return sandboxProblem(id, keyringAgents());
+}
+const judged = (d) => judgeAll(d, Date.now(), { sandbox: boxProblem });
+
 // Practice mode (the panel's switch, on by default for now): a dry run. She still plans the goal and
 // picks agents, but delegate() only writes each handoff's agent, reason and full prompt into the log —
 // nothing launches and nothing changes. Missing settings.json means practice is on.
@@ -78,6 +94,12 @@ function practiceMode() {
 // ---------------------------------------------------------------- jobs
 // Bring statuses up to date: a done file means finished; a process that ended without one is finished too
 // (with a note), so it still gets reviewed.
+// A job's sandbox /tmp is only ever the folder handOut made for it; it goes when the job ends.
+function dropJobTmp(j) {
+  const t = String(j.tmp || "");
+  if (t.startsWith(path.join(os.tmpdir(), "constance-job-"))) { try { fs.rmSync(t, { recursive: true, force: true }); } catch {} }
+}
+
 function sweep() {
   const changed = store.update((s) => {
     const changed = [];
@@ -94,7 +116,7 @@ function sweep() {
     }
     return changed;
   });
-  for (const j of changed) guardFinished(j);
+  for (const j of changed) { guardFinished(j); dropJobTmp(j); }
   return changed;
 }
 
@@ -147,7 +169,7 @@ function handOut({ agent, task, files = [] }) {
   const g = store.read().goal;
   if (!g || g.status !== "running") throw new Error("No goal is running (stopped or paused), so nothing is handed out.");
   if (!agent || !task) throw new Error("delegate needs --agent ID and --task TEXT");
-  const verdict = judgeAll(freshData()).find((a) => a.id === agent);
+  const verdict = judged(freshData()).find((a) => a.id === agent);
   if (!verdict?.available) throw new Error(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
   // Guardrail strikes shrink what this agent may touch: after a violation it gets
@@ -184,9 +206,25 @@ function handOut({ agent, task, files = [] }) {
   store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.guardBefore = before; });
   const logPath = path.join(store.dir, `job-${job.id}.log`);
   const fd = fs.openSync(logPath, "w");
-  const [cmd, ...args] = launchCommand(agent, job.prompt);
-  // A non-seated account's login lives in its own home: pin the CLI to it.
-  const child = spawn(cmd, args, { cwd: dir, env: { ...ENV, ...accountEnv(agent, job.account?.id) }, detached: true, stdio: ["ignore", fd, fd] });
+  // A non-seated account's login lives in its own home: pin the CLI to it, and
+  // that home is the agent's own, so it is writable inside the sandbox too.
+  const acctEnv = accountEnv(agent, job.account?.id);
+  // Prompts are off, so the agent only ever runs inside the sandbox: write access
+  // to this project, its own config/login folders and a fresh temp folder. If it
+  // can't be sandboxed, nothing launches.
+  let box;
+  try {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `constance-job-${job.id}-`));
+    store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.tmp = tmp; });
+    box = sandboxLaunch(launchCommand(agent, job.prompt), { agent, dir, tmp, env: { ...ENV, ...acctEnv }, extraRw: Object.values(acctEnv), keyringAgents: keyringAgents() });
+  } catch (e) {
+    fs.closeSync(fd);
+    store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "stopped"; j.summary = `(not launched: ${e.message})`; });
+    store.log({ kind: "note", job: job.id, agent, text: `Job ${job.id} not launched: ${e.message}` });
+    throw new Error(`${agent} can't run sandboxed, so it was not launched: ${e.message}`);
+  }
+  const [cmd, ...args] = box.cmd;
+  const child = spawn(cmd, args, { cwd: dir, env: box.env, detached: true, stdio: ["ignore", fd, fd] });
   child.unref();
   store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "running"; j.pid = child.pid; j.startedAt = Date.now(); j.log = logPath; });
   store.log({ kind: "handoff", job: job.id, agent, account: verdict.account, files, text: task });
@@ -490,6 +528,7 @@ function stopAll() {
     for (const j of s.jobs) if (j.status === "running" || j.status === "waiting") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; }
     return JSON.parse(JSON.stringify(s));
   });
+  for (const j of s.jobs) if (j.status === "stopped") dropJobTmp(j);
   const g = s.goal;
   if (g && alive(g.brainPid, "claude")) killGroup(g.brainPid);
   if (g && alive(g.driverPid, "constance.mjs")) killGroup(g.driverPid);
@@ -510,7 +549,7 @@ function recover() {
 
 function status() {
   const s = store.read(), d = readData();
-  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judgeAll(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {},
+  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {},
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(80) });
 }
 
@@ -521,7 +560,7 @@ if (process.argv[1] === SELF) {
   else if (cmd === "status") status();
   else if (cmd === "agents") {
     const d = freshData(), guards = store.read().guards || {};
-    out(judgeAll(d).map((a) => `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}`).join("\n"));
+    out(judged(d).map((a) => `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}`).join("\n"));
   }
   else if (cmd === "pace") out(pace(claudeOf(freshData())));
   else if (cmd === "jobs") { sweep(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }

@@ -9,7 +9,9 @@ import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 
 const CLI = new URL("./constance.mjs", import.meta.url).pathname;
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-e2e-"));
+// Jobs run sandboxed, where /tmp is a fresh folder per job: the fake agents and the go-file live in
+// /var/tmp, which the sandbox shows read-only (the repo itself is the job's writable project).
+const root = fs.mkdtempSync(path.join(fs.existsSync("/var/tmp") ? "/var/tmp" : os.tmpdir(), "constance-e2e-"));
 const state = path.join(root, "state"), bin = path.join(root, "bin"), repo = path.join(root, "repo");
 const tabs = path.join(state, "omarchy/agent-usage-tabs");
 fs.mkdirSync(tabs, { recursive: true }); fs.mkdirSync(bin); fs.mkdirSync(repo);
@@ -29,6 +31,7 @@ fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePra
 // "Only edit these files: X." and commits it — except "add g", which also leaves a stray file.
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -e "${root}/home/home-marker" ]] && echo "sandboxed=no" || echo "sandboxed=yes"
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 if grep -qi "read-only job" <<<"$p"; then
   echo '{"summary": "cause: a.txt has no b", "commit": "", "files": []}' > "$f"
@@ -66,6 +69,7 @@ echo "Report: b added by grok."
 // ever listens to the real session bus (the owner's own notifications).
 const fakeHome = path.join(root, "home"); fs.mkdirSync(path.join(fakeHome, "Projects"), { recursive: true });
 fs.writeFileSync(path.join(bin, "busctl"), "#!/bin/bash\nsleep 30\n", { mode: 0o755 });
+fs.writeFileSync(path.join(fakeHome, "home-marker"), "the real (fake) home is visible\n");
 const env = { ...process.env, HOME: fakeHome, SQUAD_PROJECTS: path.join(fakeHome, "Projects"), XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}` };
 const run = (...a) => spawnSync("node", [CLI, ...a], { env, encoding: "utf8" });
 const status = () => JSON.parse(run("status").stdout);
@@ -88,6 +92,8 @@ assert.equal(s.jobs[0].agent, "grok"); assert.equal(s.jobs[0].status, "accepted"
 assert.equal(s.jobs[0].summary, "cause: a.txt has no b"); assert.deepEqual(s.jobs[0].files, [], "the first handoff was read-only");
 assert.equal(s.jobs[1].agent, "grok"); assert.equal(s.jobs[1].status, "accepted"); assert.equal(s.jobs[1].summary, "added b");
 const out = fs.readFileSync(path.join(root, "brain.out"), "utf8");
+// Every job ran inside the sandbox: its home was empty, so the marker in the owner's home wasn't there.
+assert.match(fs.readFileSync(s.jobs[1].log, "utf8"), /sandboxed=yes/, "the job ran sandboxed");
 assert.match(out, /refused-busy/, "two jobs never share files"); assert.match(out, /overlap job 2/);
 assert.match(out, /refused-copilot/, "an agent near its limit is never tasked");
 const w = JSON.parse(fs.readFileSync(path.join(root, "wait.json"), "utf8"));
@@ -349,6 +355,11 @@ watcher.kill("SIGKILL");
   // The unrelated chat message in the same stream never reached any file.
   const files = [notifyJsonl, path.join(tabs, "constance", "log.jsonl")].map((f) => fs.readFileSync(f, "utf8")).join("");
   assert.ok(!/lunch|Slack/.test(files), "an unrelated notification is never written anywhere");
+}
+// Every finished or stopped job removed its own sandbox /tmp.
+{
+  const jobsNow = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "jobs.json"), "utf8")).jobs;
+  for (const j of jobsNow) if (j.tmp && ["finished", "accepted", "sent back", "stopped"].includes(j.status)) assert.ok(!fs.existsSync(j.tmp), `job ${j.id}'s temp folder is gone`);
 }
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance: tests passed");

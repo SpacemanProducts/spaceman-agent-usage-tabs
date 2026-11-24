@@ -7,7 +7,8 @@
 //   - it reports at least one limit, and the account she would use is under RED (a reading we can't
 //     see can't prove it is under its limit);
 //   - the reading is fresh (data.json written in the last FRESH_MS);
-//   - it can't start charging: no bring-your-own-key agents, and Devin only while SWE-2 Flash is free.
+//   - it can't start charging: no bring-your-own-key agents, and Devin only while SWE-2 Flash is free;
+//   - it can run inside the sandbox (bin/constance-sandbox.mjs), because it runs with its prompts off.
 // Pure functions; bin/constance.mjs feeds them data.json.
 import fs from "node:fs";
 import os from "node:os";
@@ -59,12 +60,16 @@ function statsOf(limits) {
 // { id, name, account, accountId, available, reason, worst, resetsAt, blockTitle } for one agent.
 // `account`/`accountId` name the login she would use ("" / null for a
 // single-account agent, so those look exactly as before).
-export function judge(a, { now = Date.now(), generatedAt = now } = {}) {
+export function judge(a, { now = Date.now(), generatedAt = now, sandbox = null } = {}) {
   const base = { id: a.id, name: a.name || a.id, account: "", accountId: null, available: false, worst: null, resetsAt: null, blockTitle: null };
   const no = (reason) => ({ ...base, reason });
   if (a.id === "claude") return no("Constance herself (the paid plan)");
   if (a.installed === false) return no("not installed");
   if (!LAUNCH[a.id]) return no("no headless launch known");
+  // Every worker runs with its prompts off, so only inside the sandbox: one
+  // that can't be sandboxed is never available (bin/constance-sandbox.mjs).
+  const boxed = sandbox ? sandbox(a.id) : "";
+  if (boxed) return no(`can't run sandboxed: ${boxed}`);
   if (a.usageType === "byok_no_limits") return no("bring-your-own-key: would charge");
   if (a.id === "devin" && now >= DEVIN_FREE_UNTIL) return no("free SWE-2 Flash window ended: would charge");
   if (a.signedIn === false) return no("sign-in needed");
@@ -86,9 +91,9 @@ export function judge(a, { now = Date.now(), generatedAt = now } = {}) {
   return { ...r, available: true, reason: `under its limits (fullest ${Math.round(pick.st.worst * 100)}%)` };
 }
 
-export function judgeAll(data, now = Date.now()) {
+export function judgeAll(data, now = Date.now(), { sandbox = null } = {}) {
   const generatedAt = Number(data?.generatedAt) || 0;
-  return (data?.agents || []).map((a) => judge(a, { now, generatedAt }));
+  return (data?.agents || []).map((a) => judge(a, { now, generatedAt, sandbox }));
 }
 
 // The env that pins a CLI to a registered account's home, or {} when the job

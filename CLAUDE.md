@@ -117,6 +117,19 @@ keeps the developer in flow:
   bodies are never stored, foreign runs keep no text, and the watcher exits when the goal ends) and has a real ready-task queue
   (`bin/constance-queue.mjs`, `C queue`, auto-handed on review accept, shown in
   the panel's READY QUEUE section).
+  Since 1.42.0 every worker runs in bubblewrap (`bin/constance-sandbox.mjs`, test
+  `constance-sandbox.test.mjs`): writable = project, the agent's own config/login folders
+  (`PROFILES`), a per-job /tmp. The home folder is an empty tmpfs with only the toolchains
+  bound back read-only. There is no bus, ssh-agent or display, and `.git/config` and
+  `.git/hooks` are read-only. `judge()` refuses any agent that can't be sandboxed, and
+  without bwrap none launch. Keyring-login agents (copilot, cursor, antigravity) need the
+  owner's opt-in via `constanceKeyringAgents` in settings.json, because the filtered bus
+  proxy (`--talk=org.freedesktop.secrets`) exposes the whole keyring. Cursor only looks
+  in the keyring when DISPLAY is set, so its profile sets a dead `:99`.
+  Checked live 2026-11-24: all six sign in sandboxed. Devin, Copilot and Antigravity
+  finished a tiny job; Grok wrote it, then hit its free limit; Codex and Cursor were at
+  their free limits. Devin and Copilot ran rm/mv on outside canaries and got EROFS.
+  Antigravity refused to run the command.
   Practice mode (`constancePractice` setting, panel switch, ON by default for now): `delegate` only
   logs the agent, reason and full prompt (kind `practice`) and the job is born finished — nothing
   launches, nothing changes. Model fallback (`bin/constance-model.mjs`): a plan rejection of the
