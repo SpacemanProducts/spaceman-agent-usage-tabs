@@ -213,6 +213,30 @@ never came up or its program exited at once.
 **Only one Squad window can be open at a time:** a second launch says so, because two `cs` processes overwrite each other's saved
 sessions. The lock goes away when the window closes, even if it crashed.
 
+### Constance, the quarterback
+
+The big **C** button next to **CS** opens **Constance**. Tell her a goal once, in plain words ("add a dark mode switch"), pick
+the folder, and press **Give it to Constance**. She runs in the background as Claude Code (Opus) on your Claude plan, breaks the goal
+into pieces, hands the routine ones to free agents, reviews everything that comes back, and writes a short report. She only runs when
+you give her a goal.
+
+- **Who she uses:** only agents that are installed, signed in, readable, under every limit (below the red line, 85%) and free. Claude
+  is Constance herself, so it is never a worker; bring-your-own-key agents are never used, and Devin only on its free SWE-2 Flash model
+  while that is free. She re-checks right before every handoff, and no agent is the default.
+- **Handoffs:** each agent starts headless in the project folder with the same skip-permissions flag as Start. The prompt starts with a
+  folder check, tells it to run `git status` first and commit only its own changes, lists the only files it may edit (two jobs never
+  share files), and ends with a done file (`.constance/done-<job>.json`, kept out of git) holding a summary and the commit.
+- **Review:** finished jobs are reviewed one at a time in the order they finished; she reads the diff, runs the tests and the build,
+  checks a job against an earlier one that changed the same files, and fixes it or sends it back.
+- **Her own limits:** she compares how much of her session and weekly limit is used with how much of each window has gone. Spending
+  faster than the time allows (or past 70%), she keeps only planning and review and delegates the rest; at 90% she pauses and picks the
+  goal back up after the reset, so she never runs out.
+- **Stop** halts her and every job at once. The screen lists every agent and what it is working on, and the **log** shows each task she
+  handed out, to whom, and what came back. Her job file (`constance/jobs.json` in the state folder) lets her pick up where she left off
+  after a shell restart.
+
+A background loop that works without a goal is planned for later.
+
 ### The agent catalog
 
 Beyond the eleven agents it reads directly, the plugin has a built-in catalog (`agents-catalog.json`) of CLI agents. An agent is
@@ -367,6 +391,8 @@ agent's live list decides. Delete a model that is truly gone. Edits apply on the
 - Everything the plugin keeps is in `~/.local/state/omarchy/agent-usage-tabs/`, with two exceptions it is told to make: the
   handoff note (`handoff/` and one line in `AGENTS.md`, in the repo you are working in; off switch in the gear settings) and
   `~/.claude-squad/config.json` and `~/.config/omarchy/defaults/agent`, which Claude Squad and the default-agent link write.
+- Constance runs agents only after you give her a goal, with permission prompts off, in the folder you picked. Their done files go
+  in that folder's `.constance/` (added to `.git/info/exclude`); her jobs, log and agent output stay in the state folder above.
 - The sounds (the cha-ching and the surprise jackpot) and the notification pictures (the
   cash-burst and the surprise lightning-burst) are self-made (see `sounds/make-*.py` and
   `notify/*.svg`) and released to the public domain.

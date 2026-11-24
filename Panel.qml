@@ -149,9 +149,9 @@ Panel {
     ? userSettings.skipPermissions !== false : root.setting("skipPermissions", true) !== false
   // Settings (the gear), + (add an account), >_ (start the default agent) and CS (Claude Squad) each open as their own screen: the chips and usage are
   // hidden and the header has a Back button. Only one is open at a time.
-  readonly property bool subView: squadOpen || addOpen || settingsOpen || agentHereOpen
-  function leaveSubView() { squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false }
-  function openSettings() { settingsOpen = true; squadOpen = false; addOpen = false; agentHereOpen = false }
+  readonly property bool subView: squadOpen || addOpen || settingsOpen || agentHereOpen || constanceOpen
+  function leaveSubView() { squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false }
+  function openSettings() { settingsOpen = true; squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false }
   readonly property bool showDetail: !!agent && !settingsOpen && !subView
   // An agent with two or more accounts lists each one instead of a single set of limits.
   readonly property bool hasAccounts: !!agent && Array.isArray(agent.accounts) && agent.accounts.length > 1
@@ -446,7 +446,7 @@ Panel {
   // add-account flow for it in a terminal. (It used to jump straight to the selected tab's provider.)
   property bool addOpen: false
   readonly property var addProviders: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "grok", name: "Grok" }]
-  function toggleAdd() { addOpen = !addOpen; if (addOpen) { squadOpen = false; settingsOpen = false; agentHereOpen = false } }
+  function toggleAdd() { addOpen = !addOpen; if (addOpen) { squadOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false } }
   function addSubscription(provider) {
     if (!root.bar || !provider) return
     root.bar.run("omarchy-launch-floating-terminal-with-presentation bash " + pluginDir + "/bin/add-account.sh " + provider)
@@ -618,7 +618,7 @@ Panel {
   function toggleAgentHere() {
     agentHereOpen = !agentHereOpen
     if (agentHereOpen) {
-      squadOpen = false; addOpen = false; settingsOpen = false
+      squadOpen = false; addOpen = false; settingsOpen = false; constanceOpen = false
       squadRepo = ""; squadNewName = ""
       if (!repoLister.running) repoLister.running = true
       if (!zenityCheck.running) zenityCheck.running = true
@@ -836,7 +836,7 @@ Panel {
   }
   function toggleSquad() {
     squadOpen = !squadOpen
-    if (squadOpen) { addOpen = false; settingsOpen = false; agentHereOpen = false }
+    if (squadOpen) { addOpen = false; settingsOpen = false; agentHereOpen = false; constanceOpen = false }
     if (squadOpen) {
       squadRepo = ""; squadNewName = ""
       if (!repoLister.running) repoLister.running = true
@@ -877,6 +877,85 @@ Panel {
     squadLauncher.command = ["bash", pluginDir + "/bin/launch-wait.sh", "org.omarchy.squad", "20"].concat(squadCommand())
     squadLauncher.running = true
   }
+
+  // Constance (the C button): the owner gives her a goal; bin/constance.mjs runs her in the background as Claude Code
+  // (Opus) on his paid plan, hands routine pieces to free agents under their limits, reviews what comes back and
+  // reports. This screen shows the goal box, every agent and what it is working on, her pace, Stop, and the log.
+  // She keeps working with the panel closed; the job file lets her pick up after a shell restart (recover, at load).
+  property bool constanceOpen: false
+  property bool constanceTyping: false
+  property var constance: ({ goal: null, jobs: [], agents: [], pace: null, log: [] })
+  property string constanceError: ""
+  readonly property bool constanceActive: !!constance.goal && (constance.goal.status === "running" || constance.goal.status === "paused")
+  function toggleConstance() {
+    constanceOpen = !constanceOpen
+    if (constanceOpen) {
+      squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false
+      constanceError = ""
+      if (!repoLister.running) repoLister.running = true
+      if (!zenityCheck.running) zenityCheck.running = true
+      refreshConstance()
+    }
+  }
+  function refreshConstance() { if (!constanceReader.running) constanceReader.running = true }
+  function startConstance(goal) {
+    var text = String(goal || "").trim()
+    if (text === "" || constanceStarter.running) return
+    constanceError = ""
+    var where = squadNewName !== "" ? ["--new", squadNewName] : ["--dir", squadRepo !== "" ? squadRepo : root.home]
+    constanceStarter.command = ["node", pluginDir + "/bin/constance.mjs", "start", "--goal", text].concat(where)
+    constanceStarter.running = true
+  }
+  function stopConstance() { constanceStopper.running = true }
+  function constanceAgentName(id) {
+    for (var i = 0; i < rawAgents.length; i++) if (rawAgents[i].id === id) return rawAgents[i].name || id
+    return id
+  }
+  // The job an agent is running right now, or null.
+  function constanceJobOf(id) {
+    var js = constance.jobs || []
+    for (var i = 0; i < js.length; i++) if (js[i].agent === id && js[i].status === "running") return js[i]
+    return null
+  }
+  function constanceGoalLine() {
+    var g = constance.goal
+    if (!g) return ""
+    var st = { running: "Working on", paused: "Paused on", done: "Done", stopped: "Stopped", failed: "Couldn't finish" }[g.status] || g.status
+    return st + ": " + g.text
+  }
+  function constanceLogLine(e) {
+    var who = e.agent ? constanceAgentName(e.agent) : ""
+    var head = { goal: "Goal", handoff: "Job " + e.job + " → " + who, returned: "Job " + e.job + " back from " + who,
+                 review: "Job " + e.job + (e.verdict === "accept" ? " accepted" : " sent back"), report: "Report", paused: "Paused",
+                 resumed: "Resumed", stopped: "Stopped", failed: "Failed", note: "Note" }[e.kind] || e.kind
+    return Qt.formatDateTime(new Date(Number(e.at)), "h:mm AP") + "  " + head + (e.text ? ": " + e.text : "")
+  }
+  Process {
+    id: constanceReader
+    command: ["node", root.pluginDir + "/bin/constance.mjs", "status"]
+    stdout: StdioCollector {
+      onStreamFinished: { try { var d = JSON.parse(String(text || "")); if (d && typeof d === "object") root.constance = d } catch (e) {} }
+    }
+  }
+  Process {
+    id: constanceStarter
+    running: false
+    stderr: StdioCollector { id: constanceStarterErr }
+    onExited: function(code) {
+      if (code !== 0) root.constanceError = String(constanceStarterErr.text).trim() || ("Constance couldn't start (exit " + code + ").")
+      else goalField.text = ""
+      root.refreshConstance()
+    }
+  }
+  Process {
+    id: constanceStopper
+    command: ["node", root.pluginDir + "/bin/constance.mjs", "stop"]
+    running: false
+    onExited: root.refreshConstance()
+  }
+  // At load (a shell restart): if she was on a goal and her driver isn't running, pick it back up.
+  Process { id: constanceRecover; command: ["node", root.pluginDir + "/bin/constance.mjs", "recover"]; running: true }
+  Timer { interval: 3000; running: root.constanceOpen && root.opened; repeat: true; triggeredOnStart: true; onTriggered: root.refreshConstance() }
 
   function refreshNow() { if (!collector.running) collector.running = true }
   // A window whose reset time has passed is reset: 0%, no hit, no red, until fresh data arrives
@@ -942,7 +1021,7 @@ Panel {
     onTriggered: if (root.autoOpened && root.opened) root.close()
   }
 
-  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false; agentHereOpen = false } else {
+  onOpenedChanged: if (!opened) { autoOpened = false; autoCloseTimer.stop(); squadOpen = false; addOpen = false; agentHereOpen = false; constanceOpen = false } else {
     daysOpen = false
     modelsExpanded = false
     settingsOpen = false
@@ -1093,7 +1172,7 @@ Panel {
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
     // Test hook: show exactly one screen: "main", "settings", "add", "squad" or "agent" (used to retake the README screenshots).
-    function view(name: string): string { root.leaveSubView(); if (name === "settings") root.openSettings(); else if (name === "add") root.toggleAdd(); else if (name === "squad") root.toggleSquad(); else if (name === "agent") root.toggleAgentHere(); return name }
+    function view(name: string): string { root.leaveSubView(); if (name === "settings") root.openSettings(); else if (name === "add") root.toggleAdd(); else if (name === "squad") root.toggleSquad(); else if (name === "agent") root.toggleAgentHere(); else if (name === "constance") root.toggleConstance(); return name }
     function settings(): string { if (root.settingsOpen) root.settingsOpen = false; else root.openSettings(); return root.settingsOpen ? "open" : "closed" }
     // Test hook: show the picker as if cs were missing (or present) without running the check.
     function squadPreview(state: string): string { root.squadOpen = true; root.squadHasCs = state; return state }
@@ -1111,6 +1190,9 @@ Panel {
     function agentCmd(): string { return root.agentHereReady ? JSON.stringify(root.agentHereCommand()) : "not ready" }
     function folderPickerState(): string { return JSON.stringify({ ready: root.folderPickerReady, visible: root.startFolderRepos(), hidden: root.hiddenFolderRepos(), entries: root.folderPickerEntries }) }
     function squad(): string { root.toggleSquad(); return root.squadOpen ? "open" : "closed" }
+    function constance(): string { root.toggleConstance(); return root.constanceOpen ? "open" : "closed" }
+    // Test hook: save an image of the panel's contents alone (no other window can appear in it).
+    function shot(file: string): string { column.grabToImage(function(r) { r.saveToFile(file) }); return file }
     function resetOrder(): string { root.resetOrder(); return "ok" }
     // Test hook: drop chip `from` as if it were dragged onto chip `to` (same hit-testing as a real drag).
     function dropOnto(from: string, to: string): string {
@@ -1642,6 +1724,8 @@ Panel {
     id: hb
     property string glyph: ""
     property string tip: ""
+    property bool bold: false
+    property bool lit: false     // something is running behind it (Constance on a goal): the glyph shows in the accent
     signal clicked()
     implicitWidth: Style.space(34)
     implicitHeight: implicitWidth
@@ -1653,9 +1737,10 @@ Panel {
       anchors.centerIn: parent
       textFormat: Text.PlainText
       text: hb.glyph
-      color: hbArea.containsMouse ? Color.accent : root.dim
+      color: hbArea.containsMouse || hb.lit ? Color.accent : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.heading
+      font.bold: hb.bold
     }
     MouseArea {
       id: hbArea
@@ -1714,6 +1799,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: root.constanceTyping   // the goal box owns the keys while it has focus
 
       // Pointing at the auto-opened panel means the user wants it: keep it open.
       HoverHandler {
@@ -1762,7 +1848,7 @@ Panel {
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
-                text: root.addOpen ? "Add an account" : (root.settingsOpen ? "Settings" : (root.agentHereOpen ? "Start " + root.defaultAgentName : "Claude Squad"))
+                text: root.addOpen ? "Add an account" : (root.settingsOpen ? "Settings" : (root.agentHereOpen ? "Start " + root.defaultAgentName : (root.constanceOpen ? "Constance" : "Claude Squad")))
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -1787,6 +1873,7 @@ Panel {
               HeaderButton { glyph: "\u{f0415}"; tip: "Add a subscription"; onClicked: root.toggleAdd() }
               HeaderButton { glyph: "\u{f07b7}"; tip: "Start the default agent in a folder"; onClicked: root.toggleAgentHere() }
               HeaderButton { glyph: "CS"; tip: "Claude Squad"; onClicked: root.toggleSquad() }
+              HeaderButton { glyph: "C"; bold: true; tip: root.constanceActive ? "Constance (working)" : "Constance: give her a goal"; lit: root.constanceActive; onClicked: root.toggleConstance() }
               Rectangle {
               id: gearButton
               width: Style.space(34)
@@ -2095,6 +2182,210 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
+            }
+          }
+
+          // ---------------- Constance view (the C header button): the goal box and folder while she is free; the goal,
+          // her pace and Stop while she works; every agent and what it is on; and the log of every handoff and result.
+          Column {
+            id: constanceView
+            visible: root.constanceOpen
+            width: parent.width
+            spacing: Style.space(14)
+
+            Column {
+              visible: !root.constanceActive
+              width: parent.width
+              spacing: Style.space(10)
+              PanelSectionHeader { width: parent.width; text: "GOAL" }
+              TextField {
+                id: goalField
+                width: parent.width
+                placeholderText: "Tell her once, in plain words: e.g. add a dark mode switch"
+                foreground: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                onActiveFocusChanged: root.constanceTyping = activeFocus
+                onAccepted: root.startConstance(text)
+                Keys.onEscapePressed: { goalField.focus = false; keyCatcher.forceActiveFocus() }
+              }
+              FolderPicker { width: parent.width }
+              Rectangle {
+                id: goTile
+                readonly property bool ready: goalField.text.trim() !== "" && !constanceStarter.running
+                width: goLabel.implicitWidth + Style.space(28)
+                height: goLabel.implicitHeight + Style.space(14)
+                radius: Style.cornerRadius
+                opacity: ready ? 1 : 0.4
+                color: goArea.containsMouse && ready ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
+                Text {
+                  id: goLabel
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: constanceStarter.running ? "Starting..." : "Give it to Constance"
+                  color: Color.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+                MouseArea { id: goArea; anchors.fill: parent; enabled: goTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.startConstance(goalField.text) }
+                PanelToolTip { visible: goArea.containsMouse; text: "She plans it, hands pieces to free agents under their limits, reviews everything and reports here"; fontFamily: root.fontFamily }
+              }
+              Text {
+                visible: root.constanceError !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: root.constanceError
+                color: root.red
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            // The current (or last) goal: what she is on, her pace, and Stop.
+            Column {
+              visible: !!root.constance.goal
+              width: parent.width
+              spacing: Style.space(6)
+              Item {
+                width: parent.width
+                height: Math.max(goalLine.implicitHeight, stopTile.visible ? stopTile.height : 0)
+                Text {
+                  id: goalLine
+                  anchors.left: parent.left
+                  anchors.right: stopTile.visible ? stopTile.left : parent.right
+                  anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  maximumLineCount: 3
+                  elide: Text.ElideRight
+                  text: root.constanceGoalLine()
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+                Rectangle {
+                  id: stopTile
+                  visible: root.constanceActive
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: stopLabel.implicitWidth + Style.space(24)
+                  height: stopLabel.implicitHeight + Style.space(14)
+                  radius: Style.cornerRadius
+                  color: root.soft(root.red, stopArea.containsMouse ? 0.3 : 0.15)
+                  Text {
+                    id: stopLabel
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: constanceStopper.running ? "Stopping..." : "Stop"
+                    color: root.red
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+                  MouseArea { id: stopArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.stopConstance() }
+                  PanelToolTip { visible: stopArea.containsMouse; text: "Halts Constance and every job she handed out, at once"; fontFamily: root.fontFamily }
+                }
+              }
+              Text {
+                visible: text !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: root.constance.goal ? (root.constance.goal.status === "paused" ? String(root.constance.goal.pauseReason || "")
+                  : (root.constanceActive && root.constance.pace ? "Her pace: " + root.constance.pace.reason : "")) + "  " + root.shortPath(root.constance.goal.dir) : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            PanelSectionHeader { width: parent.width; text: "AGENTS" }
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+              Repeater {
+                model: (root.constance.agents || []).filter(function(a) { return a.reason !== "not installed" })
+                Item {
+                  id: cRow
+                  required property var modelData
+                  readonly property var job: root.constanceJobOf(modelData.id)
+                  readonly property bool me: modelData.id === "claude"
+                  width: parent.width
+                  height: Math.max(cName.implicitHeight, cWhat.implicitHeight)
+                  Rectangle {
+                    id: cDot
+                    anchors.left: parent.left
+                    anchors.verticalCenter: cName.verticalCenter
+                    width: Style.space(8); height: width; radius: width / 2
+                    color: cRow.job ? Color.accent : (cRow.me ? Color.accent : (cRow.modelData.available ? root.green : root.unsureColor))
+                  }
+                  Text {
+                    id: cName
+                    anchors.left: cDot.right
+                    anchors.leftMargin: Style.space(8)
+                    anchors.top: parent.top
+                    width: Style.space(130)
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    text: cRow.me ? "Constance" : root.constanceAgentName(cRow.modelData.id)
+                    color: cRow.modelData.available || cRow.job || cRow.me ? root.foreground : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: !!cRow.job || cRow.me
+                  }
+                  Text {
+                    id: cWhat
+                    anchors.left: cName.right
+                    anchors.leftMargin: Style.space(8)
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                    text: cRow.job ? "Job " + cRow.job.id + ": " + cRow.job.task
+                      : (cRow.me ? (root.constance.pace ? "Claude Code (Opus), " + root.constance.pace.mode + " pace" : "Claude Code (Opus)")
+                      : (cRow.modelData.available ? "free: " : "") + cRow.modelData.reason)
+                    color: cRow.job ? root.foreground : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+            }
+
+            PanelSectionHeader { width: parent.width; text: "LOG" }
+            Text {
+              visible: (root.constance.log || []).length === 0
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "Nothing yet. Every task she hands out, and what comes back, shows here."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+              Repeater {
+                model: (root.constance.log || []).slice().reverse().slice(0, 40)
+                Text {
+                  required property var modelData
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  maximumLineCount: modelData.kind === "report" ? 30 : 4
+                  elide: Text.ElideRight
+                  text: root.constanceLogLine(modelData)
+                  color: modelData.kind === "report" || modelData.kind === "review" ? root.foreground : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
             }
           }
 

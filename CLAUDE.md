@@ -94,6 +94,13 @@ keeps the developer in flow:
 - The repo is public on GitHub (SpacemanProducts/spaceman-agent-usage-tabs). Scan for
   personal info (emails, tokens, usernames in paths) before every push, and use the
   GitHub noreply address for commits.
+- **Constance** (C button, `bin/constance*.mjs`, 2026-11-23): runs as the real `claude` CLI (Opus,
+  skip-permissions) on the paid plan, never via a reused OAuth token. Workers come only from
+  `judge()` in `bin/constance-agents.mjs` (installed, signed in, readable, every limit < 85%, free;
+  Claude is never a worker; Devin pinned to free `swe-2-flash-medium` until the collector's
+  free date). Pacing is `bin/constance-pace.mjs` (delegate when burn > 1 or >= 70%, pause at 90%).
+  She only runs on a goal the owner gives; the goal-less background loop is a later version.
+  `bin/constance.test.mjs` runs the whole loop with fake `claude`/`grok`.
 
 ## Working rules
 

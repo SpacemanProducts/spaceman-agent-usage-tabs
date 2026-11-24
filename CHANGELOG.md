@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.33.0 - 2026-11-23
+- **Constance, the quarterback (first version):** a big C button next to CS. Give her a goal once; she runs as Claude Code (Opus) on the paid plan, hands routine pieces to free agents that are under their limits (re-checked before every handoff, never anything that charges), reviews each result in finish order, and reports. Handoffs start with a folder check, keep jobs off each other's files, and end with a done file. She paces herself against her session and weekly limits (delegates more when burning fast, pauses at 90% until the reset). Stop halts everything; the screen shows every agent and what it is on, plus a log of every handoff and result. Jobs survive a shell restart.
+
 ## 1.32.0 - 2026-11-23
 - **One severity rule for the bar icon, every agent:** the robot is colored and labeled from the worst limit the agent reports (the fullest bar in its tab) through a single shared table — green under 60%, amber 60–89%, red 90% and up with the percentage shown (so Antigravity 99% and Copilot 94% now show their number, and Cursor/Codex at 100% are always red). The tooltip names the agent the bar represents and the limit behind the color.
 
