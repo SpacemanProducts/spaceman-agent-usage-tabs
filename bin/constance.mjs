@@ -20,7 +20,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { judgeAll, launchCommand, LAUNCH } from "./constance-agents.mjs";
+import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.mjs";
 import { pace } from "./constance-pace.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
@@ -111,10 +111,12 @@ function delegate() {
   if (!verdict?.available) fail(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
   const practice = practiceMode();
+  const account = verdict.accountId ? { id: verdict.accountId, label: verdict.account } : null;
+  const who = verdict.name + (verdict.account ? ` (${verdict.account})` : "");
   const job = store.update((s) => {
     const busy = conflicts(s.jobs, dir, files);
     if (busy.length) return { busy };
-    const j = { id: s.next++, goal: g.id, agent, dir, files, task, status: practice ? "finished" : "waiting", createdAt: Date.now() };
+    const j = { id: s.next++, goal: g.id, agent, account, dir, files, task, status: practice ? "finished" : "waiting", createdAt: Date.now() };
     if (practice) { j.finishedAt = Date.now(); j.summary = "(practice run: the prompt is in the log, nothing was launched)"; }
     j.prompt = handoffPrompt(j);
     s.jobs.push(j);
@@ -122,8 +124,8 @@ function delegate() {
   });
   if (job.busy) fail(`Those files overlap job ${job.busy.map((b) => `${b.id} (${b.agent}: ${b.files.join(", ")})`).join("; ")}. Wait for it, or split the work differently.`);
   if (practice) {
-    store.log({ kind: "practice", job: job.id, agent, reason: verdict.reason, files, text: task, prompt: job.prompt });
-    out(`Practice job ${job.id}: ${verdict.name} would take it (${verdict.reason}). Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
+    store.log({ kind: "practice", job: job.id, agent, account: verdict.account, reason: verdict.reason, files, text: task, prompt: job.prompt });
+    out(`Practice job ${job.id}: ${who} would take it (${verdict.reason}). Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
     return;
   }
   excludeDoneFiles(dir);
@@ -132,17 +134,18 @@ function delegate() {
   const logPath = path.join(store.dir, `job-${job.id}.log`);
   const fd = fs.openSync(logPath, "w");
   const [cmd, ...args] = launchCommand(agent, job.prompt);
-  const child = spawn(cmd, args, { cwd: dir, env: ENV, detached: true, stdio: ["ignore", fd, fd] });
+  // A non-seated account's login lives in its own home: pin the CLI to it.
+  const child = spawn(cmd, args, { cwd: dir, env: { ...ENV, ...accountEnv(agent, job.account?.id) }, detached: true, stdio: ["ignore", fd, fd] });
   child.unref();
   store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "running"; j.pid = child.pid; j.startedAt = Date.now(); j.log = logPath; });
-  store.log({ kind: "handoff", job: job.id, agent, files, text: task });
-  out(`Job ${job.id} handed to ${verdict.name} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."} It writes ${doneFile(dir, job.id)} when done; run \`wait\`.`);
+  store.log({ kind: "handoff", job: job.id, agent, account: verdict.account, files, text: task });
+  out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."} It writes ${doneFile(dir, job.id)} when done; run \`wait\`.`);
 }
 
 async function waitJob() {
   const until = Date.now() + Math.min(560, Number(arg("--timeout", "100")) || 100) * 1000;
   for (;;) {
-    for (const j of sweep()) store.log({ kind: "returned", job: j.id, agent: j.agent, text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
+    for (const j of sweep()) store.log({ kind: "returned", job: j.id, agent: j.agent, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
     const s = store.read();
     const next = reviewQueue(s.jobs)[0];
     if (next) {

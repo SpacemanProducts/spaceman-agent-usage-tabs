@@ -65,7 +65,7 @@ export const doneFile = (dir, id) => path.join(dir, ".constance", `done-${id}.js
 // status check and what not to touch, the task, tests and build, its own commit (never a push or
 // deploy unless the task says so), a plain-text report, and the done file last. With no files listed
 // the job is read-only: the agent changes nothing and only reports.
-export function handoffPrompt({ id, dir, task, files = [] }) {
+export function handoffPrompt({ id, dir, task, files = [], account = null }) {
   const readOnly = !files || files.length === 0;
   return [
     `Check: this job is for the project folder ${dir}. Run \`pwd\` first; if it is not exactly ${dir}, stop now and change nothing.`,
@@ -73,6 +73,7 @@ export function handoffPrompt({ id, dir, task, files = [] }) {
     ``,
     `Task (job ${id}, from Constance):`,
     String(task).trim(),
+    ...(account?.label ? [``, `Account: this run is on the "${account.label}" account.`] : []),
     ``,
     readOnly
       ? `This is a read-only job: change nothing, create nothing, delete nothing.`

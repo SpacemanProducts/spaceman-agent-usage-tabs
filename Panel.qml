@@ -939,7 +939,7 @@ Panel {
     return st + ": " + g.text
   }
   function constanceLogLine(e) {
-    var who = e.agent ? constanceAgentName(e.agent) : ""
+    var who = e.agent ? constanceAgentName(e.agent) + (e.account ? " (" + e.account + ")" : "") : ""
     var head = { goal: "Goal", handoff: "Job " + e.job + " → " + who, practice: "Practice job " + e.job + " → " + who + (e.reason ? " (" + e.reason + ")" : ""),
                  returned: "Job " + e.job + " back from " + who, model: "Model",
                  review: "Job " + e.job + (e.verdict === "accept" ? " accepted" : " sent back"), report: "Report", paused: "Paused",
@@ -1320,7 +1320,7 @@ Panel {
       width: Style.space(130)
       textFormat: Text.PlainText
       elide: Text.ElideRight
-      text: me ? "Constance" : root.constanceAgentName(modelData.id)
+      text: (me ? "Constance" : root.constanceAgentName(modelData.id)) + (modelData.account ? " (" + modelData.account + ")" : "")
       color: modelData.available || job || me ? root.foreground : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall

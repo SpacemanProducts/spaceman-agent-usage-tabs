@@ -4,11 +4,14 @@
 //   - it is installed and has a headless launch here (LAUNCH below);
 //   - it is not Claude: Claude is Constance herself, on the owner's one paid plan;
 //   - it is signed in and the panel can read its limits (no can't-read / sign-in-needed state);
-//   - it reports at least one limit, and every reported limit is under RED (a reading we can't see
-//     can't prove it is under its limit);
+//   - it reports at least one limit, and the account she would use is under RED (a reading we can't
+//     see can't prove it is under its limit);
 //   - the reading is fresh (data.json written in the last FRESH_MS);
 //   - it can't start charging: no bring-your-own-key agents, and Devin only while SWE-2 Flash is free.
 // Pure functions; bin/constance.mjs feeds them data.json.
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 export const RED = 0.85;                               // the panel's red line: a meter above it is near the wall
 export const FRESH_MS = 15 * 60 * 1000;
@@ -31,16 +34,33 @@ export function launchCommand(id, prompt) {
   return l ? [l.cli, ...l.args(prompt)] : null;
 }
 
-// All limits an agent reports, its accounts' included.
-function limitsOf(a) {
-  const out = [...(a.limits || [])];
-  for (const acc of a.accounts || []) out.push(...(acc.limits || []));
-  return out.filter((l) => l && Number.isFinite(Number(l.percent)));
+// Each registered account is its own source of capacity: she can use whichever
+// login has the most room, not only the seated one. accounts[] (2+ signed-in
+// accounts) lists every login; without it the agent's own limits are the only
+// source. An account entry with no readable limits is not a source at all.
+function sourcesOf(a) {
+  const accs = (a.accounts || [])
+    .map((x) => ({ id: x.id || "", label: x.label || "", limits: x.limits || [] }))
+    .filter((s) => s.limits.some((l) => l && Number.isFinite(Number(l.percent))));
+  if (accs.length) return accs;
+  return [{ id: "", label: "", limits: a.limits || [] }];
 }
 
-// { id, name, available, reason, worst } for one agent.
+// One source's meters rolled up: fullest percent, whether it sits at a wall,
+// and the limit to blame when it blocks.
+function statsOf(limits) {
+  const ls = (limits || []).filter((l) => l && Number.isFinite(Number(l.percent)));
+  if (!ls.length) return null;
+  const hit = ls.find((l) => l.hitAt && Number(l.percent) >= 1) || null;
+  const fullest = ls.reduce((m, l) => (Number(l.percent) > Number(m.percent) ? l : m), ls[0]);
+  return { ls, hit, fullest, worst: Number(fullest.percent) };
+}
+
+// { id, name, account, accountId, available, reason, worst, resetsAt, blockTitle } for one agent.
+// `account`/`accountId` name the login she would use ("" / null for a
+// single-account agent, so those look exactly as before).
 export function judge(a, { now = Date.now(), generatedAt = now } = {}) {
-  const base = { id: a.id, name: a.name || a.id, available: false, worst: null, resetsAt: null, blockTitle: null };
+  const base = { id: a.id, name: a.name || a.id, account: "", accountId: null, available: false, worst: null, resetsAt: null, blockTitle: null };
   const no = (reason) => ({ ...base, reason });
   if (a.id === "claude") return no("Constance herself (the paid plan)");
   if (a.installed === false) return no("not installed");
@@ -51,19 +71,41 @@ export function judge(a, { now = Date.now(), generatedAt = now } = {}) {
   if (a.cantRead) return no("can't read its limits");
   if (a.unsure) return no("reading is unsure");
   if (!(now - generatedAt < FRESH_MS)) return no("usage reading is out of date");
-  const ls = limitsOf(a);
-  if (ls.length === 0) return no("reports no limits");
-  const worst = Math.max(...ls.map((l) => Number(l.percent)));
-  const r = { ...base, worst };
-  // The limit that blocks her (the fullest one, or the hit one) brings its reset time along, so the
+  const srcs = sourcesOf(a).map((s) => ({ ...s, st: statsOf(s.limits) })).filter((s) => s.st);
+  if (!srcs.length) return no("reports no limits");
+  // Her pick: a source under the red line with the most room; when every source
+  // is blocked she still names the one closest to freeing up.
+  const open = srcs.filter((s) => !s.st.hit && s.st.worst < RED);
+  const pick = (open.length ? open : srcs).reduce((m, s) => (s.st.worst < m.st.worst ? s : m));
+  const r = { ...base, worst: pick.st.worst, account: pick.label || "", accountId: pick.id || null };
+  // The limit that blocks her (the hit one, or the fullest one) brings its reset time along, so the
   // panel can say "at 99%, resets in 3h" instead of just "at 99%".
   const blocker = (l) => ({ resetsAt: l?.resetsAt || null, blockTitle: l?.title || null });
-  if (ls.some((l) => l.hitAt && Number(l.percent) >= 1)) return { ...r, ...blocker(ls.find((l) => l.hitAt && Number(l.percent) >= 1)), reason: "hit its limit" };
-  if (worst >= RED) return { ...r, ...blocker(ls.reduce((m, l) => (Number(l.percent) > Number(m.percent) ? l : m), ls[0])), reason: `at ${Math.round(worst * 100)}% of a limit` };
-  return { ...r, available: true, reason: `under its limits (fullest ${Math.round(worst * 100)}%)` };
+  if (pick.st.hit) return { ...r, ...blocker(pick.st.hit), reason: "hit its limit" };
+  if (pick.st.worst >= RED) return { ...r, ...blocker(pick.st.fullest), reason: `at ${Math.round(pick.st.worst * 100)}% of a limit` };
+  return { ...r, available: true, reason: `under its limits (fullest ${Math.round(pick.st.worst * 100)}%)` };
 }
 
 export function judgeAll(data, now = Date.now()) {
   const generatedAt = Number(data?.generatedAt) || 0;
   return (data?.agents || []).map((a) => judge(a, { now, generatedAt }));
+}
+
+// The env that pins a CLI to a registered account's home, or {} when the job
+// should use the seated account (its login already lives in the primary home).
+// Only claude/codex/grok have registered homes; reads Omarchy's account
+// registry — ids and paths, never tokens.
+const ACCOUNT_HOMES = { claude: ["CLAUDE_CONFIG_DIR", ".claude"], codex: ["CODEX_HOME", ".codex"], grok: ["GROK_HOME", ".grok"] };
+export function accountEnv(agentId, accountId, env = process.env) {
+  const spec = ACCOUNT_HOMES[agentId];
+  if (!spec || !accountId) return {};
+  const home = env.HOME || os.homedir();
+  const file = path.join(env.XDG_STATE_HOME || path.join(home, ".local/state"), "omarchy", "agents", "accounts", `${agentId}.json`);
+  let reg; try { reg = JSON.parse(fs.readFileSync(file, "utf8")); } catch { return {}; }
+  const acc = (reg?.accounts || []).find((x) => x && x.id === accountId);
+  const loginHome = acc && (acc.login || acc.home);
+  if (!loginHome) return {};
+  const abs = path.resolve(String(loginHome).replace(/^~/, home));
+  if (abs === path.resolve(home, spec[1])) return {};
+  return { [spec[0]]: abs };
 }

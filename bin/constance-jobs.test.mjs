@@ -41,6 +41,9 @@ assert.match(ro, /Do not push or deploy/);
 assert.match(ro, /Report in plain text/);
 assert.ok(ro.trim().split("\n").pop().includes(doneFile("/home/u/proj", 8)));
 assert.match(handoffPrompt({ id: 9, dir: "/p", task: "t" }), /read-only job/, "files default to read-only");
+// A named account is called out in the prompt; no account, no line.
+assert.match(handoffPrompt({ id: 10, dir: "/p", task: "t", account: { id: "work", label: "Work" } }), /Account: this run is on the "Work" account\./);
+assert.doesNotMatch(handoffPrompt({ id: 11, dir: "/p", task: "t" }), /Account:/, "single-account jobs stay unchanged");
 
 assert.deepEqual(reviewQueue([{ id: 1, status: "finished", finishedAt: 20 }, { id: 2, status: "finished", finishedAt: 10 }, { id: 3, status: "accepted", finishedAt: 5 }]).map((j) => j.id), [2, 1], "reviewed in the order they finished");
 
