@@ -25,23 +25,24 @@ writeData();
 // Practice mode is on by default; this first goal runs for real, so switch it off for now.
 fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
 // Fake grok: the done file path is in the prompt (last argument). Waits for a go-file so the test can
-// look at a running job. A read-only job only reports; an editing job writes b.txt, commits and
-// sleeps a moment first so the read-only job always finishes (and is reviewed) first.
+// look at a running job. A read-only job only reports; an editing job writes the file named in
+// "Only edit these files: X." and commits it — except "add g", which also leaves a stray file.
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 if grep -qi "read-only job" <<<"$p"; then
   echo '{"summary": "cause: a.txt has no b", "commit": "", "files": []}' > "$f"
-elif grep -q "add f" <<<"$p"; then
-  sleep 1
-  echo f > f.txt; git add f.txt; git commit -qm "grok: f"; echo "{\\"summary\\": \\"added f\\", \\"commit\\": \\"$(git rev-parse HEAD)\\", \\"files\\": [\\"f.txt\\"]}" > "$f"
 elif grep -q "add g" <<<"$p"; then
   sleep 1
   echo g > g.txt; git add g.txt; git commit -qm "grok: g"; echo stray > evil.txt
   echo "{\\"summary\\": \\"added g and left a stray\\", \\"commit\\": \\"$(git rev-parse HEAD)\\", \\"files\\": [\\"g.txt\\"]}" > "$f"
 else
   sleep 1
-  echo b > b.txt; git add b.txt; git commit -qm "grok: b"; echo "{\\"summary\\": \\"added b\\", \\"commit\\": \\"$(git rev-parse HEAD)\\", \\"files\\": [\\"b.txt\\"]}" > "$f"
+  name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-b.txt}
+  before=$(git rev-parse HEAD)
+  echo x > "$name"; git add "$name"; git commit -qm "grok: $name" || true
+  after=$(git rev-parse HEAD); c=""; [[ "$after" != "$before" ]] && c="$after"
+  echo "{\\"summary\\": \\"added \${name%.*}\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]}" > "$f"
 fi
 `, { mode: 0o755 });
 // Fake Constance: delegate (one read-only investigation, then the fix), wait, review, report.
@@ -227,6 +228,94 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   // Her first message carried the lessons and the project rules.
   assert.match(fs.readFileSync(path.join(root, "claude-args-guard"), "utf8"), /Lessons from your earlier goals/);
   assert.match(fs.readFileSync(path.join(root, "claude-args-guard"), "utf8"), /Never touch generated files/);
+}
+
+// The ready queue for real: she queues two tasks while planning, accepts the
+// running job, and the next queued task is handed to the same agent by itself —
+// twice — until the queue is empty. `queue rm` drops one first.
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C queue --task "add h" --files h.txt >> "${root}/queue.out" 2>&1
+$C queue --task "add i" --files i.txt >> "${root}/queue.out" 2>&1
+$C queue --task "add j" --files j.txt >> "${root}/queue.out" 2>&1
+$C queue rm 3 >> "${root}/queue.out" 2>&1
+$C queue >> "${root}/queue.out" 2>&1
+$C delegate --agent grok --files q.txt --task "add q" >> "${root}/queue.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 30 > "${root}/wait-q1.json"
+$C review 8 accept --note "q ok" > "${root}/review-q1.txt" 2>&1
+$C wait --timeout 30 > "${root}/wait-q2.json"
+$C review 9 accept --note "h ok" > "${root}/review-q2.txt" 2>&1
+$C wait --timeout 30 > "${root}/wait-q3.json"
+$C review 10 accept --note "i ok" > "${root}/review-q3.txt" 2>&1
+echo "Queue report: q, h and i all done."
+`, { mode: 0o755 });
+assert.equal(run("start", "--dir", repo, "--goal", "queue goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done"), "the queue goal finishes: " + JSON.stringify(status().goal));
+{
+  const qs = status();
+  const byId = Object.fromEntries(qs.jobs.map((j) => [j.id, j]));
+  assert.equal(byId[8].task, "add q"); assert.equal(byId[8].status, "accepted");
+  assert.equal(byId[9].task, "add h"); assert.equal(byId[9].agent, "grok", "the queued task went to the same agent");
+  assert.equal(byId[9].status, "accepted");
+  assert.equal(byId[10].task, "add i"); assert.equal(byId[10].status, "accepted");
+  assert.equal(qs.jobs.length, 3, "exactly three jobs: the delegate plus two auto-handed");
+  const qout = fs.readFileSync(path.join(root, "queue.out"), "utf8");
+  assert.match(qout, /Queued as task 1/, "first queued task got id 1");
+  assert.match(qout, /removed/, "queue rm worked");
+  assert.match(qout, /1\. add h[\s\S]*2\. add i/, "the queue listing shows the pending tasks");
+  assert.doesNotMatch(qout, /add j/, "the removed task is gone");
+  assert.match(fs.readFileSync(path.join(root, "review-q1.txt"), "utf8"), /Next queued task went to grok as job 9/);
+  assert.match(fs.readFileSync(path.join(root, "review-q2.txt"), "utf8"), /Next queued task went to grok as job 10/);
+  assert.match(fs.readFileSync(path.join(root, "review-q3.txt"), "utf8"), /Job 10 accepted\.(\s|$)/, "nothing left queued after the last accept");
+  const w1 = JSON.parse(fs.readFileSync(path.join(root, "wait-q1.json"), "utf8"));
+  assert.equal(w1.review.queue.length, 2, "wait showed the two pending tasks");
+  assert.deepEqual(w1.review.queue.map((t) => t.task), ["add h", "add i"]);
+  assert.equal(qs.queue.length, 0, "status reports an empty queue once all are handed");
+  for (const f of ["q.txt", "h.txt", "i.txt"]) assert.ok(fs.existsSync(path.join(repo, f)), f + " exists");
+  assert.equal(git("status", "--porcelain").trim(), "", "the repo is clean: every auto-handed job stayed in its files");
+  const qlog = qs.log.filter((l) => /Ready queue/.test(l.text || ""));
+  assert.ok(qlog.length >= 3, "queue events are in the log: " + qlog.length);
+}
+
+// The watcher: a fake busctl feeds it real-format Notify blocks. With no job
+// running for the named agent, the notification is logged as the owner's own —
+// noted and left alone — and `signals` shows it.
+fs.writeFileSync(path.join(root, "notify-fixture.txt"), `‣ Type=method_call  Endian=l  Flags=0  Version=1 Cookie=1  Timestamp="x"
+  Sender=:1.1  Destination=:1.2  Path=/org/freedesktop/Notifications  Interface=org.freedesktop.Notifications  Member=Notify
+  UniqueName=:1.1
+  MESSAGE "susssasa{sv}i" {
+          STRING "Devin";
+          UINT32 0;
+          STRING "";
+          STRING "Devin finished";
+          STRING "the task is done";
+          ARRAY "s" {
+          };
+          ARRAY "{sv}" {
+          };
+          INT32 -1;
+  };
+`);
+fs.writeFileSync(path.join(bin, "busctl"), `#!/bin/bash\ncat "${root}/notify-fixture.txt"\nsleep 30\n`, { mode: 0o755 });
+// Kill any real watcher the goals spawned, then start ours against the fake bus.
+{
+  const wp = path.join(tabs, "constance", "watcher.pid");
+  try { const pid = Number(fs.readFileSync(wp, "utf8")); process.kill(pid, "SIGKILL"); } catch {}
+  try { fs.rmSync(wp); } catch {}
+}
+const { spawn } = await import("node:child_process");
+const watcher = spawn("node", [CLI, "watch"], { env, stdio: "ignore" });
+const notifyJsonl = path.join(tabs, "constance", "notify.jsonl");
+assert.ok(await until(() => { try { return fs.readFileSync(notifyJsonl, "utf8").includes("Devin finished"); } catch { return false; } }, 10000), "the watcher recorded the notification");
+watcher.kill("SIGKILL");
+{
+  const sig = JSON.parse(run("signals").stdout);
+  const mine = sig.find((s) => s.agent === "devin" && s.summary === "Devin finished");
+  assert.ok(mine, "the fake notification was recorded: " + JSON.stringify(sig));
+  assert.equal(mine.kind, "foreign", "no job of hers -> the owner's own agent");
+  const slog = status().log.filter((l) => l.kind === "signal").find((l) => /Devin finished/.test(l.text || ""));
+  assert.ok(slog && /left alone/.test(slog.text), "the signal is in her log: " + JSON.stringify(slog));
 }
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance: tests passed");

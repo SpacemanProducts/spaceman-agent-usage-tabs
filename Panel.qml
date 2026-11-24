@@ -904,7 +904,7 @@ Panel {
   // She keeps working with the panel closed; the job file lets her pick up after a shell restart (recover, at load).
   property bool constanceOpen: false
   property bool constanceTyping: false
-  property var constance: ({ goal: null, jobs: [], agents: [], pace: null, log: [], practice: true })
+  property var constance: ({ goal: null, jobs: [], agents: [], pace: null, log: [], practice: true, queue: [], signals: [] })
   property string constanceError: ""
   // Practice mode (on by default for now): she plans and logs every handoff prompt but launches nothing.
   readonly property bool constancePractice: userSettings.constancePractice !== undefined
@@ -956,6 +956,7 @@ Panel {
     var head = { goal: "Goal", handoff: "Job " + e.job + " → " + who, practice: "Practice job " + e.job + " → " + who + (e.reason ? " (" + e.reason + ")" : ""),
                  returned: "Job " + e.job + " back from " + who, model: "Model",
                  review: "Job " + e.job + (e.verdict === "accept" ? " accepted" : " sent back"), report: "Report", paused: "Paused",
+                 signal: "Signal", queue: "Queue",
                  resumed: "Resumed", stopped: "Stopped", failed: "Failed", note: "Note" }[e.kind] || e.kind
     var line = Qt.formatDateTime(new Date(Number(e.at)), "h:mm AP") + "  " + head + (e.text ? ": " + e.text : "")
     if (e.kind === "practice") line += "\n" + String(e.prompt || "")   // the whole handoff prompt, so the owner can check it
@@ -2482,6 +2483,28 @@ Panel {
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
+              }
+            }
+
+            // The ready queue: tasks she lined up for this project while planning. The next one is
+            // handed to the finishing agent automatically when its job is accepted.
+            PanelSectionHeader { width: parent.width; text: "READY QUEUE"; visible: (root.constance.queue || []).length > 0 }
+            Column {
+              visible: (root.constance.queue || []).length > 0
+              width: parent.width
+              spacing: Style.space(4)
+              Repeater {
+                model: root.constance.queue || []
+                Text {
+                  required property var modelData
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  text: "• " + modelData.task + (modelData.files && modelData.files.length ? "  (" + modelData.files.join(", ") + ")" : "") + (modelData.agent ? "  → " + root.constanceAgentName(modelData.agent) : "")
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
               }
             }
 

@@ -10,6 +10,9 @@
 //   delegate --agent ID --task TEXT [--files a,b]   hand one task to one free agent (re-checks it first;
 //                                                   no --files = read-only; in practice mode it only logs the prompt)
 //   lesson TEXT                   add a short lesson to her lessons file (advice for later goals)
+//   queue [--task TEXT [--files a,b] [--agent ID] | rm ID]   the ready-task queue for this project;
+//                                                   no --task lists what's queued
+//   signals                     recent agent-finished notifications she heard
 //   wait [--timeout S]          block until a job finishes; prints the next one to review, oldest first
 //   review ID accept|send-back --note TEXT        record her verdict
 //   note TEXT                   a line in the owner's log
@@ -27,6 +30,8 @@ import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
 import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
+import { NotifyParser, handleNotification, recentSignals } from "./constance-notify.mjs";
+import { addTask, peekNext, finishTask, removeTask, queueView } from "./constance-queue.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -131,19 +136,22 @@ function excludeDoneFiles(dir) {
   if (!txt.split("\n").includes(".constance/")) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, (txt && !txt.endsWith("\n") ? "\n" : "") + ".constance/\n"); }
 }
 
-function delegate() {
-  const agent = arg("--agent"), task = arg("--task"), files = arg("--files").split(",").map((x) => x.trim()).filter(Boolean);
+// The actual handoff, shared by `delegate` and the queue's auto-next: checks the
+// agent is still available, enforces strike caps and file conflicts, builds the
+// prompt (project rules + guardrails), snapshots the world, and launches. Throws
+// with a human reason on any refusal; returns { job, who, verdict, practice }.
+function handOut({ agent, task, files = [] }) {
   const g = store.read().goal;
-  if (!g || g.status !== "running") fail("No goal is running (stopped or paused), so nothing is handed out.");
-  if (!agent || !task) fail("Usage: delegate --agent ID --task TEXT [--files a,b]  (no --files = read-only job)");
+  if (!g || g.status !== "running") throw new Error("No goal is running (stopped or paused), so nothing is handed out.");
+  if (!agent || !task) throw new Error("delegate needs --agent ID and --task TEXT");
   const verdict = judgeAll(freshData()).find((a) => a.id === agent);
-  if (!verdict?.available) fail(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
+  if (!verdict?.available) throw new Error(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
   // Guardrail strikes shrink what this agent may touch: after a violation it gets
   // smaller tasks only, enforced here rather than left to her judgment.
   const strikes = Number(store.read().guards?.[agent]?.strikes) || 0;
   const cap = fileCap(strikes);
-  if (files.length > cap) fail(`${agent} broke a guardrail before, so it gets smaller tasks: at most ${cap} file${cap === 1 ? "" : "s"} per job (it asked for ${files.length}). Split the work or pick another agent.`);
+  if (files.length > cap) throw new Error(`${agent} broke a guardrail before, so it gets smaller tasks: at most ${cap} file${cap === 1 ? "" : "s"} per job (it asked for ${files.length}). Split the work or pick another agent.`);
   const practice = practiceMode();
   const account = verdict.accountId ? { id: verdict.accountId, label: verdict.account } : null;
   const who = verdict.name + (verdict.account ? ` (${verdict.account})` : "");
@@ -159,11 +167,10 @@ function delegate() {
     s.jobs.push(j);
     return j;
   });
-  if (job.busy) fail(`Those files overlap job ${job.busy.map((b) => `${b.id} (${b.agent}: ${b.files.join(", ")})`).join("; ")}. Wait for it, or split the work differently.`);
+  if (job.busy) throw new Error(`Those files overlap job ${job.busy.map((b) => `${b.id} (${b.agent}: ${b.files.join(", ")})`).join("; ")}. Wait for it, or split the work differently.`);
   if (practice) {
     store.log({ kind: "practice", job: job.id, agent, account: verdict.account, reason: verdict.reason, files, text: task, prompt: job.prompt });
-    out(`Practice job ${job.id}: ${who} would take it (${verdict.reason}). Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
-    return;
+    return { job, who, verdict, practice: true };
   }
   excludeDoneFiles(dir);
   fs.mkdirSync(path.join(dir, ".constance"), { recursive: true });
@@ -180,7 +187,66 @@ function delegate() {
   child.unref();
   store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "running"; j.pid = child.pid; j.startedAt = Date.now(); j.log = logPath; });
   store.log({ kind: "handoff", job: job.id, agent, account: verdict.account, files, text: task });
-  out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."} It writes ${doneFile(dir, job.id)} when done; run \`wait\`.`);
+  return { job, who, verdict, practice: false };
+}
+
+function delegate() {
+  const agent = arg("--agent"), task = arg("--task"), files = arg("--files").split(",").map((x) => x.trim()).filter(Boolean);
+  let r;
+  try { r = handOut({ agent, task, files }); }
+  catch (e) { fail(e.message); }
+  const { job, who, verdict } = r;
+  if (r.practice) {
+    out(`Practice job ${job.id}: ${who} would take it (${verdict.reason}). Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
+    return;
+  }
+  out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."} It writes ${doneFile(job.dir, job.id)} when done; run \`wait\`.`);
+}
+
+// After a job is accepted, the next queued task for its project goes to the
+// same agent right away — that's the point of the ready queue. A refusal (the
+// agent hit a limit, files conflict) leaves the task queued and says why.
+function autoNext(j) {
+  const item = peekNext(j.dir, store.dir);
+  if (!item) return "";
+  const agent = item.agent || j.agent;
+  try {
+    const r = handOut({ agent, task: item.task, files: item.files || [] });
+    finishTask(j.dir, item.id, r.job.id, store.dir);
+    store.log({ kind: "note", text: `Ready queue: "${item.task.slice(0, 80)}" went to ${agent} automatically as job ${r.job.id}.` });
+    return r.practice
+      ? ` Next queued task logged for ${agent} (practice).`
+      : ` Next queued task went to ${agent} as job ${r.job.id}.`;
+  } catch (e) {
+    store.log({ kind: "note", text: `Ready queue: "${item.task.slice(0, 80)}" stays queued — ${e.message}` });
+    return ` Next queued task stays queued: ${e.message}`;
+  }
+}
+
+// `C queue`: the ready-task list for the current goal's project. She fills it
+// while planning; an accepted job hands the next one to the same agent at once.
+function queueCmd() {
+  const g = store.read().goal;
+  if (!g || !g.dir) fail("No goal is running, so there is no project queue.");
+  const sub = process.argv[3];
+  if (sub === "rm") {
+    const id = Number(process.argv[4]);
+    if (!removeTask(g.dir, id, store.dir)) fail(`No queued task ${id}.`);
+    store.log({ kind: "note", text: `Ready queue: task ${id} removed.` });
+    out("removed");
+    return;
+  }
+  const task = arg("--task");
+  if (task) {
+    const files = arg("--files").split(",").map((x) => x.trim()).filter(Boolean);
+    const item = addTask(g.dir, { task, files, agent: arg("--agent") }, store.dir);
+    store.log({ kind: "note", text: `Ready queue: "${task.slice(0, 80)}" queued (${files.length ? files.join(", ") : "read-only"}${item.agent ? ", for " + item.agent : ", any agent"}).` });
+    out(`Queued as task ${item.id}. It goes to ${item.agent || "the finishing agent"} automatically when the current job is accepted.`);
+    return;
+  }
+  const q = queueView(g.dir, store.dir);
+  if (!q.length) { out("The ready queue is empty."); return; }
+  out(q.map((t) => `${t.id}. ${t.task}${t.files.length ? `  [${t.files.join(", ")}]` : "  [read-only]"}${t.agent ? `  → ${t.agent}` : ""}`).join("\n"));
 }
 
 async function waitJob() {
@@ -197,7 +263,7 @@ async function waitJob() {
       let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
       return out({ review: { id: next.id, agent: next.agent, dir: next.dir, files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
         guardViolation: next.guardViolation || null,
-        checkAgainst: earlier, logTail: tail }, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent })),
+        checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent })), signals: recentSignals(store.dir, 6),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     if (!s.jobs.some((j) => j.status === "running")) return out({ review: null, stillRunning: [], next: "No jobs are running." });
@@ -213,7 +279,10 @@ function review() {
   const j = store.update((s) => { const j = s.jobs.find((x) => x.id === id); if (j) { j.status = verdict === "accept" ? "accepted" : "sent back"; j.reviewNote = note; j.reviewedAt = Date.now(); } return j; });
   if (!j) fail(`No job ${id}.`);
   store.log({ kind: "review", job: id, agent: j.agent, verdict, text: note });
-  out(`Job ${id} ${j.status}.`);
+  // Accepted means the agent is free: hand it the next queued task for this
+  // project immediately, so free capacity never sits idle.
+  const extra = verdict === "accept" ? autoNext(j) : "";
+  out(`Job ${id} ${j.status}.${extra}`);
 }
 
 // ---------------------------------------------------------------- the goal and the driver
@@ -229,6 +298,8 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - \`C wait --timeout 540\` (give your Bash tool a 600000 ms timeout for it; long waits save your limits): blocks until a job finishes and gives you the next one to review, oldest finish first. The agent runs the tests and build itself and reports in plain text what changed, the results and the files. Check the report against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare with any earlier job it lists under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then \`C review ID accept|send-back --note "..."\`.
 - \`C status\` shows \`practice: true\` during a dry run (the panel's Practice switch, on by default for now): plan and delegate exactly as usual — the tool logs each handoff's agent, reason and full prompt instead of launching it — but don't edit files yourself, and say in your report that it was a practice run.
 - \`C note "..."\`: a short line in the owner's log for anything he should know.
+- \`C queue --task "..." [--files a,b] [--agent ID]\`: while planning, keep a short queue of ready tasks for this project so free agents never sit idle. When you accept a job, the next queued task is handed to the same agent automatically. \`C queue\` lists what is pending, \`C queue rm ID\` drops one.
+- \`C signals\`: recent "agent finished" notifications heard from the desktop. One matched to your job means check it; one for an agent with no job is the owner's own run — noted, never touched.
 - \`C lesson "..."\`: add one short lesson to your lessons file — something you learned the hard way this goal (a skipped check, a surprise an agent caused, a rule that saved time). It is advice for your future goals, never a rule that overrides the ones above. Read your lessons before each goal; they are already in your first message.
 Before you edit anything, run \`git status\`; commit only your own changes, never push or deploy. When the goal is done and every job is reviewed, finish with a short plain report for the owner: what was done, by whom, the commits, anything left open.`;
 
@@ -261,6 +332,68 @@ function spawnDriver() {
   const child = spawn("node", [SELF, "drive"], { detached: true, stdio: "ignore", env: ENV });
   child.unref();
   store.update((s) => { if (s.goal) s.goal.driverPid = child.pid; });
+  spawnWatcher();
+}
+
+// True only for our own `node constance.mjs watch` process.
+function isWatcher(pid) {
+  if (!(pid > 0)) return false;
+  try {
+    const args = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+    return args.some((a) => a.endsWith("constance.mjs")) && args.includes("watch");
+  } catch { return false; }
+}
+
+function watcherPid() {
+  try { return Number(fs.readFileSync(path.join(store.dir, "watcher.pid"), "utf8")); } catch { return 0; }
+}
+
+// The notification watcher is a separate read-only process on the session bus.
+// It dedupes itself through watcher.pid, so spawning it per driver is safe.
+function spawnWatcher() {
+  if (isWatcher(watcherPid())) return;
+  const w = spawn("node", [SELF, "watch"], { detached: true, stdio: "ignore", env: ENV });
+  w.unref();
+}
+
+// `watch`: snoop org.freedesktop.Notifications on the session bus (read-only —
+// we never call Notify or CloseNotification). Every agent-finished signal is
+// matched to a running job, inspected when the done file is missing, or logged
+// as the owner's own agent. Single instance via watcher.pid.
+async function watch() {
+  const pidFile = path.join(store.dir, "watcher.pid");
+  try { const p = Number(fs.readFileSync(pidFile, "utf8")); if (isWatcher(p)) process.exit(0); } catch {}
+  fs.writeFileSync(pidFile, String(process.pid));
+  const bus = spawn("busctl", ["--user", "monitor"], { stdio: ["ignore", "pipe", "ignore"] });
+  bus.on("error", () => { store.log({ kind: "note", text: "Notification watcher could not start (busctl missing?)." }); process.exit(0); });
+  const parser = new NotifyParser();
+  const onEvent = (evt) => {
+    const ev = handleNotification(evt, { jobs: store.read().jobs, storeDir: store.dir });
+    if (!ev) return;
+    if (ev.kind === "agent-done") {
+      store.log({ kind: "signal", job: ev.job, agent: ev.agent, text: `"${ev.summary || ev.body}" — ${ev.inspection}` });
+    } else if (ev.kind === "agent-signal") {
+      store.log({ kind: "signal", agent: ev.agent, text: `"${ev.summary || ev.body}" (still running, no done file)` });
+    } else {
+      store.log({ kind: "signal", agent: ev.agent, text: `"${ev.summary || ev.body}" — finished outside Constance; noted, left alone` });
+    }
+  };
+  let buf = "";
+  bus.stdout.on("data", (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i); buf = buf.slice(i + 1);
+      const evt = parser.feed(line);
+      if (evt) onEvent(evt);
+    }
+  });
+  // A Notify block is emitted when the next bus message starts; on a quiet bus
+  // flush anyway so the last notification is never stuck in the parser.
+  const flush = setInterval(() => { const evt = parser.end(); if (evt) onEvent(evt); }, 2000);
+  bus.on("exit", () => { clearInterval(flush); process.exit(0); });
+  // Keep the event loop alive for the bus stream.
+  await new Promise(() => {});
 }
 
 async function drive() {
@@ -345,6 +478,7 @@ function stopAll() {
   const g = s.goal;
   if (g && alive(g.brainPid, "claude")) killGroup(g.brainPid);
   if (g && alive(g.driverPid, "constance.mjs")) killGroup(g.driverPid);
+  if (isWatcher(watcherPid())) killGroup(watcherPid());
   store.log({ kind: "stopped", text: "Stop pressed: Constance and every job halted." });
   out("Stopped.");
 }
@@ -361,7 +495,8 @@ function recover() {
 
 function status() {
   const s = store.read(), d = readData();
-  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judgeAll(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, log: store.readLog(80) });
+  out({ goal: s.goal, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judgeAll(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {},
+    queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(80) });
 }
 
 const cmd = process.argv[2];
@@ -374,7 +509,10 @@ if (process.argv[1] === SELF) {
     out(judgeAll(d).map((a) => `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}`).join("\n"));
   }
   else if (cmd === "pace") out(pace(claudeOf(freshData())));
-  else if (cmd === "jobs") { sweep(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
+  else if (cmd === "jobs") { sweep(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
+  else if (cmd === "queue") queueCmd();
+  else if (cmd === "signals") out(recentSignals(store.dir, 20));
+  else if (cmd === "watch") await watch();
   else if (cmd === "delegate") delegate();
   else if (cmd === "wait") await waitJob();
   else if (cmd === "review") review();
@@ -388,5 +526,5 @@ if (process.argv[1] === SELF) {
   }
   else if (cmd === "stop") stopAll();
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|agents|pace|jobs|delegate|wait|review|note|lesson|stop|recover");
+  else fail("Usage: constance.mjs start|status|agents|pace|jobs|delegate|wait|review|note|lesson|queue|signals|watch|stop|recover");
 }
