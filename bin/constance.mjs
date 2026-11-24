@@ -32,7 +32,8 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.mjs";
 import { copyLimit, roomForCopy, readMachine, PUBLISHED_MAX } from "./constance-ramp.mjs";
-import { pace } from "./constance-pace.mjs";
+import { pace, canResume, keptGoing } from "./constance-pace.mjs";
+import { limitWall, writeWall } from "./constance-wall.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
@@ -965,7 +966,20 @@ async function drive() {
       if (!pausedLogged) { store.log({ kind: "paused", text: p.reason }); pausedLogged = true; }
       await sleep(60e3); continue;
     }
-    if (g.status === "paused") { store.update((s) => { s.goal.status = "running"; delete s.goal.pauseReason; }); store.log({ kind: "resumed", text: "Back under her limits; picking the goal up again." }); pausedLogged = false; }
+    if (g.status === "paused") {
+      // Resume only on a reading that is current: a cached or unreadable one can't prove the
+      // limit is gone (Keep going is the owner's own call and doesn't need one).
+      const kept = keptGoing(p);
+      if (!canResume(p, claudeOf(readData()))) {
+        const why = "Waiting for a current reading of Claude's limits before picking the goal up again.";
+        if (g.pauseReason !== why) { store.update((s) => { s.goal.pauseReason = why; }); store.log({ kind: "paused", text: why }); }
+        pausedLogged = true;
+        await sleep(60e3); continue;
+      }
+      store.update((s) => { s.goal.status = "running"; delete s.goal.pauseReason; });
+      store.log({ kind: "resumed", text: kept ? "You chose Keep going; picking the goal up again." : "Back under her limits; picking the goal up again." });
+      pausedLogged = false;
+    }
     // After a restart the previous Claude run may still be going: adopt it rather than start a second one.
     if (alive(g.brainPid, "claude")) {
       let killed = false;
@@ -1009,6 +1023,17 @@ async function drive() {
       store.log({ kind: "report", text: report.slice(-4000) || "(no report)" });
       if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
+    }
+    // Claude said it hit its limit ("You've hit your 5-hour limit · resets 5:50pm (America/New_York)"):
+    // a pause until the time it stated, never a failure. pace() reads wall.json and stops her until then.
+    const wall = limitWall(report);
+    if (wall && (code !== 0 || report.length < 400)) {
+      writeWall(store.dir, wall);
+      const p2 = pace(claudeOf(readData()));
+      store.update((s) => { if (s.goal) { s.goal.status = "paused"; s.goal.pauseReason = p2.reason; } });
+      store.log({ kind: "paused", text: p2.reason });
+      pausedLogged = true;
+      continue;
     }
     // Opus (or whatever she is on) isn't allowed on this Claude plan: drop to the best model that is
     // and restart the goal fresh — a rejected run leaves no session, so --resume can't be used. This

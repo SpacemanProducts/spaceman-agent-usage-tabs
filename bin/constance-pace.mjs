@@ -13,12 +13,19 @@
 import fs from "node:fs";
 import path from "node:path";
 import { stateDir } from "./constance-jobs.mjs";
+import { readWall, clock } from "./constance-wall.mjs";
 
 export const WINDOWS = { Session: 5 * 3600e3, Weekly: 7 * 86400e3 };
 export const STOP_AT = 0.9;
 export const NEAR_END_AT = 0.97;
 export const NEAR_RESET_SHARE = 0.2;
 export const LEAN_AT = 0.7;
+// At 100% the real limit is hit: Claude can't answer at all, so nothing (not even Keep going)
+// lets her run until that window resets.
+export const HARD_AT = 1;
+// The usage endpoint's resets_at moves by fractions of a second between fetches; Keep going still
+// means the same window within this much.
+export const SAME_RESET_MS = 5 * 60e3;
 
 export function windowPace(limit, now = Date.now()) {
   const len = WINDOWS[limit.title];
@@ -46,12 +53,19 @@ export function readKeepGoing(dir = stateDir(), now = Date.now()) {
     return { title: kg.title, resetsAt: Number.isFinite(kg.resetsAt) ? kg.resetsAt : null, at: Number(kg.at) || 0 };
   } catch { return null; }
 }
+const sameReset = (a, b) => (a === null || b === null ? a === b : Math.abs(a - b) <= SAME_RESET_MS);
 const keepGoingFor = (w, kg, now) =>
-  !!kg && w.title === kg.title && w.resetsAt === kg.resetsAt &&
+  !!kg && w.title === kg.title && sameReset(w.resetsAt, kg.resetsAt) &&
   (kg.resetsAt !== null ? now < kg.resetsAt : now - kg.at < (WINDOWS[w.title] || 0));
 
 export function pace(claude, now = Date.now(), dir = stateDir()) {
   const ws = (claude?.limits || []).map((l) => windowPace(l, now)).filter(Boolean);
+  // Claude itself said the limit is hit (constance-wall.mjs): that beats any reading.
+  const wall = readWall(dir, now);
+  if (wall) return { mode: "stop", hard: true, windows: ws, until: wall.until, title: "Claude's limit",
+    reason: `Claude said it hit its limit; paused until ${wall.stated ? clock(wall.until) : `${clock(wall.until)} (no reset time given), then the readings decide`}.` };
+  const hard = ws.find((w) => w.used >= HARD_AT);
+  if (hard) return { mode: "stop", hard: true, windows: ws, until: hard.resetsAt, title: hard.title, reason: `${hard.title} at 100%: the limit is hit, paused until it resets.` };
   if (ws.length === 0) return { mode: "delegate", windows: [], reason: "Claude's own limits can't be read, so she plays it safe and delegates." };
   const kg = readKeepGoing(dir, now);
   const stopAt = (w) => (keepGoingFor(w, kg, now) ? Infinity : w.nearReset ? NEAR_END_AT : STOP_AT);
@@ -72,4 +86,13 @@ export function pace(claude, now = Date.now(), dir = stateDir()) {
     return { mode: "delegate", windows: ws, reason: `${fast.title} ${why}: delegate editing and testing, keep only planning and review.` };
   }
   return { mode: "normal", windows: ws, reason: "On pace: keep hard or risky work, delegate the routine." };
+}
+
+// A paused goal picks up again only when pace isn't "stop" AND the reading is current: limits
+// present and not flagged unsure (a cached reading the collector couldn't refresh). An old or
+// missing reading can't prove the limit is gone. Keep going is the owner's own call.
+export const keptGoing = (p) => /Keep going/.test(p?.reason || "");
+export function canResume(p, claude) {
+  if (!p || p.mode === "stop") return false;
+  return keptGoing(p) || !!(claude && (claude.limits || []).length && !claude.unsure);
 }

@@ -2730,7 +2730,7 @@ Panel {
                   spacing: Style.space(8)
                   Rectangle {
                     id: keepTile
-                    visible: !!root.constance.goal && root.constance.goal.status === "paused" && !!root.constance.pace && root.constance.pace.mode === "stop" && !!root.constance.pace.title
+                    visible: !!root.constance.goal && root.constance.goal.status === "paused" && !!root.constance.pace && root.constance.pace.mode === "stop" && !!root.constance.pace.title && !root.constance.pace.hard
                     width: keepLabel.implicitWidth + Style.space(24)
                     height: keepLabel.implicitHeight + Style.space(14)
                     radius: Style.cornerRadius

@@ -168,6 +168,11 @@ keeps the developer in flow:
   records history, then either starts the next goal in the same driver or, when `needsOwner()` finds a
   problem, pauses the queue, logs `needs-you` and sends a silent notify-send. Stop never advances the
   queue; a goal started by hand or "Start next" clears a pause.
+  Since 1.49.1 (the 2026-11-24 failure: Keep going pressed at Session 100%, she resumed into the wall
+  three times): a window at 100% is a hard stop Keep going can't override; Keep going matches a reset
+  time within 5 min (resets_at jitters); a paused goal resumes only on a current reading (limits present,
+  not `unsure`); Claude's "hit your … limit · resets <time> (<zone>)" exit writes `wall.json`
+  (`bin/constance-wall.mjs`) and pauses until that time, never counting as a failure.
   Since 1.49.0: a per-agent scorecard (`bin/constance-scorecard.mjs`, `scorecard.json`, recorded once per
   reviewed job) ranks `agents` and gives size hints (advice, not enforced); the second-try rule
   (`bin/constance-retry.mjs`) makes `delegate` refuse work sent back twice unless it is a strict-subset split

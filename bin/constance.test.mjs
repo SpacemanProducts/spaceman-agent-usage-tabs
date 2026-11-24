@@ -261,6 +261,30 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   assert.equal(fs2.jobs.find((j) => j.id === 6).status, "accepted", "the delegated job still ran and was reviewed");
 }
 
+// Claude's own "hit your limit" exit is a pause until the time it states, never a failure:
+// wall.json is written, the goal waits paused (the reading in data.json looks fine, and
+// still can't resume her), and nothing counts as a failed run.
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+echo run >> "${root}/limit-runs"
+echo "You've hit your 5-hour limit · resets 5:50pm (America/New_York)"
+exit 1
+`, { mode: 0o755 });
+assert.equal(run("start", "--dir", repo, "--goal", "limit goal").status, 0);
+const wallPath = path.join(tabs, "constance", "wall.json");
+assert.ok(await until(() => fs.existsSync(wallPath) && status().goal.status === "paused"), "a limit exit pauses the goal: " + JSON.stringify(status().goal));
+{
+  const ls = status();
+  const wall = JSON.parse(fs.readFileSync(wallPath, "utf8"));
+  assert.equal(wall.stated, true); assert.ok(wall.until > Date.now(), "until the stated reset time");
+  assert.match(ls.goal.pauseReason, /hit its limit/);
+  assert.equal(ls.pace.mode, "stop", "pace honors the wall over a low reading"); assert.equal(ls.pace.hard, true);
+  assert.ok(!ls.log.some((l) => l.kind === "failed" && l.at > wall.at - 5000), "no failure logged");
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(fs.readFileSync(path.join(root, "limit-runs"), "utf8").trim().split("\n").length, 1, "no retries into the wall");
+}
+assert.equal(run("stop").status, 0);
+fs.rmSync(wallPath);
+
 // Learning layer + guardrails: the lessons file seeded itself, every handoff
 // prompt carries the project rules and the guardrail block, and a run that
 // leaves a stray file is caught after it finishes — restored, lesson logged,
