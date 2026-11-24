@@ -74,15 +74,19 @@ assert.equal(colorOf(0.6), "#f2a900", "60% boundary -> amber");
 assert.equal(colorOf(0.85), "#f2a900", "85% stays amber (> 85% is red)");
 assert.equal(colorOf(0.851), "#e5484d", "just over 85% -> red, matching the tab");
 
-// The panel wires the two readings to the percent, the robot and the tooltip.
+// The panel wires the two readings to the percent, the robot and the tooltip,
+// mirroring the tab chip: the chip's outside border is the session meter and
+// its inside fill the weekly one, so the bar's percentage and active state
+// (its underline) take the session tint and the robot takes the weekly tint —
+// both through the chip's own tintFor rule (unsure readings never go green).
 assert.match(qml, /ChipMeters\.chipMeters\(barAgent\)/, "the bar reads the shared session/weekly meters");
-assert.match(qml, /meterColorFor\(barSession, root\.lightBar\)/, "the percentage color uses the tab's threshold table");
-assert.match(qml, /meterColorFor\(barWeekly, root\.lightBar\)/, "the robot color uses the tab's threshold table");
-assert.match(qml, /color: root\.barSessionColor/, "the percentage takes the session color");
+assert.match(qml, /barUnsure && p < 0\.6 \? root\.unsureColor : root\.meterColorFor\(p, root\.lightBar\)/, "the bar tint is the chip's tintFor rule on the bar's lightness");
+assert.match(qml, /barSessionColor: barSession >= 0 \? barTintFor\(barSession\)/, "the percentage color is the session tint");
+assert.match(qml, /barRobotColor: barWeekly >= 0 \? barTintFor\(barWeekly\)/, "the robot color is the weekly tint");
 assert.match(qml, /color: root\.barRobotColor/, "the robot takes the weekly color");
-assert.match(qml, /activeColor: root\.barRobotColor/, "the button's active state follows the robot");
-assert.match(qml, /text: Math\.round\(root\.barSession \* 100\) \+ "%"/, "the percentage is the session reading");
-assert.doesNotMatch(qml, /BAR_LEVELS|barLevel\(|barWorst|barShowPercent|barReadings|barValue|barIconColor/, "the divergent severity paths are gone");
+assert.match(qml, /activeColor: root\.barSessionColor/, "the percentage and underline take the session (chip border) color");
+assert.match(qml, /labelText: root\.barSession >= 0 \? Math\.round\(root\.barSession \* 100\) \+ "%"/, "the percentage is the session reading, drawn by the built-in label");
+assert.doesNotMatch(qml, /BAR_LEVELS|barLevel\(|barWorst|barShowPercent|barReadings|barValue|barIconColor|Color\.urgent/, "the divergent severity paths are gone");
 assert.match(qml, /tooltipText: root\.barTooltip/, "the tooltip names the agent the bar represents");
 assert.match(qml, /" — session "/, "the tooltip shows session and weekly");
 console.log("bar-meters: all tests passed");

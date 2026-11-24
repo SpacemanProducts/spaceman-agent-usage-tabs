@@ -222,22 +222,21 @@ Panel {
     return agents.length > 0 ? agents[0] : null
   }
   readonly property string defaultAgentName: barAgent && barAgent.name ? barAgent.name : "the default agent"
-  // The bar icon is two readings of the agent it represents (the default
-  // agent, or the first tab when none is set): the percentage beside the
-  // robot is its session meter, colored by the session's level, and the robot
-  // itself is colored by the weekly's level. Both come from chipMeters — the
-  // same session/weekly meters the tab chip's borders color from — and each
-  // level uses the same meterColorFor thresholds the tab's limit bars use, so
-  // 100% is always red. -1 means the agent reports nothing.
+  // The bar icon mirrors the agent's tab chip: chipMeters gives the same
+  // session and weekly readings the chip's borders color from, and each takes
+  // the chip's tint — the outside border's session color and the inside
+  // fill's weekly color. The percentage and the button's active state (its
+  // underline) wear the border color; the robot wears the inside color. The
+  // tint rule is the chip's own (tintFor: unsure readings never go green),
+  // picked for the bar's lightness. -1 means the agent reports nothing.
   readonly property var barMeters: ChipMeters.chipMeters(barAgent)
   readonly property real barSession: barMeters.session
   readonly property real barWeekly: barMeters.weekly
   readonly property bool barHasData: barSession >= 0 || barWeekly >= 0
-  readonly property color barSessionColor: barSession >= 0
-    ? root.meterColorFor(barSession, root.lightBar) : root.barForeground
-  readonly property color barRobotColor: barWeekly >= 0
-    ? (root.robotAngry ? Color.urgent : root.meterColorFor(barWeekly, root.lightBar))
-    : root.barForeground
+  readonly property bool barUnsure: root.unsureReason(barAgent) !== ""
+  function barTintFor(p) { return barUnsure && p < 0.6 ? root.unsureColor : root.meterColorFor(p, root.lightBar) }
+  readonly property color barSessionColor: barSession >= 0 ? barTintFor(barSession) : root.barForeground
+  readonly property color barRobotColor: barWeekly >= 0 ? barTintFor(barWeekly) : root.barForeground
   // The tooltip names the agent the bar represents and shows both numbers.
   readonly property string barTooltip: !barAgent ? "No agent selected"
     : "Bar shows " + defaultAgentName + (barHasData
@@ -1170,6 +1169,7 @@ Panel {
     function pressTest(i: string): string { var t = root.testButtons[Number(i)]; if (!t) return "no such button"; root.pressTest(t); return t.win }
     // Test hook: show the angry robot for 8 seconds (only if the gear switch is on).
     function testAngry(): string { root.testAngry = true; testAngryTimer.restart(); return root.robotAngry ? "angry" : "switched off" }
+
     function testCelebration(): string { root.fireTest("claude"); return "ok" }
     function testWindow(window: string): string { root.fireTest("claude", "scheduled", window); return "ok" }
     function testWindowAutoOpen(window: string): string { root.autoCelebrate("claude"); root.fireTest("claude", "scheduled", window); return "ok" }
@@ -1754,17 +1754,15 @@ Panel {
     PanelToolTip { visible: hbArea.containsMouse; text: hb.tip; fontFamily: root.fontFamily }
   }
 
-  // The icon canvas BarIconButton centers in the button: the percent text sits
-  // just left of it, where the button's own label would.
-  readonly property real barIconCanvas: Math.max(Style.bar.iconSize, Style.bar.iconCanvas)
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // Two readings, two colors: the percentage is the session meter in the
-    // session's level color, the robot is the weekly meter in the weekly's
-    // level color — the same meterColorFor thresholds the tab's limit bars
-    // use. activeColor (the button's active state) follows the robot.
+    // Two readings, two colors, mirroring the agent's tab chip: the built-in
+    // label draws the percentage and the button's active state draws its
+    // underline — both in the session (chip border) color — while the robot
+    // glyph takes the weekly (chip inside) color. labelText gives the label
+    // the same metrics, spacing and vertical centering it always had.
     iconComponent: Component {
       OpticalGlyph {
         implicitWidth: Style.bar.iconCanvas
@@ -1776,29 +1774,10 @@ Panel {
         color: root.barRobotColor
       }
     }
-    // The percentage is the session meter in the session's own color. It is
-    // drawn here rather than via labelText, whose color is tied to the
-    // button's active (robot) color.
-    Text {
-      id: barPercent
-      visible: root.barSession >= 0
-      textFormat: Text.PlainText
-      text: Math.round(root.barSession * 100) + "%"
-      color: root.barSessionColor
-      font.family: root.fontFamily
-      font.pixelSize: Style.bar.iconFont
-      renderType: Text.NativeRendering
-      x: (button.width - root.barIconCanvas) / 2 - implicitWidth - Style.space(4)
-      y: (button.height - implicitHeight) / 2
-        + (barPercentMetrics.descent - barPercentMetrics.ascent + barPercentMetrics.tightBoundingRect("0").height) / 2
-    }
-    FontMetrics {
-      id: barPercentMetrics
-      font: barPercent.font
-    }
+    labelText: root.barSession >= 0 ? Math.round(root.barSession * 100) + "%" : ""
     slotSize: Style.bar.iconSlot * (root.barHasData ? 2 : 1)
     active: root.barHasData
-    activeColor: root.barRobotColor
+    activeColor: root.barSessionColor
     tooltipText: root.barTooltip
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) root.selectIndex(root.selectedIndex + 1)

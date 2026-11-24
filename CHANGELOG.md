@@ -3,6 +3,9 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.33.3 - 2026-11-23
+- **The bar mirrors the tab chip, and the percent sits right:** the percentage is drawn by the button's built-in label again, so it gets the same spacing, centering and vertical alignment as before — "100%" no longer overlaps the neighbouring icon. Colors now mirror the chip exactly: the percentage and the button's active state (its underline) take the chip's outside-border color (the session tint) and the robot takes the chip's inside color (the weekly tint), both through the chip's own `tintFor` rule so unsure readings never go green. The robot no longer uses the theme's `urgent` color for the angry state — on themes where urgent isn't red (e.g. Hackerman's green) a maxed-out agent showed a green robot; it now shows the weekly tint, which is red at 100%.
+
 ## 1.33.2 - 2026-11-23
 - **The bar splits session and weekly again:** the percentage beside the robot is the default agent's session usage in the session's own color, and the robot itself is colored by the weekly's level — Claude at 62% session and 38% weekly shows "62%" in amber and a green robot. Both readings come from the same `chipMeters` session/weekly meters the tab chip's borders use (one limit serves both when that is all the agent reports), and each level uses the same `meterColorFor` thresholds as the tab's limit bars, so 100% is always red. The button's active state follows the robot, and the tooltip shows both numbers.
 
