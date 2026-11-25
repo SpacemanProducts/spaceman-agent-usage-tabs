@@ -245,5 +245,196 @@ function newRepo(name) {
   clean(repo);
 }
 
+// ============================================================ repoBranch: more edges
+{
+  const unborn = path.join(root, "repo-unborn");
+  fs.mkdirSync(unborn);
+  git(unborn, "init", "-q");
+  assert.equal(repoBranch(unborn), "", "an unborn HEAD (no commits yet) reports no branch, never throws");
+  const afile = path.join(root, "a-plain-file");
+  fs.writeFileSync(afile, "x\n");
+  assert.equal(repoBranch(afile), "", "a path that is not a repo reports no branch");
+}
+
+// ============================================================ worktreeRoot: env is read fresh, never cached
+{
+  assert.equal(worktreeRoot({ CONSTANCE_WORKTREES: "" }).endsWith(path.join("constance-worktrees")),
+    true, "an empty-string override falls through to the default");
+  const saved = process.env.CONSTANCE_WORKTREES;
+  try {
+    process.env.CONSTANCE_WORKTREES = path.join(root, "wts-a");
+    assert.equal(worktreeFor(1), path.join(root, "wts-a", "job-1"), "the first env value is used");
+    process.env.CONSTANCE_WORKTREES = path.join(root, "wts-b");
+    assert.equal(worktreeFor(1), path.join(root, "wts-b", "job-1"), "a changed env value is picked up: no caching");
+  } finally {
+    process.env.CONSTANCE_WORKTREES = saved;
+  }
+}
+
+// ============================================================ createWorktree: error paths
+{
+  const notRepo = path.join(root, "not-a-repo");
+  fs.mkdirSync(notRepo);
+  assert.throws(() => createWorktree(notRepo, 920), /could not create worktree/, "a non-repo dir throws with git's error");
+
+  const repo = newRepo("create-errors");
+  assert.throws(() => createWorktree(repo, "1 2"), /could not create worktree/, "an id that makes an invalid branch name throws");
+
+  // CONSTANCE_WORKTREES pointing at a plain file: the mkdir for the worktree
+  // parent fails before git is even asked — the raw fs error propagates.
+  const blocker = path.join(root, "wts-blocker");
+  fs.writeFileSync(blocker, "x\n");
+  const saved = process.env.CONSTANCE_WORKTREES;
+  try {
+    process.env.CONSTANCE_WORKTREES = blocker;
+    assert.throws(() => createWorktree(repo, 921), undefined, "an unwritable worktree root throws");
+  } finally {
+    process.env.CONSTANCE_WORKTREES = saved;
+  }
+  clean(repo);
+
+  // BUG: createWorktree is not idempotent for the same job id. It removes a
+  // stale worktree folder at the same path but leaves the old branch behind,
+  // so `git worktree add -b` then fails with "branch already exists". A retry
+  // of the same job (the very case the stale-folder cleanup exists for) dies.
+  // {
+  //   const repo2 = newRepo("create-twice");
+  //   const first = createWorktree(repo2, 922);
+  //   const second = createWorktree(repo2, 922);   // should reuse/replace cleanly
+  //   assert.equal(second.worktree, first.worktree);
+  //   assert.equal(second.branch, first.branch);
+  //   assert.ok(fs.existsSync(second.worktree), "the recreated worktree exists");
+  //   assert.equal(git(repo2, "worktree", "list", "--porcelain").split("worktree ").length - 1, 2,
+  //     "exactly the repo plus one worktree");
+  //   dropWorktree(repo2, second.worktree, second.branch, { deleteBranch: true });
+  //   clean(repo2);
+  // }
+}
+
+// ============================================================ mergeBranch: self, empty, detached, truncation, dirty-conflict
+{
+  const repo = newRepo("merge-self");
+  const current = repoBranch(repo);
+  const before = head(repo);
+  const m = mergeBranch(repo, current);
+  assert.equal(m.ok, true, "merging the repo's own current branch is a no-op success");
+  assert.equal(m.fastForward, false);
+  assert.equal(head(repo), before, "HEAD does not move");
+  clean(repo);
+
+  assert.equal(mergeBranch(repo, null).ok, false, "a null branch fails cleanly");
+  assert.equal(mergeBranch(repo, null).conflict, false);
+  assert.ok(mergeBranch(repo, "").output.length > 0, "an empty branch reports git's complaint");
+  assert.equal(mergeBranch(repo, "").conflict, false);
+  clean(repo);
+}
+
+// A detached HEAD still merges: git lands the result on the detached HEAD.
+{
+  const repo = newRepo("merge-detached");
+  const w = createWorktree(repo, 930);
+  commitFile(w.worktree, "det.txt", "det\n", "copy det");
+  const main = git(repo, "branch", "--show-current").trim();
+  git(repo, "checkout", "-q", "--detach", "HEAD");
+  const m = mergeBranch(repo, w.branch);
+  assert.equal(m.ok, true, "a merge works on a detached HEAD");
+  assert.equal(m.fastForward, true);
+  assert.equal(repoBranch(repo), "", "still detached afterwards");
+  assert.equal(head(repo), head(w.worktree), "the detached HEAD moved to the branch tip");
+  git(repo, "checkout", "-q", main);   // back to the branch; the detached tip is abandoned, repo clean
+  clean(repo);
+  dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true });
+}
+
+// mergeBranch truncates its failure output to the last 800 chars: many
+// conflicting files produce far more, and the report must stay bounded.
+{
+  const repo = newRepo("merge-truncate");
+  const w = createWorktree(repo, 931);
+  for (let i = 0; i < 40; i++) {
+    const name = `conflict-${String(i).padStart(2, "0")}.txt`;
+    commitFile(repo, name, `repo ${i}\n`, `repo ${i}`);
+    commitFile(w.worktree, name, `copy ${i}\n`, `copy ${i}`);
+  }
+  const m = mergeBranch(repo, w.branch);
+  assert.equal(m.ok, false);
+  assert.equal(m.conflict, true, "forty conflicting files is still a conflict");
+  assert.ok(m.output.length <= 800, `output is capped at 800 chars, got ${m.output.length}`);
+  assert.ok(m.output.length > 0);
+  clean(repo);
+  dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true });
+}
+
+// A dirty file that the incoming branch also changes: git refuses before the
+// merge starts, so it is NOT a conflict and the owner's edit survives.
+{
+  const repo = newRepo("merge-dirtyconflict");
+  const w = createWorktree(repo, 932);
+  commitFile(repo, "hot.txt", "base\n", "base");   // now tracked on both sides' base
+  commitFile(w.worktree, "hot.txt", "copy version\n", "copy edits hot");
+  fs.writeFileSync(path.join(repo, "hot.txt"), "owner edit\n");   // unstaged local change
+  const m = mergeBranch(repo, w.branch);
+  assert.equal(m.ok, false);
+  assert.equal(m.conflict, false, "a pre-merge refusal is not a conflict");
+  assert.equal(fs.readFileSync(path.join(repo, "hot.txt"), "utf8"), "owner edit\n", "the owner's edit is untouched");
+  assert.equal(git(repo, "status", "--porcelain"), " M hot.txt\n");
+  assert.equal(tryGit(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD"), "", "no merge state left");
+  dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true });
+}
+
+// ============================================================ dropWorktree: more edges
+{
+  const repo = newRepo("drop-edges");
+
+  // Deleting a branch that does not exist reports "kept", never throws.
+  const d1 = dropWorktree(repo, null, "constance/job-999-missing", { deleteBranch: true });
+  assert.ok(d1.some((s) => s.includes("kept")), "a missing branch is reported kept: " + d1.join("; "));
+
+  // deleteBranch with no branch arg is a no-op for branches.
+  assert.deepEqual(dropWorktree(repo, null, null, { deleteBranch: true }), [], "nothing to drop is a no-op");
+
+  // A worktree path that does not exist and no branch: still a no-op.
+  assert.deepEqual(dropWorktree(repo, path.join(process.env.CONSTANCE_WORKTREES, "job-933"), null, {}), [],
+    "a missing worktree path with no branch is a no-op");
+
+  // The repo's CURRENT branch can never be deleted: git refuses, the report
+  // says kept, and the branch survives.
+  const current = repoBranch(repo);
+  const d2 = dropWorktree(repo, null, current, { deleteBranch: true });
+  assert.ok(d2.some((s) => s.includes("kept")), "the current branch is reported kept: " + d2.join("; "));
+  assert.ok(git(repo, "branch", "--list", current).includes(current), "the current branch still exists");
+
+  // A worktree path that is a plain file (not a dir): removed and reported.
+  const f = path.join(process.env.CONSTANCE_WORKTREES, "job-934");
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, "x\n");
+  const d3 = dropWorktree(repo, f, null, {});
+  assert.ok(d3.some((s) => s.includes("worktree removed")), "a plain file path is reported removed: " + d3.join("; "));
+  assert.equal(fs.existsSync(f), false, "the file is gone");
+
+  // BUG: dropWorktree reports "worktree removed" and deletes the branch even
+  // when BOTH `git worktree remove` and the rmSync fallback fail — e.g. the
+  // folder's permissions were tightened (chmod 000) after creation. The
+  // folder is still there afterwards, so the report lies and the branch is
+  // deleted while its worktree remains on disk.
+  // {
+  //   const repo2 = newRepo("drop-unremovable");
+  //   const w = createWorktree(repo2, 935);
+  //   fs.chmodSync(w.worktree, 0o000);
+  //   const d = dropWorktree(repo2, w.worktree, w.branch, { deleteBranch: true });
+  //   fs.chmodSync(w.worktree, 0o700);   // restore so cleanup can run
+  //   assert.equal(fs.existsSync(w.worktree), false,
+  //     "desired: the folder is actually gone (today it survives while 'worktree removed' is reported)");
+  //   assert.ok(!d.some((s) => s.includes("worktree removed")) || !fs.existsSync(w.worktree),
+  //     "desired: 'worktree removed' is only reported when it really was");
+  //   fs.rmSync(w.worktree, { recursive: true, force: true });
+  //   git(repo2, "worktree", "prune");
+  //   git(repo2, "branch", "-D", w.branch);
+  //   clean(repo2);
+  // }
+
+  clean(repo);
+}
+
 fs.rmSync(root, { recursive: true, force: true });   // the repos, worktrees and fake home, nothing else
 console.log("constance-worktree.deep: tests passed");
