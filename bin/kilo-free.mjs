@@ -81,15 +81,28 @@ function* records(obj, depth = 0) {
   for (const v of Object.values(obj)) if (v && typeof v === "object") yield* records(v, depth + 1);
 }
 
+// Depth of a JSON fragment's open {/[ brackets, ignoring string contents.
+// null when the fragment ends inside an unterminated string (a raw newline
+// inside a JSON string is invalid, so that doc can never parse).
+function braceDepth(s) {
+  let depth = 0, str = false, esc = false;
+  for (const ch of s) {
+    if (str) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') str = false;
+    } else if (ch === '"') str = true;
+    else if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") depth--;
+  }
+  return str ? null : depth;
+}
+
 // Scans kilo run --format json output (one JSON event per line, but tolerant
-// of a single pretty-printed doc). Returns {paid:true, reason} on the first
-// non-free model or cost > 0, else null.
+// of a single pretty-printed doc spanning several lines). Returns
+// {paid:true, reason} on the first non-free model or cost > 0, else null.
 export function costCheck(outputText) {
-  for (const line of String(outputText || "").split("\n")) {
-    const t = line.trim();
-    if (!t || (t[0] !== "{" && t[0] !== "[")) continue;
-    let events;
-    try { events = JSON.parse(t); } catch { continue; }
+  const scan = (events) => {
     for (const ev of Array.isArray(events) ? events : [events]) {
       for (const r of records(ev)) {
         if (typeof r.modelID === "string" && r.modelID) {
@@ -100,6 +113,30 @@ export function costCheck(outputText) {
           return { paid: true, reason: `cost ${r.cost} reported` };
       }
     }
+    return null;
+  };
+  // Buffer lines until a {/[ ... }/] doc is complete, then parse it whole.
+  let buf = "";
+  for (const line of String(outputText || "").split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    if (!buf || t[0] === "{" || t[0] === "[") {
+      // Junk lines are skipped; a new doc starting while the old one is
+      // still open means the old buffer was malformed, so drop it.
+      if (!buf && t[0] !== "{" && t[0] !== "[") continue;
+      buf = t;
+    } else {
+      buf += "\n" + t;
+    }
+    let events;
+    try { events = JSON.parse(buf); } catch {
+      const depth = braceDepth(buf);
+      if (depth === null || depth <= 0) buf = ""; // closed or unfixable: drop
+      continue;
+    }
+    buf = "";
+    const hit = scan(events);
+    if (hit) return hit;
   }
   return null;
 }
