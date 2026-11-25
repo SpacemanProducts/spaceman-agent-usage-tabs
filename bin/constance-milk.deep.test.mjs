@@ -67,18 +67,15 @@ try {
   // BigInt coerces through Number().
   assert.equal(readMilk({ constanceMilk: 50n }), 50);
 
-  // BUG: readMilk treats null, "" and false as 0 (Max delegation) instead of the
-  // documented DEFAULT_MILK, because Number(null)/Number("")/Number(false) are 0.
-  // A settings.json carrying "constanceMilk": null or "" silently drops the
-  // slider to Max delegation rather than the Lean default. Expected DEFAULT_MILK.
-  // assert.equal(readMilk({ constanceMilk: null }), DEFAULT_MILK);
-  // assert.equal(readMilk({ constanceMilk: "" }), DEFAULT_MILK);
-  // assert.equal(readMilk({ constanceMilk: false }), DEFAULT_MILK);
-  // Current (buggy) behavior, pinned so a fix shows up as a diff:
-  assert.equal(readMilk({ constanceMilk: null }), 0, "null coerces to 0 today");
-  assert.equal(readMilk({ constanceMilk: "" }), 0, "empty string coerces to 0 today");
-  assert.equal(readMilk({ constanceMilk: false }), 0, "false coerces to 0 today");
-  assert.equal(readMilk({ constanceMilk: " " }), 0, "whitespace-only string coerces to 0 today");
+  // Regression: null, "", false and blank strings must fall back to
+  // DEFAULT_MILK, not coerce to 0 (Max delegation) through Number().
+  // A settings.json carrying "constanceMilk": null or "" must not silently
+  // drop the slider to Max delegation instead of the Lean default.
+  assert.equal(readMilk({ constanceMilk: null }), DEFAULT_MILK);
+  assert.equal(readMilk({ constanceMilk: "" }), DEFAULT_MILK);
+  assert.equal(readMilk({ constanceMilk: false }), DEFAULT_MILK);
+  assert.equal(readMilk({ constanceMilk: " " }), DEFAULT_MILK, "whitespace-only string falls back");
+  assert.equal(readMilk({ constanceMilk: "  \t\n " }), DEFAULT_MILK, "blank string with whitespace falls back");
   // Arrays coerce by their single element / empty-to-zero too.
   assert.equal(readMilk({ constanceMilk: [] }), 0);
   assert.equal(readMilk({ constanceMilk: [42] }), 42);
