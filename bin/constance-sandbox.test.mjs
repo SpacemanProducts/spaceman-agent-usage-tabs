@@ -20,6 +20,13 @@ assert.equal(sandboxProblem("grok"), "");
 for (const id of ["copilot", "cursor", "antigravity"]) {
   assert.match(sandboxProblem(id), /keyring/, `${id} needs the owner's keyring opt-in`);
 }
+// freebuff and kilo use file logins (no keyring) and get exactly their own dirs.
+assert.deepEqual(PROFILES.freebuff.rw, [".config/manicode", ".freebuff"]);
+assert.deepEqual(PROFILES.kilo.rw, [".config/kilo", ".local/share/kilo", ".cache/kilo"]);
+for (const id of ["freebuff", "kilo"]) {
+  assert.ok(!PROFILES[id].keyring, `${id} must not be a keyring agent`);
+  assert.equal(sandboxProblem(id), "", `${id} should sandbox cleanly`);
+}
 // judge() never offers an agent the sandbox refuses.
 const a = { id: "grok", installed: true, signedIn: true, limits: [{ title: "Daily", percent: 0.1 }] };
 assert.equal(judge(a).available, true);
@@ -157,6 +164,38 @@ assert.equal(busDirs(), busBefore, "a refused launch leaves nothing behind");
   ]) assert.ok(wargs.includes(frag), `worktree sandbox args contain ${frag}: ${wargs}`);
   execFileSync("git", ["-C", proj, "worktree", "remove", "--force", wt]);
   execFileSync("git", ["-C", proj, "branch", "-D", "wt-test"]);
+}
+
+// freebuff and kilo, for real: a fake headless CLI of each on PATH, run inside
+// the sandbox. Each can write the worktree and its own config/login dirs, and
+// gets a write error anywhere else (here: the read-only toolchain bind).
+{
+  const fakebin = path.join(tmp, "fakebin"); fs.mkdirSync(fakebin);
+  const cases = [
+    ["freebuff", [".config/manicode", ".freebuff"]],
+    ["kilo", [".config/kilo", ".local/share/kilo", ".cache/kilo"]],
+  ];
+  for (const [id, dirs] of cases) {
+    const script = ["#!/bin/sh",
+      'try() { if eval "$2" 2>/dev/null; then echo "$1=ok"; else echo "$1=blocked"; fi; }',
+      `try worktree "echo hi > '${proj}/${id}.txt'"`,
+      ...dirs.map((d, i) => `try cfg${i} "echo x > '${path.join(home, d)}/probe-${i}'"`),
+      `try outside "echo x >> '${path.join(home, ".local", "bin", "tool")}'"`,
+    ].join("\n") + "\n";
+    fs.writeFileSync(path.join(fakebin, id), script, { mode: 0o755 });
+    const penv = { ...env, PATH: `/tmp/fakebin:${env.PATH}` };
+    const r2 = spawnSync("bwrap", [...sandboxArgs({ agent: id, dir: proj, tmp, env: penv }), "--", id, "--help"],
+      { env: sandboxEnv(penv, id), encoding: "utf8", timeout: 30e3 });
+    assert.equal(r2.status, 0, `${id}: ${r2.stderr}`);
+    const got = Object.fromEntries(r2.stdout.trim().split("\n").map((l) => l.split("=")));
+    assert.equal(got.worktree, "ok", `${id} worktree write: ${r2.stdout}`);
+    dirs.forEach((d, i) => {
+      assert.equal(got[`cfg${i}`], "ok", `${id} write to ${d}: ${r2.stdout}`);
+      assert.equal(fs.readFileSync(path.join(home, d, `probe-${i}`), "utf8"), "x\n", `${id} ${d} landed on host`);
+    });
+    assert.equal(got.outside, "blocked", `${id} write outside its dirs: ${r2.stdout}`);
+    assert.equal(fs.readFileSync(path.join(proj, `${id}.txt`), "utf8"), "hi\n");
+  }
 }
 
 fs.rmSync(base, { recursive: true, force: true });

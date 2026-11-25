@@ -34,6 +34,8 @@ export const PROFILES = {
   devin: { rw: [".config/devin", ".local/share/devin", ".cache/devin"] },
   codex: { rw: [".codex", ".local/state/codex"] },
   cursor: { rw: [".cursor", ".config/cursor", ".local/share/cursor-agent", ".local/state/cursor", ".cache/cursor-compile-cache"], keyring: true, env: { DISPLAY: ":99" } },
+  freebuff: { rw: [".config/manicode", ".freebuff"] },
+  kilo: { rw: [".config/kilo", ".local/share/kilo", ".cache/kilo"] },
 };
 
 // Read-only toolchain and git identity, brought back into the empty home.
