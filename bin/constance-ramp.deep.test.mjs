@@ -3,12 +3,9 @@
 // and malformed inputs, and readMachine's /proc parsing failure paths. All state
 // lives in mktemp dirs; HOME is faked and clocks are injected via `now`.
 //
-// KNOWN BUG (asserted as current behaviour, NOT fixed here — see commented-out
-// test at the bottom): roomForCopy() only guards the low-memory check when
-// `machine` is exactly null. A malformed/partial machine object (missing or
-// non-numeric memTotal/memAvailable) makes memNeed NaN, the comparison
-// `memAvailable < NaN` is false, and the copy is allowed — bypassing both the
-// memory floor AND the "can't read the machine" hold that null triggers.
+// roomForCopy() guards the low-memory check: a malformed/partial machine
+// object (missing or non-numeric memTotal/memAvailable) counts as unreadable,
+// and a malformed ramp fails closed — a NaN need never reads as room.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -147,12 +144,13 @@ assert.equal(roomForCopy({ memTotal: 32 * G, memAvailable: 0 },
   { ramp: { minFreeBytes: 0, minFreeShare: 0 }, now: NOW }).ok, true,
   "zero ramp allows even empty memory");
 
-// Malformed ramp: need becomes NaN and every comparison is false -> ok.
-// Asserted as current behaviour; see KNOWN BUG note at top.
-assert.equal(roomForCopy(calm, { ramp: {}, now: NOW }).ok, true,
-  "empty ramp -> NaN need -> allowed (current behaviour)");
-assert.equal(roomForCopy(calm, { ramp: { minFreeBytes: "x", minFreeShare: "y" }, now: NOW }).ok, true,
-  "non-numeric ramp -> NaN need -> allowed (current behaviour)");
+// Malformed ramp: need becomes NaN and the check must fail closed, not open.
+assert.equal(roomForCopy(calm, { ramp: {}, now: NOW }).ok, false,
+  "empty ramp -> NaN need -> held");
+assert.equal(roomForCopy(calm, { ramp: { minFreeBytes: "x", minFreeShare: "y" }, now: NOW }).ok, false,
+  "non-numeric ramp -> NaN need -> held");
+assert.equal(roomForCopy(calm, { ramp: null, now: NOW }).ok, false,
+  "null ramp -> NaN need -> held");
 assert.equal(roomForCopy(calm, { ramp: undefined, now: NOW }).ok, true,
   "explicit undefined ramp falls back to RAMP default");
 
@@ -285,28 +283,25 @@ assert.equal(roomForCopy(tiny, { ramp, now: NOW }).ok, false,
 assert.deepEqual(RAMP, { minFreeBytes: 2 * G, minFreeShare: 0.1 });
 assert.equal(roomForCopy(calm, { now: NOW }).ok, true, "default ramp param works");
 
-// ---- KNOWN BUG (commented out, NOT fixed) ------------------------------------
-// roomForCopy() treats any non-null `machine` as healthy. A malformed object
-// makes memNeed NaN and `memAvailable < NaN` false, so the copy is allowed even
-// with zero/negative/missing memory — bypassing the "can't read" hold that
-// null triggers. In practice readMachine() returns null rather than a partial
-// object, but roomForCopy's contract accepts any object and callers/tests can
-// hand it one. These asserts document the DESIRED behaviour; they fail today.
-/*
+// ---- Malformed inputs fail closed -------------------------------------------
+// roomForCopy() treats any machine object with missing/non-numeric memory
+// fields as unreadable (first copy allowed, the rest held), and any ramp that
+// makes the need NaN holds every copy. In practice readMachine() returns null
+// rather than a partial object, but roomForCopy's contract accepts any object
+// and callers/tests can hand it one.
 assert.equal(roomForCopy({}, { running: 5, ramp, now: NOW }).ok, false,
-  "BUG: empty machine object should not count as room");
+  "empty machine object should not count as room");
 assert.equal(roomForCopy({ memTotal: 32 * G }, { running: 5, ramp, now: NOW }).ok, false,
-  "BUG: missing memAvailable should not count as room");
+  "missing memAvailable should not count as room");
 assert.equal(roomForCopy({ memTotal: "lots", memAvailable: "lots" }, { running: 5, ramp, now: NOW }).ok, false,
-  "BUG: non-numeric machine fields should not count as room");
+  "non-numeric machine fields should not count as room");
 assert.equal(roomForCopy(calm, { ramp: { minFreeBytes: "x", minFreeShare: "y" }, now: NOW }).ok, false,
-  "BUG: malformed ramp should fail closed, not open");
-*/
-// Current (buggy) behaviour, asserted so a future fix flips these visibly:
-assert.equal(roomForCopy({}, { running: 5, ramp, now: NOW }).ok, true,
-  "current: malformed machine object allows the copy (see KNOWN BUG)");
-assert.equal(roomForCopy({ memTotal: 32 * G }, { running: 5, ramp, now: NOW }).ok, true,
-  "current: missing memAvailable allows the copy (see KNOWN BUG)");
+  "malformed ramp should fail closed, not open");
+// A malformed machine object follows the same unreadable-machine rule as null:
+// the first copy may run, the rest are held.
+assert.equal(roomForCopy({}, { running: 0, ramp, now: NOW }).ok, true,
+  "malformed machine still allows the first copy, like null");
+assert.match(roomForCopy({}, { running: 1, ramp, now: NOW }).reason, /can't read the machine/);
 
 process.env.HOME = realHome;
 fs.rmSync(tmp, { recursive: true, force: true });

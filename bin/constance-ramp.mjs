@@ -37,14 +37,20 @@ export function readMachine(proc = process.env.CONSTANCE_PROC || "/proc", cpus =
 }
 
 const gib = (b) => (b / 1024 ** 3).toFixed(1);
+const numeric = (v) => typeof v === "number" && !Number.isNaN(v);
 
 // { ok, reason }. `running` = copies of this agent already started; `lastStartAt`
 // is accepted for callers' convenience but ignored. The first copy only needs
 // readable, healthy numbers; an unreadable machine allows the first copy and
-// holds the rest.
+// holds the rest. A malformed machine object counts as unreadable, and a
+// malformed ramp fails closed (no copy) — a NaN need must never read as room.
 export function roomForCopy(machine, { running = 0, lastStartAt = 0, now = Date.now(), ramp = RAMP } = {}) {
-  if (!machine) return running === 0 ? { ok: true, reason: "" } : { ok: false, reason: "can't read the machine's load and memory, so only one copy runs" };
-  const memNeed = Math.max(ramp.minFreeBytes, ramp.minFreeShare * machine.memTotal);
+  const unreadable = running === 0
+    ? { ok: true, reason: "" }
+    : { ok: false, reason: "can't read the machine's load and memory, so only one copy runs" };
+  if (!machine || !numeric(machine.memTotal) || !numeric(machine.memAvailable)) return unreadable;
+  const memNeed = Math.max(ramp?.minFreeBytes, ramp?.minFreeShare * machine.memTotal);
+  if (!numeric(memNeed)) return { ok: false, reason: "can't read the memory floor, so no copy starts" };
   if (machine.memAvailable < memNeed) return { ok: false, reason: `low memory: ${gib(machine.memAvailable)} GiB free (starts at ${gib(memNeed)} GiB)` };
   return { ok: true, reason: "" };
 }
