@@ -30,9 +30,10 @@ const clock = (iso) => { const d = new Date(iso); return isNaN(d.getTime()) ? ""
 
 // info = { kind: "surprise" | "scheduled", details: [{title, surprise, dueAt}], confirmed?: <agyresets announcement> }
 export function resetNotice(agent, windows, info) {
-  const copy = SURPRISE_AGENTS[agent.id];
+  const copy = SURPRISE_AGENTS[agent?.id];
+  const wins = Array.isArray(windows) ? windows : [];
   if (info?.kind === "surprise" && copy) {
-    const early = (info.details || []).filter((d) => d.surprise);
+    const early = (Array.isArray(info.details) ? info.details : []).filter((d) => d?.surprise);
     const titles = early.map((d) => d.title).join(" and ");
     const due = early.map((d) => Date.parse(d.dueAt)).filter(Number.isFinite).sort((a, b) => a - b)[0];
     if (info.confirmed && copy.confirmed) {   // only agents with an announcement source (Antigravity)
@@ -42,10 +43,11 @@ export function resetNotice(agent, windows, info) {
     return { title: copy.honest(windowPhrase(early.map((d) => d.title))), body: `\u26A1 ${titles} reset early${due ? ` - it wasn't due until ${clock(new Date(due).toISOString())}` : ""}. No announcement found.` };
   }
   // With several accounts the notice names the ones that reset.
-  const who = (info?.accounts || []).length ? ` (${info.accounts.join(", ")})` : "";
+  const accounts = Array.isArray(info?.accounts) ? info.accounts : [];
+  const who = accounts.length ? ` (${accounts.join(", ")})` : "";
   return {
-    title: `${agent.name}${who} ${windowPhrase(windows)} reset, go cook.`,
-    body: `\u{1F4B8} ${windows.join(" and ")} limit${windows.length > 1 ? "s" : ""} reset`,
+    title: `${agent?.name}${who} ${windowPhrase(wins)} reset, go cook.`,
+    body: `\u{1F4B8} ${wins.join(" and ")} limit${wins.length > 1 ? "s" : ""} reset`,
   };
 }
 
@@ -88,22 +90,29 @@ function pruneFired(fired, now) {
   for (const k of Object.keys(fired)) if (!fired[k] || now - fired[k].at > FIRED_KEEP_MS) delete fired[k];
 }
 
+// A NaN percent is not a reading: classifyResets' typeof guard lets it through
+// (NaN <= minDrop is false), so meters reporting NaN are dropped before comparing.
+const readableLimits = (limits) => (Array.isArray(limits) ? limits.filter((l) => !Number.isNaN(l?.percent)) : limits);
+
 export function applyResets(agents, prevAgents, notify, now = Date.now(), fired = {}) {
+  fired = fired && typeof fired === "object" ? fired : {};
   pruneFired(fired, now);
   const prev = new Map((Array.isArray(prevAgents) ? prevAgents : []).filter((a) => a && a.id).map((a) => [a.id, a]));
-  for (const a of agents || []) {
+  for (const a of Array.isArray(agents) ? agents : []) {
+    if (!a) continue;
     const before = prev.get(a.id);
     let details, accounts = [];
-    if ((a.accounts || []).length > 1) {
+    const accs = a.accounts;
+    if (accs && typeof accs.length === "number" && accs.length > 1 && typeof accs[Symbol.iterator] === "function") {
       // Several accounts: each is compared with its own previous meters.
       details = [];
-      const prevAcc = new Map((before?.accounts || []).map((x) => [x.id, x]));
-      for (const acc of a.accounts) {
+      const prevAcc = new Map((Array.isArray(before?.accounts) ? before.accounts : []).map((x) => [x.id, x]));
+      for (const acc of accs) {
         const prevLimits = prevAcc.get(acc.id)?.limits;
-        const d = classifyResets(prevLimits, acc.limits, now).filter((x) => newReset(fired, `${a.id}:${acc.id}|${x.title}`, prevLimits, x.title, now));
+        const d = classifyResets(readableLimits(prevLimits), readableLimits(acc.limits), now).filter((x) => newReset(fired, `${a.id}:${acc.id}|${x.title}`, prevLimits, x.title, now));
         if (d.length) { accounts.push(acc.label); details.push(...d); }
       }
-    } else details = classifyResets(before?.limits, a.limits, now).filter((x) => newReset(fired, `${a.id}|${x.title}`, before?.limits, x.title, now));
+    } else details = classifyResets(readableLimits(before?.limits), readableLimits(a.limits), now).filter((x) => newReset(fired, `${a.id}|${x.title}`, before?.limits, x.title, now));
     if (details.length) {
       const windows = details.map((d) => d.title);
       const kind = SURPRISE_AGENTS[a.id] && details.some((d) => d.surprise) ? "surprise" : "scheduled";

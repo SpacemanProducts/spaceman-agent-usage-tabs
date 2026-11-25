@@ -49,28 +49,27 @@ try {
   assert.doesNotThrow(() => applyResets(
     [A("c", [lim("Session", 0.01)])],
     [{ id: "c", limits: "junk", accounts: {} }], () => {}, T0, {}));
-  // BUG: a null (or otherwise non-object) entry inside `agents` crashes the whole
-  // pass — `prev.get(a.id)` dereferences it before anything can skip it.
-  // assert.doesNotThrow(() => applyResets([null], [], () => {}, T0, {}));
-  // BUG: a truthy non-iterable `agents` (5, {}) throws "(agents || []) is not
-  // iterable"; only null/undefined/arrays/strings are safe.
-  // assert.doesNotThrow(() => applyResets(5, [], () => {}, T0, {}));
+  // Corrupt shapes that used to crash are now tolerated: a null entry inside
+  // `agents` is skipped, and a truthy non-iterable `agents` (5, {}) is treated
+  // as empty.
+  assert.doesNotThrow(() => applyResets([null], [], () => {}, T0, {}));
+  assert.doesNotThrow(() => applyResets(5, [], () => {}, T0, {}));
   // BUG: an agent with a falsy id (0, "") can never celebrate: the prev map only
   // keeps truthy ids, so `before` is never found and classifyResets sees no
   // previous meters.
   // { const f = {}; const seen = []; const ag = [A(0, [lim("Session", 0.01)])];
   //   applyResets(ag, [A(0, [lim("Session", 0.9)])], () => seen.push(1), T0, f);
   //   assert.equal(seen.length, 1, "a falsy-id agent should still celebrate"); }
-  // BUG: when the previous agent's `accounts` is not an array (corrupt state
-  // JSON), the multi-account compare crashes on `.map`.
-  // { const cur = { id: "c", name: "c", limits: [], accounts: [
-  //     { id: "x", label: "X", limits: [lim("Session", 0.01)] },
-  //     { id: "y", label: "Y", limits: [lim("Session", 0.5)] }] };
-  //   assert.doesNotThrow(() => applyResets([cur], [{ id: "c", accounts: {} }], () => {}, T0, {})); }
-  // BUG: `accounts` with length > 1 that is not iterable (e.g. { length: 2 })
-  // throws in the `for...of` — only arrays and strings survive.
-  // { const a = { id: "c", name: "c", limits: [], accounts: { length: 2 } };
-  //   assert.doesNotThrow(() => applyResets([a], [], () => {}, T0, {})); }
+  // A non-array `accounts` on the previous agent (corrupt state JSON) no longer
+  // crashes the multi-account compare.
+  { const cur = { id: "c", name: "c", limits: [], accounts: [
+      { id: "x", label: "X", limits: [lim("Session", 0.01)] },
+      { id: "y", label: "Y", limits: [lim("Session", 0.5)] }] };
+    assert.doesNotThrow(() => applyResets([cur], [{ id: "c", accounts: {} }], () => {}, T0, {})); }
+  // `accounts` with length > 1 that is not iterable (e.g. { length: 2 }) no
+  // longer throws in the `for...of` — it falls back to the single-account path.
+  { const a = { id: "c", name: "c", limits: [], accounts: { length: 2 } };
+    assert.doesNotThrow(() => applyResets([a], [], () => {}, T0, {})); }
 
   // ---- percent edge values ----
   {
@@ -81,11 +80,9 @@ try {
     }
     // -Infinity is a number and an infinite drop: it celebrates.
     assert.equal(run([A("c", [lim("Session", -Infinity)])], [A("c", [lim("Session", 0.9)])], T0, {}).length, 1);
-    // BUG: NaN percent passes `typeof === "number"` and `NaN <= minDrop` is
-    // false, so classifyResets reports a reset for a meter that reported
-    // nothing usable — a celebration for garbage data.
-    // assert.equal(run([A("c", [lim("Session", NaN)])], [A("c", [lim("Session", 0.9)])], T0, {}).length, 0,
-    //   "NaN percent must not celebrate");
+    // A NaN percent is not a reading: it must never celebrate.
+    assert.equal(run([A("c", [lim("Session", NaN)])], [A("c", [lim("Session", 0.9)])], T0, {}).length, 0,
+      "NaN percent must not celebrate");
     // The drop must be STRICTLY greater than 0.5 (classifyResets minDrop).
     assert.equal(run([A("c", [lim("Session", 0.5)])], [A("c", [lim("Session", 1)])], T0, {}).length, 0, "exactly 50 points is not a reset");
     assert.equal(run([A("c", [lim("Session", 0.499999)])], [A("c", [lim("Session", 1)])], T0, {}).length, 1, "a hair over 50 points is");
@@ -185,11 +182,13 @@ try {
       applyResets(nt(0.05), nt(0.9), () => seen.push(2), T0 + 60000, fired);
       assert.equal(seen.length, 1, "timed then no-time inside the hour stays quiet");
     }
-    // BUG: `fired` itself is not validated. null throws in pruneFired, a string
-    // throws on the record write, and an ARRAY accepts the records as expando
-    // properties that JSON.stringify silently drops — dedupe would be lost
-    // across a restart. (collect.mjs sanitizes before calling, so this is latent.)
-    // assert.doesNotThrow(() => run(mk(0.05, "2026-11-22T15:00:00Z"), mk(0.9, due), T0, null));
+    // `fired` itself is not validated. null is treated as empty (collect.mjs
+    // sanitizes before calling, so this is latent); a string is treated the
+    // same way. An ARRAY still accepts the records as expando properties that
+    // JSON.stringify silently drops — dedupe would be lost across a restart.
+    assert.doesNotThrow(() => run(mk(0.05, "2026-11-22T15:00:00Z"), mk(0.9, due), T0, null));
+    // BUG: an array `fired` keeps records as expando properties that
+    // JSON.stringify silently drops — dedupe would be lost across a restart.
     // const arr = []; run(mk(0.05, "2026-11-22T15:00:00Z"), mk(0.9, due), T0, arr);
     // assert.ok(JSON.parse(JSON.stringify(arr))["g|Weekly"], "array fired must survive serialization");
   }
@@ -479,11 +478,11 @@ try {
     // { const n = resetNotice({ id: "claude", name: "Claude Code" }, ["Session"],
     //     { kind: "surprise", details: [{ title: "Session", surprise: false, dueAt: "" }] });
     //   assert.notMatch(n.title, /limit reset came early/, "no early meter, no surprise wording"); }
-    // BUG: resetNotice trusts its arguments — a non-array `windows`, a null
-    // agent, or a non-array `info.accounts` all throw TypeError.
-    // assert.doesNotThrow(() => resetNotice({ name: "X" }, null, {}));
-    // assert.doesNotThrow(() => resetNotice(null, ["Session"], {}));
-    // assert.doesNotThrow(() => resetNotice({ name: "X" }, ["Session"], { accounts: "ab" }));
+    // resetNotice tolerates wrong argument types: a non-array `windows`, a null
+    // agent, or a non-array `info.accounts` no longer throw TypeError.
+    assert.doesNotThrow(() => resetNotice({ name: "X" }, null, {}));
+    assert.doesNotThrow(() => resetNotice(null, ["Session"], {}));
+    assert.doesNotThrow(() => resetNotice({ name: "X" }, ["Session"], { accounts: "ab" }));
     // Normal-path edges that DO work: missing agent name renders "undefined",
     // empty windows render the "limit" fallback, accounts are joined verbatim.
     assert.equal(resetNotice({}, ["Session"], {}).title, "undefined session reset, go cook.");
