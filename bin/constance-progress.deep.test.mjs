@@ -69,12 +69,14 @@ assert.equal(
 assert.equal(
   progressLine({ devinTokens: 1e6, sessionUsedPct: 60, sessionStartPct: 50, target: 0 }),
   "Devin 1M · 100K per 1% of session (target 0) · 0 copies running · session 60%");
-// BUG: progressLine crashes on a non-finite target. fmtTokens(NaN) throws
-// (units.findIndex -> -1 -> destructure of undefined), and tick() has no try
-// around progressLine, so a bad target takes down the whole ping. Infinity
-// doesn't throw but prints the nonsense "InfinityT".
-// assert.throws(() => progressLine({ devinTokens: 1e6, sessionUsedPct: 60, sessionStartPct: 50, target: NaN }));
-// assert.equal(progressLine({ devinTokens: 1e6, sessionUsedPct: 60, sessionStartPct: 50, target: Infinity }).includes("InfinityT"), true);
+// A non-finite target is unknown, like a missing one: "can't tell", never a
+// crash (fmtTokens(NaN) throws; Infinity would print "InfinityT").
+for (const bad of [NaN, Infinity, -Infinity]) {
+  assert.equal(
+    progressLine({ devinTokens: 1e6, sessionUsedPct: 60, sessionStartPct: 50, target: bad }),
+    "Devin 1M · 100K per 1% of session (target can't tell) · 0 copies running · session 60%",
+    `target ${bad}`);
+}
 
 // ---- due: every shape of state file content.
 const state = (...parts) => path.join(dir, ...parts);

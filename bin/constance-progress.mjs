@@ -19,13 +19,14 @@ const pct = (n) => (Number.isFinite(n) ? String(+n.toFixed(1)) : "?");
 // instead of dividing. Unknown tokens are "can't tell", never a guess.
 export function progressLine({ devinTokens, sessionUsedPct, sessionStartPct, copiesRunning = 0, target = 5e6 } = {}) {
   const tokens = Number.isFinite(devinTokens) ? devinTokens : null;
+  const goal = Number.isFinite(target) ? target : null;
   const used = Number(sessionUsedPct);
   const delta = used - Number(sessionStartPct);
   const spent = delta > 0;
   const perPct = spent && tokens !== null ? tokens / Math.max(0.1, delta) : null;
   const pace = !spent ? "no session spent yet"
-    : perPct === null ? `${CANT_TELL} per 1% of session (target ${fmtTokens(target)})`
-    : `${fmtTokens(perPct)} per 1% of session (target ${fmtTokens(target)})`;
+    : perPct === null ? `${CANT_TELL} per 1% of session (target ${fmtTokens(goal)})`
+    : `${fmtTokens(perPct)} per 1% of session (target ${fmtTokens(goal)})`;
   const copies = Number.isFinite(copiesRunning) ? copiesRunning : 0;
   return `Devin ${fmtTokens(tokens)} · ${pace} · ${copies} ${copies === 1 ? "copy" : "copies"} running · session ${pct(used)}%`;
 }
