@@ -248,4 +248,180 @@ assert.equal(P({ limits: "junk" }).mode, "delegate", "a non-array limits value i
 assert.equal(P({ limits: "junk" }).reason, P({}).reason);
 assert.equal(P({ limits: [null] }).mode, "delegate", "null entries are ignored until nothing is left");
 assert.equal(P(claude(null, lim("Session", 0.5, 2.5 * H), WKL)).mode, "normal", "a null entry among real windows changes nothing");
+
+// ------------------------------------------- wrong types inside windowPace
+// Titles are matched exactly: "session" isn't "Session", and a missing title
+// isn't a window either.
+assert.equal(W({ percent: 0.5, resetsAt: iso(now + H) }), null, "no title");
+assert.equal(W({ title: "session", percent: 0.5, resetsAt: iso(now + H) }), null, "lowercase title");
+assert.equal(W({ title: " Session", percent: 0.5, resetsAt: iso(now + H) }), null, "padded title");
+assert.equal(W({ title: 7, percent: 0.5, resetsAt: iso(now + H) }), null, "numeric title");
+// resetsAt is read through String(): an epoch-number resetsAt doesn't parse
+// (treated as no reset time), while a Date object does.
+{
+  const epoch = W({ title: "Session", percent: 0.5, resetsAt: now + 2 * H });
+  assert.equal(epoch.burn, null, "a numeric epoch resetsAt is unparseable: no reset time");
+  assert.equal(epoch.nearReset, false);
+  const asDate = W({ title: "Session", percent: 0.5, resetsAt: new Date(now + 2 * H) });
+  assert.equal(asDate.resetsAt, now + 2 * H, "a Date object stringifies to something parseable");
+}
+// Number() coercion: null/"" percent is 0 (a real, benign window), " 0.5 " is
+// 0.5, Infinity is rejected, and a negative percent is a valid low reading.
+assert.equal(W({ title: "Session", percent: null, resetsAt: iso(now + H) }).used, 0, "null percent coerces to 0%");
+assert.equal(W({ title: "Session", percent: "", resetsAt: iso(now + H) }).used, 0, "empty-string percent coerces to 0%");
+assert.equal(W({ title: "Session", percent: " 0.5 ", resetsAt: iso(now + H) }).used, 0.5);
+assert.equal(W({ title: "Session", percent: Infinity, resetsAt: iso(now + H) }), null, "Infinity percent");
+assert.equal(W({ title: "Session", percent: -0.2, resetsAt: iso(now + H) }).used, -0.2, "a negative percent is still finite");
+assert.equal(P(claude({ title: "Session", percent: -0.2, resetsAt: iso(now + H) })).mode, "normal", "negative use can't trip any line");
+// Non-object limits entries (numbers, strings, booleans) are filtered like null.
+assert.equal(P({ limits: [5, "x", true] }).mode, "delegate", "scalar entries are no windows");
+assert.equal(P(claude(5, lim("Session", 0.5, 2.5 * H))).mode, "normal", "a scalar among real windows changes nothing");
+// pace() itself takes anything: a scalar or array "agent" has no .limits.
+assert.equal(P("junk").mode, "delegate");
+assert.equal(P(42).mode, "delegate");
+assert.equal(P(["a"]).mode, "delegate", "an array has no limits key");
+// A state dir that doesn't exist reads as no files: no wall, no Keep going.
+const missingDir = path.join(dir, "no-such-dir");
+assert.equal(pace(claude(lim("Session", 0.3, 3 * H), WKL), now, missingDir).mode, "normal");
+assert.equal(pace(claude(lim("Session", 0.95, 3 * H), WKL), now, missingDir).mode, "stop");
+
+// ------------------------------------- keep-going.json: wrong shapes, deeper
+// Every non-object or object-without-a-string-title parses to "no Keep going",
+// so the plain 90% stop stands. Fresh dir per shape isn't needed: each write
+// replaces the file and a stop result proves it wasn't honored.
+for (const [label, text] of [
+  ["empty file", ""],
+  ["whitespace only", "   \n"],
+  ["JSON null", "null"],
+  ["JSON array", "[]"],
+  ["JSON string", '"Session"'],
+  ["JSON number", "42"],
+  ["empty object", "{}"],
+  ["numeric title", '{"title": 7, "resetsAt": ' + (now + 3 * H) + ', "at": ' + now + '}'],
+  ["string resetsAt", '{"title": "Session", "resetsAt": "soon", "at": ' + now + '}'],
+]) {
+  fs.writeFileSync(keepGoingFile(dir), text);
+  assert.equal(P(claude(lim("Session", 0.95, 3 * H), WKL)).mode, "stop", `keep-going.json ${label} isn't honored`);
+}
+// A directory where keep-going.json should be is just as unreadable.
+fs.rmSync(keepGoingFile(dir), { force: true });
+fs.mkdirSync(keepGoingFile(dir));
+assert.equal(P(claude(lim("Session", 0.95, 3 * H), WKL)).mode, "stop", "a directory named keep-going.json can't be read");
+fs.rmSync(keepGoingFile(dir), { recursive: true });
+// Clock edges on the no-reset-time Keep going: validity is
+// `now - at < window length`, so exactly one length later it has expired, and
+// one ms before it still holds. A missing `at` is 0 — epoch-old, expired.
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: null, at: now - WINDOWS.Session }));
+assert.equal(P(claude(noRes, WKL)).mode, "stop", "at exactly one window length ago it has expired");
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: null, at: now - WINDOWS.Session + 1 }));
+assert.equal(P(claude(noRes, WKL)).mode, "delegate", "1 ms inside the window it still holds");
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: null }));
+assert.equal(P(claude(noRes, WKL)).mode, "stop", "no `at` at all is epoch-old: expired");
+fs.writeFileSync(keepGoingFile(dir), '{"title": "Session", "resetsAt": null, "at": "now"}');
+assert.equal(P(claude(noRes, WKL)).mode, "stop", "a non-numeric `at` coerces to 0: epoch-old, expired");
+// With a reset time the rule is `now < resetsAt`: at the exact reset instant
+// the Keep going is already dead. 98% used is past NEAR_END_AT, so without the
+// match it stops; with it (one instant earlier) it delegates.
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: now + H, at: now }));
+assert.equal(P(claude(lim("Session", 0.98, H), WKL)).mode, "delegate", "Keep going still covers the window inside its time");
+assert.equal(P(claude(lim("Session", 0.98, H), WKL), now + H).mode, "stop", "at the reset instant the Keep going is expired and she stops");
+// Keep going for one title never covers the other, even when both are over
+// their lines: only the named window's stop is held.
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Weekly", resetsAt: now + 4 * D, at: now }));
+{
+  const both = claude(lim("Session", 0.95, 3 * H), lim("Weekly", 0.95, 4 * D));
+  const p = P(both);
+  assert.equal(p.mode, "stop");
+  assert.equal(p.title, "Session", "the unnamed window still stops her");
+  fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: now + 3 * H, at: now }));
+  const p2 = P(both);
+  assert.equal(p2.mode, "stop");
+  assert.equal(p2.title, "Weekly", "and vice versa");
+}
+// A Keep going naming a real reset can't cover a window whose own resetsAt is
+// null — sameReset(number, null) is no match — and the reverse holds too.
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: null, at: now }));
+assert.equal(P(claude(lim("Session", 0.95, 3 * H), WKL)).mode, "stop", "kg resetsAt null vs window's real time: no match");
+fs.rmSync(keepGoingFile(dir));
+
+// ------------------------------------------- wall.json: wrong shapes, deeper
+for (const [label, text] of [
+  ["empty file", ""],
+  ["JSON null", "null"],
+  ["JSON array", "[]"],
+  ["JSON string", '"soon"'],
+  ["until as string", '{"until": "' + (now + H) + '", "stated": true}'],
+  ["until null", '{"until": null}'],
+  ["until missing", '{"stated": true}'],
+]) {
+  fs.writeFileSync(wallFile(dir), text);
+  assert.equal(P(claude(lim("Session", 0.3, 3 * H), WKL)).mode, "normal", `wall.json ${label} isn't a wall`);
+}
+fs.rmSync(wallFile(dir), { force: true });
+fs.mkdirSync(wallFile(dir));
+assert.equal(P(claude(lim("Session", 0.3, 3 * H), WKL)).mode, "normal", "a directory named wall.json can't be read");
+fs.rmSync(wallFile(dir), { recursive: true });
+// A wall standing at `now` exactly has fallen (readWall is `now < until`);
+// the pace-level check one ms before is already covered above.
+writeWall(dir, { until: now, stated: false, text: "" }, now);
+assert.equal(P(claude(lim("Session", 0.3, 3 * H), WKL)).mode, "normal");
+fs.rmSync(wallFile(dir));
+
+// ------------------------------------------------- clock edge: the reset now
+// resetsAt === now is a finished window: elapsed 1, 'close' by definition, so
+// 95% rides out on delegate pace while 98% still stops.
+{
+  const over = lim("Session", 0.95, 0);
+  assert.equal(W(over).elapsed, 1);
+  assert.equal(W(over).nearReset, true);
+  const p = P(claude(over, WKL));
+  assert.equal(p.mode, "delegate");
+  assert.match(p.reason, /reset is close/);
+  assert.equal(P(claude(lim("Session", 0.98, 0), WKL)).mode, "stop", "98% of a just-ended window still stops");
+}
+
+// ------------------------------------------- mode precedence between windows
+// A held window (past 90% but riding out near its reset) beats a merely fast
+// one: the held branch returns before the fast check.
+{
+  const held = lim("Session", 0.92, 0.5 * H);            // near reset: held at delegate
+  const hot = lim("Weekly", 0.5, 5.6 * D);               // elapsed ~0.2, burn ~2.5: fast
+  const p = P(claude(held, hot));
+  assert.equal(p.mode, "delegate");
+  assert.match(p.reason, /reset is close/, "the held window's reason wins over the fast one");
+}
+// A stopping window anywhere stops her even when another window is held.
+{
+  const p = P(claude(lim("Session", 0.92, 0.5 * H), lim("Weekly", STOP_AT, 3 * D)));
+  assert.equal(p.mode, "stop");
+  assert.equal(p.title, "Weekly", "the far 90% stop outranks the near-reset held window");
+}
+// Two windows both over their stop lines: the first in the limits array is
+// the one reported (ws.find order), whichever it is.
+{
+  const p = P(claude(lim("Session", STOP_AT, 3 * H), lim("Weekly", 0.95, 4 * D)));
+  assert.equal(p.mode, "stop");
+  assert.equal(p.title, "Session", "array order decides which stop is named");
+  const p2 = P(claude(lim("Weekly", 0.95, 4 * D), lim("Session", STOP_AT, 3 * H)));
+  assert.equal(p2.title, "Weekly", "reversed order names the other");
+}
+
+// ------------------------------------------------------- canResume, deeper
+// The stop check comes first: even a hand-built "stop" pace whose reason
+// mentions Keep going can't resume her.
+assert.equal(canResume({ mode: "stop", reason: "Session at 95%: you chose Keep going" }, claude(lim("Session", 0.3, 3 * H), WKL)), false,
+  "mode stop beats a Keep going-looking reason");
+// keptGoing() is a pure reason-string test: any delegate/normal pace carrying
+// the phrase counts, which is how the panel's own reason is recognized.
+assert.equal(canResume({ mode: "delegate", reason: "Session at 95%: you chose Keep going, so she delegates" }, null), true,
+  "Keep going needs no reading at all — it's the owner's call");
+// A non-empty limits array counts as a reading even when every entry is
+// unreadable: pace() delegates on it and canResume() lets her resume into
+// delegate pace. (limits: [] is the only 'no reading' shape.)
+{
+  const junk = { limits: [null, "x"] };
+  const p = P(junk);
+  assert.equal(p.mode, "delegate");
+  assert.equal(canResume(p, junk), true, "present-but-unreadable limits still count as a current reading");
+}
 console.log("constance-pace.deep: tests passed");
