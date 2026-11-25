@@ -10,6 +10,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { mergeBranch, repoBranch } from "./constance-worktree.mjs";
 import { stateDir } from "./constance-jobs.mjs";
+import { withLock } from "./constance-mergelock.mjs";
 
 const git = (dir, ...args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
 
@@ -96,12 +97,23 @@ const writeReviews = (file, d) => {
   fs.renameSync(tmp, file);
 };
 
+// addPending and markReviewed are read-modify-write: without a lock two
+// processes that overlap each read the same file and the second write drops
+// the first's entry. The reviews file gets the same pid-owned directory lock
+// as merges (a sibling `<file>.lock`), so every writer serializes.
+const withReviewsLock = (file, fn) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  return withLock(file + ".lock", fn);
+};
+
 export function addPending(file = defaultReviews(), { job, commit, branch, at = Date.now() } = {}) {
-  const d = readReviews(file);
-  const entry = { job, commit, branch, at };
-  d.pending.push(entry);
-  writeReviews(file, d);
-  return entry;
+  return withReviewsLock(file, () => {
+    const d = readReviews(file);
+    const entry = { job, commit, branch, at };
+    d.pending.push(entry);
+    writeReviews(file, d);
+    return entry;
+  });
 }
 
 export function pendingReviews(file = defaultReviews()) {
@@ -109,13 +121,15 @@ export function pendingReviews(file = defaultReviews()) {
 }
 
 export function markReviewed(file = defaultReviews(), job, verdict) {
-  const d = readReviews(file);
-  const i = d.pending.findIndex((p) => p.job === job);
-  if (i < 0) return null;
-  const [entry] = d.pending.splice(i, 1);
-  d.reviewed.push({ ...entry, verdict, reviewedAt: Date.now() });
-  writeReviews(file, d);
-  return { ...entry, verdict };
+  return withReviewsLock(file, () => {
+    const d = readReviews(file);
+    const i = d.pending.findIndex((p) => p.job === job);
+    if (i < 0) return null;
+    const [entry] = d.pending.splice(i, 1);
+    d.reviewed.push({ ...entry, verdict, reviewedAt: Date.now() });
+    writeReviews(file, d);
+    return { ...entry, verdict };
+  });
 }
 
 // Undo a self-merged commit: a merge commit needs `-m 1` (revert relative to
