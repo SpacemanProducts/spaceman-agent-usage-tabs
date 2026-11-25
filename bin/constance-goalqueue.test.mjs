@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner } from "./constance-goalqueue.mjs";
+import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner, queueStops } from "./constance-goalqueue.mjs";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-goalqueue-"));
 assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" });
@@ -52,4 +52,18 @@ assert.deepEqual(needsOwner({ ...g, status: "failed" }, [], { practice: true }),
 assert.deepEqual(needsOwner({ ...g, needsOwner: "Pick a color for the button" }, [j(1, "accepted", [1, 2])]), ["Pick a color for the button"], "her own flag");
 assert.deepEqual(needsOwner({ id: "g", text: "one thing", status: "done" }, []), [], "a single-item goal with no jobs (she did it herself) moves on");
 assert.deepEqual(needsOwner(g, [j(1, "accepted", [1]), { id: 5, goal: "other", status: "conflict" }], { practice: true }), [], "another goal's jobs don't count");
+
+// queueStops: only what truly needs the owner goes in `stop`; everything else is a `note`.
+assert.deepEqual(queueStops(null), { stop: [], notes: [] }, "no goal: nothing");
+assert.deepEqual(queueStops({ ...g, status: "failed" }, [], { practice: true }), { stop: [], notes: ["she couldn't finish the goal"] }, "a failure is a note, not a stop");
+assert.deepEqual(queueStops({ ...g, status: "failed", failReason: "hit her weekly limit" }, [], { practice: true }), { stop: [], notes: ["she couldn't finish the goal: hit her weekly limit"] }, "the fail reason rides along");
+assert.deepEqual(queueStops({ ...g, needsOwner: "Pick a color for the button" }, [j(1, "accepted", [1, 2])], { practice: true }), { stop: ["Pick a color for the button"], notes: [] }, "her own flag stops the queue");
+assert.deepEqual(queueStops({ ...g, status: "stopped" }, [], { practice: true }), { stop: ["you stopped her"], notes: [] }, "a stopped goal stops the queue");
+assert.deepEqual(queueStops(g, [j(1, "accepted", [1]), j(2, "conflict", [2])], { practice: true }), { stop: ["job 2 hit a merge conflict"], notes: [] }, "a conflict stops the queue");
+assert.deepEqual(queueStops(g, [j(1, "finished", [1]), j(2, "held", []), j(3, "merged", [2])], { practice: true }),
+  { stop: [], notes: ["job 1 never got reviewed", "job 2 still running", "job 3 merged and still waiting for review"] },
+  "unreviewed, still-running and merged jobs are notes");
+assert.deepEqual(queueStops(g, [j(1, "accepted", [1]), { id: 5, goal: "other", status: "conflict" }], { practice: true }), { stop: [], notes: [] }, "another goal's jobs don't count");
+assert.deepEqual(queueStops(g, [j(1, "accepted", [1])]), { stop: [], notes: ["item 2 of the checklist not done"] }, "an unfinished checklist is a note");
+assert.deepEqual(queueStops(g, [j(1, "accepted", [1])], { practice: true }), { stop: [], notes: [] }, "practice skips the checklist note");
 console.log("constance-goalqueue: ok");
