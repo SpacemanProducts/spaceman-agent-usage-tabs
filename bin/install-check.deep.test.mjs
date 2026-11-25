@@ -138,16 +138,16 @@ try {
     assert.match(r2.out, /MISS\] git/);
   }
 
-  // BUG: which() uses accessSync(X_OK), which succeeds on directories, so a
-  // directory named `git` anywhere in PATH is reported as a working git.
-  // Expected: [MISS] git. Actual: [ ok ] git.
-  // {
-  //   const dirGit = path.join(tmp, "bin-dirs");
-  //   fs.mkdirSync(path.join(dirGit, "git"), { recursive: true });
-  //   stub(dirGit, ["omarchy"]);
-  //   const r = run({ PATH: dirGit });
-  //   assert.match(r.out, /MISS\] git/, "a directory is not an executable");
-  // }
+  // which() must only accept regular executable files: a directory named git
+  // on PATH is not a working git.
+  {
+    const dirGit = path.join(tmp, "bin-dirs");
+    fs.mkdirSync(path.join(dirGit, "git"), { recursive: true });
+    stub(dirGit, ["omarchy"]);
+    const r = run({ PATH: dirGit });
+    assert.match(r.out, /MISS\] git/, "a directory is not an executable");
+    assert.equal(r.status, 1);
+  }
 
   // ---- writableDeep(): deep paths, missing ancestors, wrong shapes ----
   {
@@ -257,18 +257,21 @@ try {
     r = run({ PATH: dir });
     assert.match(r.out, /\[ ok \] python3 \+ tmux \+ cs — Claude Squad/, "full trio ok");
   }
-  // BUG: bwrap and xdg-dbus-proxy are in the optional list and populate `found`,
-  // but no output line ever reads them — the sandbox dependencies are silently
-  // unchecked no matter what is installed.
-  // Expected: an ok/info line for bwrap (and xdg-dbus-proxy) like notify-send
-  // gets. Actual: they never appear in the output.
-  // {
-  //   const dir = path.join(tmp, "bin-sandbox");
-  //   stub(dir, ["git", "omarchy", "bwrap", "xdg-dbus-proxy"]);
-  //   const r = run({ PATH: dir });
-  //   assert.match(r.out, /bwrap/, "bwrap presence is reported");
-  //   assert.match(r.out, /xdg-dbus-proxy/, "xdg-dbus-proxy presence is reported");
-  // }
+  // bwrap and xdg-dbus-proxy are sandbox dependencies and must be reported
+  // like every other optional tool, present or not.
+  {
+    const dir = path.join(tmp, "bin-sandbox");
+    stub(dir, ["git", "omarchy", "bwrap", "xdg-dbus-proxy"]);
+    const r = run({ PATH: dir });
+    assert.match(r.out, /\[ ok \] bwrap/, "bwrap presence is reported");
+    assert.match(r.out, /\[ ok \] xdg-dbus-proxy/, "xdg-dbus-proxy presence is reported");
+
+    fs.rmSync(path.join(dir, "bwrap"));
+    fs.rmSync(path.join(dir, "xdg-dbus-proxy"));
+    const r2 = run({ PATH: dir });
+    assert.match(r2.out, /info.*bwrap — missing/, "bwrap absence is reported");
+    assert.match(r2.out, /info.*xdg-dbus-proxy — missing/, "xdg-dbus-proxy absence is reported");
+  }
 
   // ---- agents: dedup, order, executability ----
   {

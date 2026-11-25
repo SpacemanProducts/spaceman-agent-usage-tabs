@@ -21,7 +21,10 @@ function which(cmd) {
   for (const dir of (process.env.PATH || "").split(path.delimiter)) {
     if (!dir) continue;
     const p = path.join(dir, cmd);
-    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch { /* keep looking */ }
+    try {
+      fs.accessSync(p, fs.constants.X_OK);
+      if (fs.statSync(p).isFile()) return p;
+    } catch { /* keep looking */ }
   }
   return null;
 }
@@ -71,6 +74,10 @@ const found = new Map();
 for (const [cmd, what] of optional) if (which(cmd)) found.set(cmd, what);
 if (found.has("notify-send")) ok("notify-send", found.get("notify-send"));
 else info("notify-send", "missing — alerts and celebrations stay silent");
+if (found.has("bwrap")) ok("bwrap", found.get("bwrap"));
+else info("bwrap", "missing — Constance launches no agents without bubblewrap");
+if (found.has("xdg-dbus-proxy")) ok("xdg-dbus-proxy", found.get("xdg-dbus-proxy"));
+else info("xdg-dbus-proxy", "missing — only matters if keyring-login agents (Copilot, Cursor, Antigravity) are allowed in Constance's sandbox");
 const sound = ["pw-play", "paplay", "ffplay"].find((c) => found.has(c));
 if (sound) ok(sound, "reset sound");
 else info("pw-play / paplay / ffplay", "none found — the reset celebration plays no sound");
