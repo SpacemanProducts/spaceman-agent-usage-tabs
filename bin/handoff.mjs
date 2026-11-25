@@ -174,7 +174,9 @@ export function maybeWriteHandoff({ sent, settings, untilReset = () => "", proje
   if (!pendingFile) return "";
   const first = !fs.existsSync(pendingFile);
   fs.mkdirSync(path.dirname(pendingFile), { recursive: true });
-  fs.writeFileSync(pendingFile, JSON.stringify({ repo, trigger, at: now }) + "\n", { mode: 0o600 });
+  const tmp = `${pendingFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ repo, trigger, at: now }) + "\n", { mode: 0o600 });
+  try { fs.renameSync(tmp, pendingFile); } catch (e) { try { fs.unlinkSync(tmp); } catch {} throw e; }
   return first ? "asked" : "pending";
 }
 

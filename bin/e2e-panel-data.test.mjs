@@ -208,7 +208,7 @@ function assertJobsFile(d, where) {
 const TERMINAL = new Set(["accepted", "merged", "sent back", "stopped", "conflict", "failed"]);
 const OPEN = new Set(["waiting", "running", "held", "finished"]);
 // State files with atomic writers that the panel or `status` parses strictly
-// enough that a torn read would matter. wall.json/refills.json/spare.json are
+// enough that a torn read would matter. refills.json/spare.json are
 // deliberately absent: their writers aren't atomic yet (see BUG notes below)
 // and every reader already tolerates a bad read.
 const EXTRA_JSON = [
@@ -216,7 +216,9 @@ const EXTRA_JSON = [
   path.join(cdir, "queue.json"),
   path.join(cdir, "reviews.json"),
   path.join(cdir, "scorecard.json"),
+  path.join(cdir, "wall.json"),
   path.join(tabs, "settings.json"),
+  path.join(tabs, "handoff-pending.json"),
 ];
 // JSON-lines files `status` folds into its payload; every line must parse.
 const JSONL = ["log.jsonl", "history.jsonl", "leverage.jsonl", "ratio-samples.jsonl", "notify.jsonl", "asks.jsonl"].map((f) => path.join(cdir, f));
@@ -325,6 +327,8 @@ const ATOMIC_WRITERS = [
   "constance-backlog.mjs",  // .constance/backlog.md
   "settings-set.mjs",       // settings.json
   "antigravity-surprise.mjs",// antigravity-surprise.json (locked)
+  "handoff.mjs",            // handoff-pending.json
+  "constance-wall.mjs",     // wall.json
 ];
 for (const f of ATOMIC_WRITERS) {
   const src = fs.readFileSync(path.join(HERE, f), "utf8");
@@ -340,14 +344,6 @@ for (const f of ATOMIC_WRITERS) {
 // BUG (found while auditing, NOT fixed — reported instead): these writers
 // update state files WITHOUT temp-file + rename, so a concurrent reader can
 // catch a torn or empty file:
-//   - bin/handoff.mjs writePending() -> handoff-pending.json, which Panel.qml
-//     reads directly with JSON.parse (a torn read shows as handoffPending=null
-//     for one reload — cosmetic, but it IS a panel-read file).
-//     Would-be assertion: every write of handoff-pending.json goes through a
-//     *.tmp + renameSync like collect.mjs's OUT write does.
-//   - bin/constance-wall.mjs writeWall() -> wall.json: direct writeFileSync.
-//     status's readWall()/wallJson() try/catch so a torn read just loses the
-//     pause until the next write.
 //   - bin/constance.mjs writeRefills() -> refills.json and the spare.json write
 //     in afterGoal(): direct writeFileSync; readRefills()/readSpare() try/catch.
 //   - bin/constance.mjs pidFile and the driver pid write: direct writeFileSync
