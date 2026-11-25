@@ -500,21 +500,20 @@ assert.deepEqual(matchJobs([], [rec("grok", repo, "s", now, 1)], now), {}, "no j
   assert.equal(m[1].tokens, 100, "different agent / different folder rivals don't conflict");
 }
 
-// BUG: a NaN amount slips past the usable-total check — `NaN == null` is false and
-// `NaN < 0` is false — then coerces to 0 in the sum, so the job reports a real
-// token count built on a missing value. The same input is "can't tell" when the
-// field is absent; NaN should be rejected the same way.
-// const nanJob = job({ id: 7, worktree: wt(7), status: "running", startedAt: now - min });
-// const nan = matchJobs([nanJob], [{ agent: "grok", folder: wt(7), session: "s", start: now - 30e3, amount: NaN, unit: "tokens" }], now);
-// assert.equal(nan[7].tokens, null);
+// A NaN amount must be "can't tell" like a missing one: `NaN == null` is false and
+// `NaN < 0` is false, so without an explicit finite check it would coerce to 0 in
+// the sum and the job would report a real token count built on a missing value.
+const nanJob = job({ id: 7, worktree: wt(7), status: "running", startedAt: now - min });
+const nan = matchJobs([nanJob], [{ agent: "grok", folder: wt(7), session: "s", start: now - 30e3, amount: NaN, unit: "tokens" }], now);
+assert.equal(nan[7].tokens, null);
+assert.match(nan[7].why, /token total/);
 
-// BUG: a +Infinity amount also passes the check (not null, not < 0) and sums to
-// tokens: Infinity. jobTokens then returns Infinity and fmtTokens(Infinity)
-// renders "InfinityT", which the panel would print as "InfinityT tokens". Non-finite
-// amounts should be "can't tell" like missing ones.
-// const infJob = job({ id: 8, worktree: wt(8), status: "running", startedAt: now - min });
-// const inf = matchJobs([infJob], [{ agent: "grok", folder: wt(8), session: "s", start: now - 30e3, amount: Infinity, unit: "tokens" }], now);
-// assert.equal(inf[8].tokens, null);
+// A +Infinity amount is rejected the same way: jobTokens would return Infinity and
+// the panel would print "InfinityT tokens".
+const infJob = job({ id: 8, worktree: wt(8), status: "running", startedAt: now - min });
+const inf = matchJobs([infJob], [{ agent: "grok", folder: wt(8), session: "s", start: now - 30e3, amount: Infinity, unit: "tokens" }], now);
+assert.equal(inf[8].tokens, null);
+assert.match(inf[8].why, /token total/);
 
 // ---------------------------------------------------------------- jobTokens / snapshots, cont.
 
@@ -556,16 +555,14 @@ assert.equal(fmtTokens(-999500), "-999500");
 assert.equal(fmtTokens("2500"), "2.5K");
 assert.equal(fmtTokens("999"), "999");
 
-// BUG: fmtTokens(NaN) throws — no unit is >= NaN, so units[-1] is undefined and the
-// destructure `let [size, suffix] = units[i]` raises TypeError. The function already
-// maps null/undefined to CANT_TELL; non-finite numbers should get the same honest
-// treatment instead of crashing `constance status`.
-// assert.equal(fmtTokens(NaN), CANT_TELL);
+// fmtTokens(NaN) must not throw: no unit is >= NaN, so units[-1] would be undefined
+// and the destructure would raise TypeError. Non-finite numbers get the same honest
+// can't-tell treatment as null/undefined instead of crashing `constance status`.
+assert.equal(fmtTokens(NaN), CANT_TELL);
 
-// BUG: fmtTokens(Infinity) returns "InfinityT" — it picks the largest unit and the
-// division stays Infinity. Reachable via the Infinity-amount path above; should be
-// CANT_TELL like other non-finite input.
-// assert.equal(fmtTokens(Infinity), CANT_TELL); // currently "InfinityT"
+// fmtTokens(Infinity) must not render "InfinityT" — same non-finite guard.
+assert.equal(fmtTokens(Infinity), CANT_TELL);
+assert.equal(fmtTokens(-Infinity), CANT_TELL);
 
 // ---------------------------------------------------------------- tokenMeter, cont.
 
@@ -613,14 +610,16 @@ assert.equal(fmtTokens("999"), "999");
   assert.match(m.live[1].why, /no session/);
 }
 
-// BUG: tokenMeter({ goal: {} }) — a goal object with no `id` — counts EVERY job
-// whose own goal field is unset, because `j.goal === goal.id` is `undefined ===
-// undefined`. Those jobs were never part of any goal, yet they land under
-// "This goal". A goal without an id should match nothing.
-// const stray = tokenMeter({ jobs: [{ id: 1, agent: "grok", dir: repo, worktree: wt(1),
-//   status: "finished", startedAt: now - min, finishedAt: now, tokens: { n: 5 } }],
-//   goal: {}, records: [], now });
-// assert.equal(stray.goal, null); // currently { total: 5, ... }
+// tokenMeter({ goal: {} }) — a goal object with no `id` — must match nothing:
+// `j.goal === goal.id` would be `undefined === undefined`, counting every
+// goal-less job under "This goal". A goal without an id is no goal.
+{
+  const stray = tokenMeter({ jobs: [{ id: 1, agent: "grok", dir: repo, worktree: wt(1),
+    status: "finished", startedAt: now - min, finishedAt: now, tokens: { n: 5 } }],
+    goal: {}, records: [], now });
+  assert.equal(stray.goal, null);
+  assert.equal(stray.today.total, 5, "...but it still counts for today");
+}
 
 // ---------------------------------------------------------------- records on disk, cont.
 
