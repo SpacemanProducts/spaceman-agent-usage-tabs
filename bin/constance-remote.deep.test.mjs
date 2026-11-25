@@ -2,10 +2,10 @@
 // constance-remote.test.mjs. Covers what the first test leaves out: wrong-type
 // inputs at every level, the clean()/clip() boundaries, checklist numbering
 // quirks, the exact 15-line cap at its edge, pace-window matching rules, input
-// purity, and writeRemoteStatus failure paths (including the tmp-file litter a
-// failed rename leaves). The module never touches the home folder; the fake
+// purity, and writeRemoteStatus failure paths (a failed rename removes its
+// tmp file; tmp names are unique per call so concurrent writers can't collide).
+// The module never touches the home folder; the fake
 // HOME/XDG dirs under mktemp are a guard so nothing real can be reached.
-// Suspected bugs are commented out with a note, not fixed (test-only job).
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -305,23 +305,32 @@ writeRemoteStatus({ goal: "second" }, wf);
 assert.equal(fs.readFileSync(wf, "utf8"), remoteSummary({ goal: "second" }));
 assert.deepEqual(fs.readdirSync(path.dirname(wf)), ["status.txt"], "no tmp left after success");
 
-// A stale tmp from a crashed earlier run (same pid) is truncated and renamed
-// away; one from a DIFFERENT pid is never touched — it litters forever.
+// Tmp names are unique per call (pid + random suffix), so a stale tmp left by
+// a crashed earlier run is never consumed and never in the way — it just
+// litters where it was, and a successful write adds no tmp of its own.
 const sf = path.join(wdir, "stale.txt");
-fs.writeFileSync(`${sf}.${process.pid}.tmp`, "crash junk");
-fs.writeFileSync(`${sf}.424242.tmp`, "other pid junk");
+fs.writeFileSync(`${sf}.crash.tmp`, "crash junk");
 writeRemoteStatus({ goal: "ok" }, sf);
 assert.equal(fs.readFileSync(sf, "utf8"), remoteSummary({ goal: "ok" }));
-assert.ok(!fs.existsSync(`${sf}.${process.pid}.tmp`), "same-pid tmp consumed");
-assert.ok(fs.existsSync(`${sf}.424242.tmp`), "other-pid tmp is left behind (by design? litter)");
+assert.ok(fs.existsSync(`${sf}.crash.tmp`), "stale tmp from an old name is left behind");
+assert.deepEqual(
+  fs.readdirSync(path.dirname(sf)).filter((f) => f.startsWith("stale.txt.") && f.endsWith(".tmp")),
+  ["stale.txt.crash.tmp"],
+  "a successful write leaves no tmp file of its own",
+);
 
-// Failure paths: the tmp file is written BEFORE the rename, so a failed
-// rename leaves ${file}.${pid}.tmp behind as litter.
+// Failure paths: the tmp file is written BEFORE the rename. A failed rename
+// removes the tmp again, so nothing litters; a failed tmp write never reaches
+// the rename and the target is never created.
 // 1) Target is an existing directory: rename file->dir fails EISDIR.
 const dirTarget = path.join(wdir, "is-a-dir");
 fs.mkdirSync(dirTarget);
 assert.throws(() => writeRemoteStatus({ goal: "x" }, dirTarget), /EISDIR/);
-assert.ok(fs.existsSync(`${dirTarget}.${process.pid}.tmp`), "failed rename litters the tmp file");
+assert.deepEqual(
+  fs.readdirSync(wdir).filter((f) => f.startsWith("is-a-dir.")),
+  [],
+  "failed rename removes the tmp file",
+);
 assert.equal(fs.readdirSync(dirTarget).length, 0, "the directory itself is untouched");
 // 2) A parent component is a regular file: mkdirSync recursive throws ENOTDIR
 //    before any tmp is written.
@@ -329,13 +338,9 @@ const blocker = path.join(wdir, "blocker");
 fs.writeFileSync(blocker, "x");
 assert.throws(() => writeRemoteStatus({ goal: "x" }, path.join(blocker, "sub", "f.txt")), /ENOTDIR/);
 assert.ok(!fs.existsSync(path.join(blocker, "sub")), "nothing created under the file");
-// 3) The tmp path itself is blocked by a directory of the same name: the write
-//    fails before the rename, and the target file is never created.
-const tf = path.join(wdir, "blocked.txt");
-fs.mkdirSync(`${tf}.${process.pid}.tmp`);
-assert.throws(() => writeRemoteStatus({ goal: "x" }, tf), /EISDIR/);
-assert.ok(!fs.existsSync(tf), "target absent after tmp-write failure");
-fs.rmdirSync(`${tf}.${process.pid}.tmp`);
+// 3) A tmp write failure never reaches the rename, so the target file is
+//    never created. The unique tmp name can't be pre-blocked by a directory,
+//    so this path is exercised by the read-only case below.
 // 4) Read-only parent directory: the tmp write fails EACCES (skipped when the
 //    test runs as root, where perms don't apply).
 if (typeof process.getuid === "function" && process.getuid() !== 0) {
@@ -344,41 +349,38 @@ if (typeof process.getuid === "function" && process.getuid() !== 0) {
   fs.chmodSync(roDir, 0o555);
   try {
     assert.throws(() => writeRemoteStatus({ goal: "x" }, path.join(roDir, "f.txt")), /EACCES/);
+    assert.ok(!fs.existsSync(path.join(roDir, "f.txt")), "target absent after tmp-write failure");
   } finally {
     fs.chmodSync(roDir, 0o755);
   }
 }
 
-// BUG: writeRemoteStatus is not safe for concurrent callers in the same
-// process. The tmp name is `${file}.${process.pid}.tmp` and worker threads
-// share the pid, so two writers interleave as: A writes tmp, B writes tmp,
-// A renames tmp->file (tmp gone), B renames tmp->file -> ENOENT. Measured
-// live: 4 workers x 3000 writes to one file produced ~4400 ENOENT throws and
-// the surviving content was whichever rename landed last. A unique tmp name
-// (pid + counter/random) or O_EXCL would fix it; not fixed here (test-only).
-// const workerTest = async () => {
-//   const { Worker } = await import("node:worker_threads");
-//   const { remoteSummary: rs } = await import("./constance-remote.mjs");
-//   const raceFile = path.join(wdir, "race.txt");
-//   const errs = [];
-//   const mk = (id) => new Worker(
-//     `import {parentPort, workerData} from "node:worker_threads";
-//      const {writeRemoteStatus} = await import(workerData.mod);
-//      for (let i = 0; i < 500; i++) {
-//        try { writeRemoteStatus({ goal: "w" + workerData.id + "-" + i }, workerData.file); }
-//        catch (e) { parentPort.postMessage(e.code); }
-//      }
-//      parentPort.postMessage("done");`,
-//     { eval: true, workerData: { mod: new URL("./constance-remote.mjs", import.meta.url).href, file: raceFile, id } },
-//   );
-//   const workers = [mk(0), mk(1), mk(2), mk(3)];
-//   workers.forEach((w) => w.on("message", (m) => { if (m !== "done") errs.push(m); }));
-//   await Promise.all(workers.map((w) => new Promise((r) => w.once("exit", r))));
-//   await new Promise((r) => setTimeout(r, 100));
-//   assert.deepEqual(errs, [], "concurrent same-file writes must not throw");
-//   assert.ok(fs.existsSync(raceFile));
-// };
-// await workerTest();
+// Regression: writeRemoteStatus is safe for concurrent callers in the same
+// process. Worker threads share the pid, so the tmp name carries a random
+// suffix per call; two writers can no longer rename each other's tmp away.
+// Before the fix this produced ~4400 ENOENT throws over 4 x 3000 writes.
+const workerTest = async () => {
+  const { Worker } = await import("node:worker_threads");
+  const raceFile = path.join(wdir, "race.txt");
+  const errs = [];
+  const mk = (id) => new Worker(
+    `import {parentPort, workerData} from "node:worker_threads";
+     const {writeRemoteStatus} = await import(workerData.mod);
+     for (let i = 0; i < 500; i++) {
+       try { writeRemoteStatus({ goal: "w" + workerData.id + "-" + i }, workerData.file); }
+       catch (e) { parentPort.postMessage(e.code); }
+     }
+     parentPort.postMessage("done");`,
+    { eval: true, workerData: { mod: new URL("./constance-remote.mjs", import.meta.url).href, file: raceFile, id } },
+  );
+  const workers = [mk(0), mk(1), mk(2), mk(3)];
+  workers.forEach((w) => w.on("message", (m) => { if (m !== "done") errs.push(m); }));
+  await Promise.all(workers.map((w) => new Promise((r) => w.once("exit", r))));
+  await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(errs, [], "concurrent same-file writes must not throw");
+  assert.ok(fs.existsSync(raceFile));
+};
+await workerTest();
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("constance-remote.deep: ok");
