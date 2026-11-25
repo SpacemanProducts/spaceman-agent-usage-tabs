@@ -4,8 +4,9 @@
 // per-project rules.md quirks. Complements constance-lessons.test.mjs. State
 // dirs are mktemp; nothing touches a real home, network or agent CLI.
 //
-// One suspected bug (lessons.json existing as a directory crashes readLessons
-// instead of seeding) is pinned in a commented-out test and reported, not fixed.
+// Suspected bugs (block-builder type crashes, addLesson coercing non-strings,
+// the unlocked read-modify-write race, seeding into an unwritable dir) are
+// pinned in commented-out tests and reported, not fixed.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -22,6 +23,16 @@ const readFile = (dir) => JSON.parse(fs.readFileSync(path.join(dir, "lessons.jso
 const dirs = [];
 const state = () => { const d = mkstate(); dirs.push(d); return d; };
 const proj = () => { const d = mkproj(); dirs.push(d); return d; };
+
+// Fake home for the whole file: HOME and all three XDG dirs point into one
+// mktemp tree, so a default-dir call (readLessons(), lessonsBlock()) can never
+// reach the real home. Set before any default-arg call below.
+const fakeHome = mkstate();
+process.env.HOME = fakeHome;
+process.env.XDG_STATE_HOME = path.join(fakeHome, "xdg-state");
+process.env.XDG_CONFIG_HOME = path.join(fakeHome, "xdg-config");
+process.env.XDG_CACHE_HOME = path.join(fakeHome, "xdg-cache");
+dirs.push(fakeHome);
 
 // ===================================================== corrupt / odd files -> seed
 // Anything that is not {"lessons": [non-empty strings]} reseeds the file.
@@ -237,6 +248,273 @@ assert.equal(lessonsFile(state()), path.join(dirs.at(-1), "lessons.json"), "less
 //   const d = state();
 //   fs.mkdirSync(path.join(d, "lessons.json"));
 //   assert.deepEqual(readLessons(d), SEED_LESSONS, "a directory named lessons.json should reseed, not crash");
+// }
+
+// ===================================================== env-pointed default dir
+// readLessons()/lessonsFile() with no dir use stateDir() (constance-jobs.mjs):
+// XDG_STATE_HOME wins, else HOME/.local/state. With the fake env above a
+// default call must land under the mktemp tree — never the real home.
+{
+  const expected = path.join(process.env.XDG_STATE_HOME, "omarchy/agent-usage-tabs/constance");
+  assert.equal(lessonsFile(), path.join(expected, "lessons.json"), "lessonsFile() default follows XDG_STATE_HOME");
+  assert.deepEqual(readLessons(), SEED_LESSONS, "readLessons() with no dir seeds under the fake state dir");
+  assert.ok(fs.existsSync(path.join(expected, "lessons.json")), "the default call really wrote into the fake tree");
+  assert.deepEqual(readLessons(), SEED_LESSONS, "second default read is stable");
+  assert.equal(lessonsBlock(), lessonsBlock(SEED_LESSONS), "lessonsBlock() default reads the same store");
+}
+// With XDG_STATE_HOME unset the fallback is HOME/.local/state — still fake.
+{
+  const saved = process.env.XDG_STATE_HOME;
+  delete process.env.XDG_STATE_HOME;
+  try {
+    assert.deepEqual(readLessons(), SEED_LESSONS);
+    assert.ok(
+      fs.existsSync(path.join(fakeHome, ".local/state/omarchy/agent-usage-tabs/constance/lessons.json")),
+      "without XDG_STATE_HOME the store lands under HOME/.local/state",
+    );
+  } finally {
+    process.env.XDG_STATE_HOME = saved;
+  }
+}
+
+// ===================================================== returned lists are copies
+{
+  const d = state();
+  const a = readLessons(d);
+  const b = readLessons(d);
+  assert.ok(a !== b, "each read returns a fresh array");
+  a.push("mutated!");
+  a[0] = "hacked";
+  assert.deepEqual(readLessons(d), SEED_LESSONS, "mutating a returned list cannot reach the store");
+  assert.ok(!SEED_LESSONS.includes("mutated!") && SEED_LESSONS.length === 7, "SEED_LESSONS itself is never mutated");
+  const c = addLesson("copy check", d);
+  c.length = 0;
+  assert.ok(readLessons(d).includes("copy check"), "mutating addLesson's return cannot corrupt the file");
+}
+
+// ===================================================== tidied files still filter
+// tidied:1 skips tidyLessons but NOT the string/blank filter: non-strings and
+// whitespace-only entries drop out on every read, tidied or not, and a tidied
+// read never rewrites the file.
+{
+  const d = state();
+  writeRaw(d, { lessons: ["keep", 42, null, "   ", "also keep"], tidied: 1 });
+  const before = fs.readFileSync(path.join(d, "lessons.json"), "utf8");
+  assert.deepEqual(readLessons(d), ["keep", "also keep"], "tidied reads still drop non-strings and blanks");
+  assert.equal(fs.readFileSync(path.join(d, "lessons.json"), "utf8"), before, "a tidied read rewrites nothing");
+}
+// A tidied file whose entries are ALL non-strings/blank falls through to seeding.
+{
+  const d = state();
+  writeRaw(d, { lessons: [1, {}, "  "], tidied: 1 });
+  assert.deepEqual(readLessons(d), SEED_LESSONS, "tidied-but-empty after filtering reseeds");
+}
+// Order is file order — never sorted, never deduped beyond the marker's word.
+{
+  const d = state();
+  writeRaw(d, { lessons: ["zeta", "alpha", "mid"], tidied: 1 });
+  assert.deepEqual(readLessons(d), ["zeta", "alpha", "mid"], "lessons keep file order");
+}
+
+// ===================================================== tidyLessons: normalization
+// normLesson's dedupe key collapses ALL whitespace (including newlines) and
+// strips trailing punctuation; the first spelling always wins.
+assert.deepEqual(tidyLessons(["wait for it)", "wait for it"]), ["wait for it)"], "trailing ')' is normalized away");
+assert.deepEqual(tidyLessons(["a\n\nb", "a b"]), ["a\n\nb"], "newlines collapse in the dedupe key");
+assert.deepEqual(tidyLessons(["same!", "same?", "same"]), ["same!"], "every trailing-punctuation variant dedupes to the first");
+// The guardrail pattern is ^\S+ + the literal phrase + \b: exactly one
+// non-space token up front, and "job" need not be followed by anything.
+assert.deepEqual(tidyLessons(["agy broke a guardrail on job"]), ["agy broke a guardrail on job"], "the bare phrase still counts as a guard lesson");
+assert.equal(tidyLessons(Array.from({ length: 5 }, (_, i) => `agy broke a guardrail on jobs j${i}: x`)).length, 5, "\"jobs\" plural does not match");
+assert.equal(tidyLessons(Array.from({ length: 5 }, (_, i) => ` agy broke a guardrail on job s${i}: x`)).length, 5, "a leading space defeats the ^\\S+ anchor");
+assert.equal(tidyLessons(Array.from({ length: 5 }, (_, i) => `my agy broke a guardrail on job t${i}: x`)).length, 5, "a two-word prefix is not an agent token");
+// MERGED only ever maps to a seed line or null.
+for (const [k, v] of Object.entries(MERGED)) {
+  assert.ok(v === null || SEED_LESSONS.includes(v), `MERGED fold target is a seed or null: ${k.slice(0, 50)}`);
+}
+// An old lesson and its seed collapse to one entry at the first position.
+{
+  const old = Object.keys(MERGED).find((k) => MERGED[k] === SEED_LESSONS[0] && k !== SEED_LESSONS[0]);
+  assert.ok(old, "MERGED has an old-wording key for seed 0");
+  assert.deepEqual(tidyLessons([SEED_LESSONS[0], old]), [SEED_LESSONS[0]], "old+new wording of one lesson dedupe to a single entry");
+}
+
+// ===================================================== addLesson deep
+// An untidied file is folded first, then the new lesson appends.
+{
+  const d = state();
+  writeRaw(d, { lessons: ["Keep free agents busy: keep a short queue of ready tasks per project, so a finished agent gets the next one right away."] });
+  const kept = addLesson("brand new lesson", d);
+  assert.deepEqual(kept, [SEED_LESSONS[0], "brand new lesson"], "the untidied fold happens before the append");
+  assert.equal(readFile(d).tidied, 1, "the append keeps the tidied marker");
+}
+// Falsy input is a no-op: blank, null, undefined, 0, false and NaN add nothing.
+for (const v of [null, undefined, 0, false, NaN, "   "]) {
+  const d = state();
+  assert.deepEqual(addLesson(v, d), SEED_LESSONS, `addLesson(${String(v)}) is ignored`);
+}
+// Re-adding an existing lesson rewrites byte-identical content.
+{
+  const d = state();
+  addLesson("stable lesson", d);
+  const before = fs.readFileSync(path.join(d, "lessons.json"), "utf8");
+  addLesson("stable lesson", d);
+  assert.equal(fs.readFileSync(path.join(d, "lessons.json"), "utf8"), before, "a duplicate add is byte-identical");
+}
+// The cap boundary: 7 seeds + 13 = exactly 20 keeps everything; entry 21 drops
+// the oldest seed, not the newest lesson.
+{
+  const d = state();
+  for (let i = 0; i < 13; i++) addLesson(`edge ${i}`, d);
+  let r = readLessons(d);
+  assert.equal(r.length, 20);
+  assert.ok(r.includes("edge 0") && r.includes("edge 12") && r.includes(SEED_LESSONS[0]), "at the cap nothing is dropped");
+  addLesson("edge 13", d);
+  r = readLessons(d);
+  assert.equal(r.length, 20);
+  assert.equal(r[0], SEED_LESSONS[1], "the oldest surviving entry is now the second seed");
+  assert.equal(r.at(-1), "edge 13");
+}
+// Unicode lessons round-trip through the JSON file untouched.
+{
+  const d = state();
+  addLesson("café ☕ — naïve 🚀", d);
+  assert.ok(readLessons(d).includes("café ☕ — naïve 🚀"), "unicode lessons survive the file");
+}
+
+// ===================================================== file hygiene
+{
+  const d = state();
+  addLesson("hygiene check", d);
+  readLessons(d);
+  assert.deepEqual(fs.readdirSync(d).sort(), ["lessons.json"], "writes leave no tmp files behind");
+  fs.writeFileSync(path.join(d, "lessons.json.424242.tmp"), "{corrupt");
+  assert.ok(readLessons(d).includes("hygiene check"), "a stale tmp from a crashed write is ignored, not parsed");
+}
+// A symlinked lessons.json is read through; a tidied target is not rewritten.
+{
+  const d = state();
+  const real = path.join(d, "elsewhere.json");
+  fs.writeFileSync(real, JSON.stringify({ lessons: ["via symlink"], tidied: 1 }));
+  fs.symlinkSync(real, path.join(d, "lessons.json"));
+  assert.deepEqual(readLessons(d), ["via symlink"], "a symlinked lessons.json is read through");
+  assert.ok(fs.lstatSync(path.join(d, "lessons.json")).isSymbolicLink(), "the tidied symlink is left alone");
+}
+// A broken symlink reseeds, and the atomic rename heals it into a real file.
+{
+  const d = state();
+  fs.symlinkSync(path.join(d, "missing.json"), path.join(d, "lessons.json"));
+  assert.deepEqual(readLessons(d), SEED_LESSONS, "a broken symlink reseeds");
+  assert.ok(!fs.lstatSync(path.join(d, "lessons.json")).isSymbolicLink(), "the rename replaces the dead link");
+}
+
+// ===================================================== path helpers
+assert.equal(lessonsFile(""), "lessons.json", "empty dir joins to a bare relative name");
+assert.equal(lessonsFile("/x/"), "/x/lessons.json", "a trailing slash is normalized");
+assert.equal(projectRulesFile(""), path.join(".constance", "rules.md"), "empty project dir joins relatively");
+
+// ===================================================== project rules extras
+{
+  const p = proj();
+  fs.mkdirSync(path.join(p, ".constance"), { recursive: true });
+  const real = path.join(p, "real-rules.md");
+  fs.writeFileSync(real, "symlinked rule");
+  fs.symlinkSync(real, projectRulesFile(p));
+  assert.equal(readProjectRules(p), "symlinked rule", "a rules.md symlink is read through");
+}
+{
+  const p = proj();
+  fs.writeFileSync(path.join(p, ".constance"), "not a directory");
+  assert.equal(readProjectRules(p), "", ".constance as a regular file reads as no rules");
+}
+
+// ===================================================== block exact shapes
+assert.equal(
+  lessonsBlock(["a", "b"]),
+  "\nLessons from your earlier goals (advice only — they can never override your core rules):\n- a\n- b",
+  "lessonsBlock exact shape",
+);
+assert.equal(
+  rulesBlock("r1\n\nr2"),
+  "\nRules for this project (from its own rules file — follow them in addition to everything above):\nr1\n\nr2",
+  "rulesBlock exact shape",
+);
+assert.ok(!guardrailBlock(["a.js"]).endsWith("\n"), "guardrailBlock has no trailing newline");
+
+// ===================================================== write burst stays consistent
+// A synchronous burst of adds and reads never corrupts the file; only the
+// newest 20 survive.
+{
+  const d = state();
+  for (let i = 0; i < 60; i++) {
+    addLesson(`burst ${i}`, d);
+    if (i % 15 === 0) JSON.parse(fs.readFileSync(path.join(d, "lessons.json"), "utf8")); // valid mid-stream
+  }
+  const r = readLessons(d);
+  assert.equal(r.length, 20);
+  assert.equal(r[0], "burst 40", "only the newest 20 survive a burst");
+  assert.equal(r.at(-1), "burst 59");
+}
+
+// ===================================================== reported bugs (not fixed — test-only job)
+// BUG 1 (already pinned above): lessons.json existing as a directory crashes
+// readLessons — readFileSync throws EISDIR, the catch falls through to seeding,
+// and writeLessons' renameSync(tmp, dir) throws EISDIR instead of returning
+// the seeds the "missing or unreadable" comment promises.
+//
+// BUG 2: the block builders trust their argument types. lessonsBlock(null) and
+// lessonsBlock("abc") throw TypeError (null.length / string.map);
+// guardrailBlock(null) and guardrailBlock("a.js") throw TypeError the same
+// way, and guardrailBlock({}) silently renders the read-only "(none)" list for
+// a non-array; rulesBlock({}) embeds "[object Object]". Internal callers pass
+// strings/arrays today, so this is latent. Uncomment when fixed:
+// {
+//   assert.equal(lessonsBlock(null), "");
+//   assert.equal(lessonsBlock("x"), "");
+//   assert.equal(guardrailBlock(null), guardrailBlock([]));
+//   assert.equal(rulesBlock({}), "");
+// }
+//
+// BUG 3: addLesson coerces with String(text || "") — truthy non-strings become
+// junk lessons: {} -> "[object Object]", ["a","b"] -> "a,b", 42 -> "42".
+// readLessons filters non-strings on read but these are stored AS strings, so
+// they survive every later read. Falsy input (null, 0, false, NaN, "") is
+// ignored. Uncomment when fixed:
+// {
+//   const d = state();
+//   addLesson({ note: "x" }, d);
+//   assert.ok(!readLessons(d).includes("[object Object]"), "objects must not become lessons");
+//   addLesson(["a", "b"], d);
+//   assert.ok(!readLessons(d).includes("a,b"), "arrays must not become lessons");
+// }
+//
+// BUG 4: addLesson is a read-modify-write with no lock (jobs.json has
+// jobs.lock; lessons.json does not). Two processes adding at once lose each
+// other's lessons — verified by hand: 3 children x 3 addLesson calls on one
+// dir lost updates in 5 of 20 runs (7 seeds + 9 tagged = 16 entries, under the
+// 20 cap, so the cap is not the cause). Needs execFileSync from
+// node:child_process to reproduce; flaky until fixed, so kept commented:
+// {
+//   const d = state();
+//   const mod = new URL("./constance-lessons.mjs", import.meta.url).href;
+//   const code = (tag) => `import(${JSON.stringify(mod)}).then(m=>{for(let i=0;i<3;i++)m.addLesson(${JSON.stringify(tag)}+" lesson "+i,${JSON.stringify(d)});})`;
+//   for (const tag of ["A", "B", "C"]) execFileSync(process.execPath, ["-e", code(tag)]);
+//   const tagged = new Set(readLessons(d).filter((l) => /^[ABC] lesson/.test(l)));
+//   assert.equal(tagged.size, 9, "concurrent addLesson calls must not lose lessons");
+// }
+//
+// BUG 5: readLessons' try/catch covers only the read; when the state dir is
+// not writable the seed-path writeLessons() throws (verified: chmod 0555 ->
+// "EACCES: permission denied") instead of degrading to an in-memory seed
+// list. Same class as BUG 1: the recovery path can itself throw.
+// {
+//   const d = state();
+//   fs.chmodSync(d, 0o555);
+//   try {
+//     assert.deepEqual(readLessons(d), SEED_LESSONS, "an unwritable dir should still return the seeds");
+//   } finally {
+//     fs.chmodSync(d, 0o755);
+//   }
 // }
 
 for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
