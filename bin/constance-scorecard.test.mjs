@@ -80,6 +80,27 @@ assert.equal(empty[1].acceptRate, null, "nothing decided -> null rate");
 assert.equal(empty[1].avgTokens, null);
 assert.equal(empty[1].avgMs, null);
 
+// kilo and freebuff get a zeroed row once the card has any reviewed job, so
+// they can be compared with the rest before their first review.
+const seeded = scoreRows({ agents: { devin: { jobs: 1, accepted: 1, sentBack: 0, tokensSum: 0, tokensN: 0, msSum: 0, msN: 0, recent: [] } }, seen: ["g1:1"] });
+const kiloRow = seeded.find((r) => r.agent === "kilo"), fbRow = seeded.find((r) => r.agent === "freebuff");
+assert.ok(kiloRow && fbRow, "kilo and freebuff rows exist with zero reviewed jobs");
+for (const r of [kiloRow, fbRow]) {
+  assert.equal(r.jobs, 0); assert.equal(r.accepted, 0); assert.equal(r.sentBack, 0);
+  assert.equal(r.acceptRate, null); assert.equal(r.avgTokens, null); assert.equal(r.avgMs, null);
+  assert.deepEqual(sizeHint(r), { maxFiles: 2, note: "no record yet: start small" }, "no record keeps the new-agent default");
+}
+// The real card from recordReview carries seen keys, so its rows include them too.
+assert.ok(rows.some((r) => r.agent === "kilo") && rows.some((r) => r.agent === "freebuff"), "recordReview card lists them");
+// A card with nothing reviewed at all stays empty.
+assert.deepEqual(scoreRows({ agents: {}, seen: [] }), []);
+assert.deepEqual(scoreRows({ agents: { devin: { jobs: 1, accepted: 1, sentBack: 0, tokensSum: 0, tokensN: 0, msSum: 0, msN: 0, recent: [] } } }).map((r) => r.agent),
+  ["devin"], "a card without seen keys (hand-built) gets no seeded rows");
+// An agent that already has a record keeps it; only the missing one is zeroed.
+const realKilo = scoreRows({ agents: { kilo: { jobs: 2, accepted: 2, sentBack: 0, tokensSum: 10, tokensN: 1, msSum: 0, msN: 0, recent: [] } }, seen: ["g:1", "g:2"] });
+assert.equal(realKilo.find((r) => r.agent === "kilo").jobs, 2, "a real kilo record is not zeroed");
+assert.equal(realKilo.find((r) => r.agent === "freebuff").jobs, 0, "freebuff still zeroed beside it");
+
 // sizeHint thresholds.
 assert.deepEqual(sizeHint(null), { maxFiles: 2, note: "no record yet: start small" });
 assert.deepEqual(sizeHint({ jobs: 0, acceptRate: null, avgMs: null }), { maxFiles: 2, note: "no record yet: start small" });

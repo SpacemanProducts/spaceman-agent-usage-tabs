@@ -6,8 +6,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// Devin's published concurrent session limit. Agents not listed stay single-job.
-export const PUBLISHED_MAX = { devin: 10 };
+// Published concurrent limits: Devin's is 10, Kilo Code's is 2 (each gets its
+// own worktree copies). Agents not listed stay single-job.
+export const PUBLISHED_MAX = { devin: 10, kilo: 2 };
 
 // The owner can lower it (settings.json `constanceMaxCopies`, 1..the published max).
 export function copyLimit(id, settings = {}) {
