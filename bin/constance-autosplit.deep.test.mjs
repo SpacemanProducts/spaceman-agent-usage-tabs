@@ -215,8 +215,8 @@ assert.deepEqual(overlaps(null), []);
 assert.deepEqual(overlaps(undefined), []);
 assert.deepEqual(overlaps([{}]), [], "job without files key");
 assert.deepEqual(overlaps([{ files: [] }, { files: null }]), []);
-// Output is sorted by file name.
-assert.deepEqual(overlaps([{ files: ["z", "a", "z"] }, { files: ["m", "a"] }]), ["a", "z"]);
+// Output is sorted by file name; a file listed twice in ONE job counts once.
+assert.deepEqual(overlaps([{ files: ["z", "a", "z", "b"] }, { files: ["m", "a", "b"] }]), ["a", "b"]);
 // Wrong types: a non-iterable jobs arg or a non-iterable files value throws.
 assert.throws(() => overlaps(5), TypeError);
 assert.throws(() => overlaps([{ files: 5 }]), TypeError);
@@ -228,12 +228,11 @@ assert.deepEqual(overlaps([{ files: "aa" }, { files: "a" }]), ["a"]);
 const ovJobs = [{ files: ["b", "a"] }, { files: ["a"] }];
 overlaps(ovJobs);
 assert.deepEqual(ovJobs, [{ files: ["b", "a"] }, { files: ["a"] }]);
-// BUG: overlaps() counts file occurrences, not claiming jobs — a single job that
-// lists the same file twice is reported as an overlap even though no second job
-// claims it. autosplit()'s own output never has duplicates (take() dedupes), so
-// this only shows on hand-built or foreign job lists:
-// assert.deepEqual(overlaps([{ files: ["a", "a"] }]), []);
-// Currently returns ["a"].
+// overlaps() counts claiming jobs, not file occurrences — a single job that
+// lists the same file twice is NOT an overlap. autosplit()'s own output never
+// has duplicates (take() dedupes), so this only shows on hand-built or foreign
+// job lists:
+assert.deepEqual(overlaps([{ files: ["a", "a"] }]), []);
 
 // ---- purity / stale state -------------------------------------------------------
 // Two calls with the same args return identical, independent results — the
