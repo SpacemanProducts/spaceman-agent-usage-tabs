@@ -1088,6 +1088,19 @@ Panel {
     if (!l || !isFinite(Number(l.perPct))) return root.dim
     return Number(l.vsTarget) >= 1 ? root.green : root.amber
   }
+  // The big leverage tile under Now: free-worker tokens per 1% of her session,
+  // colored against the 5M target (green >= 5M, amber >= 2.5M, red below; gray "—" until measurable).
+  readonly property string constanceLeverageTileText: {
+    var p = root.constanceLeverage ? Number(root.constanceLeverage.perPct) : NaN
+    return isFinite(p) ? root.fmtTokens(p) : "—"
+  }
+  readonly property color constanceLeverageTileColor: {
+    var p = root.constanceLeverage ? Number(root.constanceLeverage.perPct) : NaN
+    if (!isFinite(p)) return root.dim
+    if (p >= 5e6) return root.green
+    if (p >= 2.5e6) return root.amber
+    return root.red
+  }
   // The Milk Opus slider (settings.json constanceMilk, 0..100 step 5; bin/constance-milk.mjs):
   // status.milk wins when the payload carries it, else the saved setting, else the default 25.
   readonly property int constanceMilk: {
@@ -3048,6 +3061,57 @@ Panel {
               color: root.constance.goal && root.constance.goal.needsOwner && !root.constanceActive ? root.amber : root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
+            }
+
+            // Her progress ping (status.progress.line): one calm secondary line
+            // under Now; the row is hidden when the payload carries none.
+            Text {
+              visible: text !== ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: (root.constance.progress && root.constance.progress.line) ? String(root.constance.progress.line) : ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            // The big leverage tile: free-worker tokens per 1% of her session,
+            // colored against the 5M target; "—" until the meter can measure.
+            Rectangle {
+              width: parent.width
+              height: levNum.implicitHeight + levCap.implicitHeight + Style.space(14)
+              radius: Style.cornerRadius
+              color: root.soft(root.foreground, 0.04)
+              border.width: 1
+              border.color: root.soft(root.foreground, 0.12)
+              Text {
+                id: levNum
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(10)
+                horizontalAlignment: Text.AlignLeft
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                text: root.constanceLeverageTileText
+                color: root.constanceLeverageTileColor
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body * 1.8
+                font.bold: true
+              }
+              Text {
+                id: levCap
+                anchors.left: levNum.left
+                anchors.right: levNum.right
+                anchors.top: levNum.bottom
+                anchors.topMargin: Style.space(2)
+                textFormat: Text.PlainText
+                text: "Devin tokens per 1% of session · target 5M"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
             }
 
             // The goal checklist: its items, ticked as their jobs merge, with a progress bar.
