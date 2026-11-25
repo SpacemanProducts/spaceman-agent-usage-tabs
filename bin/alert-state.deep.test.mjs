@@ -35,18 +35,16 @@ try {
     assert.equal(toSend.length, 1, `before=${JSON.stringify(bad)} must behave like empty memory`);
     assert.equal(toSend[0].level, "warn");
   }
-  // A non-iterable `agents` argument throws inside watchedAgents.
-  // BUG: planAlerts/planHandoffTriggers throw on non-iterable `agents` (5, {}, true)
-  // and on null/undefined entries inside `agents`, `limits` or `accounts`
-  // ("Cannot read properties of null (reading 'accounts')" etc.), and on a
-  // non-iterable `limits` (limits: 5 or {}). notifyHighUsage() calls planAlerts at
-  // top level in collect.mjs with no try/catch, so one malformed collector record
-  // kills the whole run before data.json is written.
-  // assert.doesNotThrow(() => planAlerts(5, {}, T, T0));
-  // assert.doesNotThrow(() => planAlerts([null], {}, T, T0));
-  // assert.doesNotThrow(() => planAlerts([{ id: "c", name: "c", limits: [null] }], {}, T, T0));
-  // assert.doesNotThrow(() => planAlerts([{ id: "c", name: "c", limits: 5 }], {}, T, T0));
-  // assert.doesNotThrow(() => planAlerts([{ id: "c", name: "c", limits: [], accounts: [null, {}] }], {}, T, T0));
+  // Malformed `agents` input is treated as none: non-iterable agents, null
+  // entries inside `agents`, `limits` or `accounts`, and non-iterable `limits`
+  // must never throw (notifyHighUsage() calls planAlerts unguarded).
+  assert.doesNotThrow(() => planAlerts(5, {}, T, T0));
+  assert.doesNotThrow(() => planAlerts([null], {}, T, T0));
+  assert.doesNotThrow(() => planAlerts([{ id: "c", name: "c", limits: [null] }], {}, T, T0));
+  assert.doesNotThrow(() => planAlerts([{ id: "c", name: "c", limits: 5 }], {}, T, T0));
+  assert.doesNotThrow(() => planAlerts([{ id: "c", name: "c", limits: [], accounts: [null, {}] }], {}, T, T0));
+  assert.doesNotThrow(() => planHandoffTriggers(5, {}, T0));
+  assert.doesNotThrow(() => planHandoffTriggers([{ id: "c", name: "c", limits: 5 }], {}, T0));
   // A one-element `accounts` array is NOT expanded (only >1 is), so a meter that
   // lives only inside accounts[0].limits is never watched.
   // BUG: an agent with exactly one account and empty top-level `limits` loses its
@@ -78,26 +76,48 @@ try {
   assert.equal(planAlerts([A("c", "Session", 0.99, iso(R1))], { [warnKey("c", "Session")]: { resetMs: R1, levels: { warn: NaN } } }, T, T0).toSend.length, 1);
   // levels: null / missing is tolerated by planAlerts (treated as nothing fired)...
   assert.equal(planAlerts([A("c", "Session", 0.99, iso(R1))], { [warnKey("c", "Session")]: { resetMs: R1, levels: null } }, T, T0).toSend.length, 1);
-  // ...but markFired then writes into it and throws.
-  // BUG: markFired crashes on a stored record whose `levels` is null or a
-  // primitive ({resetMs, levels: null} / levels: "x" / levels: 5 -> TypeError).
-  // planAlerts accepts such a record from a hand-edited notified.json, the warn
-  // alert is sent, then markFired throws inside the unguarded notifyHighUsage
-  // loop: the run dies, memory is never saved, and the same notification repeats
-  // on every collect until the file is fixed by hand.
-  // const badMem = { [warnKey("c", "Session")]: { resetMs: R1, levels: null } };
-  // const planned = planAlerts([A("c", "Session", 0.99, iso(R1))], badMem, T, T0);
-  // assert.doesNotThrow(() => markFired(planned.memory, planned.toSend[0], T0));
+  // ...and markFired tolerates the same corrupt shapes: a stored record whose
+  // `levels` is null or a primitive is treated as having no levels fired yet.
+  for (const levels of [null, "x", 5]) {
+    const badMem = { [warnKey("c", "Session")]: { resetMs: R1, levels } };
+    const planned = planAlerts([A("c", "Session", 0.99, iso(R1))], badMem, T, T0);
+    assert.equal(planned.toSend.length, 1, `levels=${JSON.stringify(levels)} lets the warn through`);
+    assert.doesNotThrow(() => markFired(planned.memory, planned.toSend[0], T0));
+    assert.equal(planned.memory[warnKey("c", "Session")].levels.warn, T0, "the warn level is recorded on a fresh levels object");
+  }
   // A record whose resetMs is not a number can never be detected as a new window
-  // (resetMs - rec.resetMs is NaN) and never stale-pruned (now - rec.resetMs is NaN),
-  // so once `warn` fired it stays suppressed until usage drops 30 points — even if
-  // the agent's real reset time moves on. `limit` still fires.
-  // BUG: a non-numeric stored resetMs ("garbage", or null from an old-format key
-  // whose resetsAt didn't parse) permanently mutes that meter's warn alert.
-  // const stuck = {};
-  // let s = planAlerts([A("c", "Session", 0.99, iso(R1))], stuck, T, T0);
-  // s.memory[warnKey("c", "Session")].resetMs = "garbage";
-  // assert.equal(planAlerts([A("c", "Session", 0.99, iso(R1 + 5 * HOUR))], s.memory, T, T0 + HOUR).toSend.length, 1, "a moved-on reset should re-arm the window");
+  // by the moved-on check, so once `warn` fired it stayed suppressed until usage
+  // dropped 30 points — even if the agent's real reset time moved on. A corrupt
+  // (non-null, non-finite) stored resetMs is now treated as unknown: a real reset
+  // time re-arms the window, which then records a proper resetMs.
+  {
+    const stuck = {};
+    const s = planAlerts([A("c", "Session", 0.99, iso(R1))], stuck, T, T0);
+    markFired(s.memory, s.toSend[0], T0);
+    s.memory[warnKey("c", "Session")].resetMs = "garbage";
+    const moved = planAlerts([A("c", "Session", 0.99, iso(R1 + 5 * HOUR))], s.memory, T, T0 + HOUR);
+    assert.equal(moved.toSend.length, 1, "a moved-on reset should re-arm the window");
+    assert.equal(moved.toSend[0].level, "warn");
+    // After the re-fire the window holds a real resetMs, so it is once-per-window again.
+    markFired(moved.memory, moved.toSend[0], T0 + HOUR);
+    assert.equal(planAlerts([A("c", "Session", 0.99, iso(R1 + 5 * HOUR))], moved.memory, T, T0 + 2 * HOUR).toSend.length, 0,
+      "the re-armed window stays quiet while its reset time holds");
+    // With no readable reset time on the meter there is no window to re-arm into:
+    // the corrupt record stays muted rather than refiring every pass.
+    const noReset = { id: "c", name: "c", limits: [{ title: "Session", percent: 0.99 }] };
+    const still = planAlerts([noReset], moved.memory, T, T0 + 3 * HOUR);
+    // (the record's resetMs is now the real R1+5h; a missing resetsAt keeps it muted
+    //  because the moved-on check needs both sides)
+    assert.equal(still.toSend.length, 0);
+  }
+  // A corrupt stored resetMs with a meter that also lacks a reset time cannot
+  // identify a new window, so it must not refire on every pass.
+  {
+    const mem = { [warnKey("c", "Session")]: { resetMs: "garbage", levels: { warn: T0 } } };
+    const noReset = { id: "c", name: "c", limits: [{ title: "Session", percent: 0.99 }] };
+    assert.equal(planAlerts([noReset], mem, T, T0 + MIN).toSend.length, 0, "no reset time on either side stays muted");
+    assert.equal(planAlerts([noReset], mem, T, T0 + 2 * MIN).toSend.length, 0, "and stays muted on the next pass too");
+  }
 
   // ---- old-format memory migration ("agent|title|resetsAt" -> timestamp) ----
   {
