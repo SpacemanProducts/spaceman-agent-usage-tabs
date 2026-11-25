@@ -3,6 +3,14 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.50.0 - 2026-11-25
+- **Constance: no idle slots.** Copies start whenever memory allows (no load check, no 30 s spacing), and every free slot takes the next ready queued task right away.
+- **Constance: self-merge.** A copy that passes its own tests, the guard, the diff check and the full suite merges itself; her review runs later and a send-back reverts the merge. A conflict gets one rebase and retry, then it is flagged.
+- **Constance: leverage meter and Milk Opus slider.** Free-agent tokens per 1% of her session (target 5M) in big tiles, status and history. The slider sets how much she reviews and does herself; sandbox and guardrails always stay on.
+- **Constance keeps going.** A clean exit with work still open resumes her (up to 3 times); needs-owner is only for real owner decisions.
+- **Fix: her panel closed by itself.** Done files and handoff notes were written inside the plugin folder, which makes the shell reload every plugin. They now go elsewhere.
+- **Calmer panel** (shorter labels, big numbers) and a read-only remote status file with a proposal for phone access (nothing enabled).
+
 ## 1.49.0 - 2026-11-24
 - **1.49.1: Constance never resumes into a hit limit.** A window at 100% stops her even after Keep going (the panel hides the button then), Keep going's reset-time match tolerates the endpoint's sub-second jitter, a paused goal resumes only on a current reading, and Claude's own "You've hit your … limit · resets 5:50pm (zone)" exit is a pause until that stated time (`wall.json`, `bin/constance-wall.mjs` + test), never a failed run.
 - **Constance: agent scorecard.** Every reviewed job counts once per agent (jobs, accepted, sent back, average tokens and time) in `scorecard.json`. `agents` lists available agents best record first, each with a size hint (how many files a job suits it); `delegate` says when a job is bigger than that; `scorecard` prints it, and her panel has a SCORECARD section. `bin/constance-scorecard.mjs` + test.

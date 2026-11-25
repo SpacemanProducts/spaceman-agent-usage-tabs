@@ -182,6 +182,23 @@ keeps the developer in flow:
   There is still no goal-less loop, so spare room is only checked when a goal ends. Morning report
   (`bin/constance-morning.mjs`) when the queue empties after a queued or backlog goal. Copy jobs (own worktree)
   are never excused by, and never excuse, other jobs' files. Lessons are tidied once (`tidied: 1` marker).
+  Since 1.50.0 (constance-next, not merged): copies start as soon as memory allows (no load check, no
+  30 s spacing; `bin/constance-ramp.mjs`), and the ready queue fills every free slot after each sweep
+  (`readyTasks` in `bin/constance-queue.mjs`, `fillSlots`), not only on accept. A clean copy (guard clean,
+  diff inside its list, its report says tests pass) self-merges after the full suite passes
+  (`bin/constance-selfmerge.mjs`, one rebase-and-retry on conflict, else status `conflict`); her review comes
+  later (`reviews.json`, `C reviews`): accept confirms, send-back runs `git revert`. `constanceSelfMerge:
+  false` turns it off. Leverage meter (`bin/constance-leverage.mjs`, `leverage.jsonl`): free-agent goal
+  tokens per 1% of her Session spent (target 5M per 1%, 1,000M per session), in status, the panel tiles
+  and history; the best handoff kind becomes a lesson. Milk Opus slider (`bin/constance-milk.mjs`,
+  `constanceMilk` 0..100, default 25) sets review depth, task size and planning in her prompt; sandbox and
+  guardrails never change. A clean exit with items or jobs still open resumes her with a nudge (max 3 per
+  goal). **Panel closing bug:** the shell's inotify watcher reloads every plugin (closing panels) on any
+  write inside `~/.config/omarchy/plugins/` except top-level hidden entries and `.git`, so `.constance/`
+  done files and `handoff/HANDOFF.md` in this folder closed it. Project-folder jobs now write done files
+  in their sandbox tmp, and `bin/handoff.mjs` never writes inside the plugins folder. Remote control is
+  only a proposal (`docs/remote-control.md`) plus a read-only `remote-status.txt` (`C remote`); no port,
+  nothing sent.
 
 ## Working rules
 
