@@ -13,7 +13,15 @@ import { parseItems, parseItemArg, jobItems, checklist } from "./constance-check
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "constance-checklist-deep-"));
 process.env.HOME = path.join(tmp, "home");
-fs.mkdirSync(process.env.HOME, { recursive: true });
+process.env.XDG_STATE_HOME = path.join(tmp, "state");
+process.env.XDG_CONFIG_HOME = path.join(tmp, "config");
+process.env.XDG_CACHE_HOME = path.join(tmp, "cache");
+for (const d of [process.env.HOME, process.env.XDG_STATE_HOME, process.env.XDG_CONFIG_HOME, process.env.XDG_CACHE_HOME]) {
+  fs.mkdirSync(d, { recursive: true });
+}
+// The module is pure and touches no files, but if an assertion throws mid-run the
+// temp dir still goes away.
+process.on("exit", () => fs.rmSync(tmp, { recursive: true, force: true }));
 
 // ---------- parseItems: markers and numbering ----------
 
@@ -184,6 +192,90 @@ assert.deepEqual(dup.items[0].jobs, ["j", "j"]);
 // A job missing fields entirely is tolerated: no items, no goal, unknown status.
 assert.equal(checklist({ id: "g", text: "1. a\n2. b" }, [{}]).done, 0);
 assert.throws(() => checklist({ id: "g", text: "1. a\n2. b" }, null), TypeError, "jobs:null crashes (callers always pass an array)");
+
+// ---------- round 2: leftovers the first pass did not pin down ----------
+// (The module is synchronous and pure: no I/O, no clock, no shared state, so
+// there are no timing races to test — only degenerate inputs remain.)
+
+// parseItems: marker text that is itself only punctuation still counts.
+assert.deepEqual(parseItems("- -\n- x"), ["-", "x"], "a '-' item body is punctuation, not empty");
+assert.deepEqual(parseItems("- -"), ["- -"], "a single marker-only item falls back to whole text");
+// Leading zeros: 2 digits max, so "07" is a marker but "007" is not.
+assert.deepEqual(parseItems("07. x\n2. y"), ["x", "y"]);
+assert.deepEqual(parseItems("007. x\n2. y"), ["007. x 2. y"], "007 is three digits: not a marker");
+// Marker lines with no body at all are dropped; all-dropped means whole-text fallback.
+assert.deepEqual(parseItems("1.\n2.\n3."), ["1. 2. 3."]);
+assert.deepEqual(parseItems("1. a\n2. \n- \n3. b"), ["a", "b"], "empty-body lines between real items vanish");
+// A numbered marker needs the digits immediately at column 0 — an indented "1."
+// after a non-item line is ignored entirely, not treated as text.
+assert.deepEqual(parseItems("note\n  1. nested\n1. a\n2. b"), ["a", "b"]);
+
+// parseItemArg: JS coercion quirks on non-string segments.
+assert.deepEqual(parseItemArg(true), [], "a scalar boolean stringifies to 'true', NaN");
+assert.deepEqual(parseItemArg([true]), [1], "but an array element hits Number() directly: true coerces to 1 (quirk)");
+assert.deepEqual(parseItemArg([["2"], [1, 2], false]), [2], "a nested one-element array coerces; multi-element is NaN; false->0 drops out");
+assert.deepEqual(parseItemArg("2abc"), [], "trailing junk makes the whole segment NaN");
+assert.deepEqual(parseItemArg("1e999"), [], "Infinity is not an integer, dropped");
+assert.deepEqual(parseItemArg("  "), []);
+assert.deepEqual(parseItemArg("+2"), [2], "explicit plus sign parses");
+assert.deepEqual(parseItemArg("2."), [2], "trailing dot still parses as a number");
+
+// jobItems: tags can be a bare number or contain non-integers that get dropped.
+assert.deepEqual(jobItems({ items: 2 }, 4), [2], "a bare-number items field parses");
+assert.deepEqual(jobItems({ items: " 2 , 3 " }, 4), [2, 3]);
+assert.deepEqual(jobItems({ items: [1.5, 2] }, 4), [2], "non-integer tags dropped, integers kept");
+assert.deepEqual(jobItems({ items: [1] }, 0), [], "a zero-count goal owns nothing even when tagged");
+assert.deepEqual(jobItems({ items: {} }, 4), []);
+
+// checklist: goal shapes round 2.
+assert.deepEqual(checklist({ id: "g", text: "1. a\n2. b", items: "not-an-array" }, []).total, 2, "a non-array items field falls back to parsing text");
+assert.deepEqual(checklist({ id: "g", items: [5, "x"] }, []).items.map((x) => x.text), [5, "x"], "stored items are used verbatim, any type");
+// Goal id matching is strict: number 5 does not match string "5".
+assert.equal(checklist({ id: 5, text: "1. a" }, [{ id: "j", goal: "5", items: [1], status: "accepted" }]).done, 0);
+assert.equal(checklist({ id: 5, text: "1. a" }, [{ id: "j", goal: 5, items: [1], status: "accepted" }]).done, 1);
+// checked as an ARRAY indexes by item number (checked[1] ticks item 1).
+{
+  const c = checklist({ id: "g", text: "1. a\n2. b", checked: ["x", "note-for-1"] }, []);
+  assert.equal(c.items[0].state, "done"); assert.equal(c.items[0].note, "note-for-1");
+  assert.equal(c.items[1].state, "todo");
+}
+// checked as a string is indexable: checked[1]/checked[2] are characters, so a
+// long-enough string ticks items with single-char notes (quirk; callers pass objects).
+{
+  const c = checklist({ id: "g", text: "1. a\n2. b", checked: "yes" }, []);
+  assert.deepEqual(c.items.map((x) => [x.state, x.note]), [["done", "e"], ["done", "s"]]);
+}
+assert.equal(checklist({ id: "g", text: "1. a\n2. b", checked: "x" }, []).done, 0, "a one-char string has no index 1 or 2");
+
+// checklist: status handling round 2.
+const g3 = { id: "g", text: "1. a\n2. b" };
+assert.equal(checklist(g3, [{ id: "j", goal: "g", items: [1], status: "Accepted" }]).items[0].state, "todo", "status match is case-sensitive");
+assert.equal(checklist(g3, [{ id: "j", goal: "g", items: [1], status: "paused" }]).items[0].state, "todo", "an unknown status is neither open nor merged");
+assert.equal(checklist(g3, [{ id: "j", goal: "g", items: [1], status: "accepted", summary: "(practice run" }]).done, 0, "a bare '(practice run' prefix still counts as practice");
+// Her tick beats merged jobs for `by`, not just for state.
+{
+  const c = checklist({ ...g3, checked: { 1: "mine" } }, [{ id: "j", goal: "g", items: [1], status: "accepted" }]);
+  assert.equal(c.items[0].state, "done"); assert.equal(c.items[0].by, "constance");
+}
+// jobs must be an array of objects; both bad shapes throw TypeError.
+assert.throws(() => checklist(g3, "nope"), TypeError);
+assert.throws(() => checklist(g3, [null]), TypeError);
+assert.throws(() => checklist(g3, [undefined]), TypeError);
+
+// checklist: inputs are not mutated.
+{
+  const goal = { id: "g", text: "1. a\n2. b", checked: { 1: "x" } };
+  const jobs = [{ id: "j", goal: "g", items: [2], status: "running" }];
+  const before = JSON.stringify([goal, jobs]);
+  checklist(goal, jobs);
+  assert.equal(JSON.stringify([goal, jobs]), before, "checklist must not mutate goal or jobs");
+}
+// Same job object referenced by two goals still evaluates independently.
+{
+  const shared = { id: "j", goal: "gA", items: [1], status: "accepted" };
+  assert.equal(checklist({ id: "gA", text: "1. a" }, [shared]).done, 1);
+  assert.equal(checklist({ id: "gB", text: "1. a" }, [shared]).done, 0);
+}
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("constance-checklist.deep: ok");
