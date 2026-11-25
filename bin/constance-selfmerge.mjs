@@ -73,8 +73,17 @@ export function selfMerge({ repo, worktree, branch, checks = {}, suite = runSuit
         if (!s2.ok) return { merged: false, conflict: true, flagged: true, retried: true, reason: "suite failed after rebase", failed: s2.failed || [] };
       }
     }
+    const headBefore = git(repo, "rev-parse", "HEAD").stdout.trim();
     const m = merge(repo, branch);
-    if (m.ok) return { merged: true, commit: m.commit, retried: moved };
+    if (m.ok) {
+      // "Already up to date" (an empty copy, or one whose commits already
+      // landed): the merge created nothing and m.commit is the pre-merge
+      // HEAD, not a merge of the branch. Reporting it as merged would put a
+      // real prior commit in the review queue, where a send-back revert would
+      // undo work this copy never did — so it is nothing to merge instead.
+      if (m.commit && m.commit === headBefore) return { merged: false, reason: "nothing to merge" };
+      return { merged: true, commit: m.commit, retried: moved };
+    }
     if (!m.conflict) return { merged: false, reason: String(m.output || "merge failed").slice(-400) };
     return { merged: false, conflict: true, flagged: true, retried: moved, reason: "conflict after rebase" };
   });
@@ -93,8 +102,13 @@ const readReviews = (file) => {
 const writeReviews = (file, d) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + "." + process.pid + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n");
-  fs.renameSync(tmp, file);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n");
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+    throw e;
+  }
 };
 
 // addPending and markReviewed are read-modify-write: without a lock two
@@ -138,6 +152,17 @@ export function markReviewed(file = defaultReviews(), job, verdict) {
 export function revertMerge(repo, commit) {
   const p = git(repo, "rev-list", "--parents", "-n", "1", commit);
   const parents = p.status === 0 ? p.stdout.trim().split(/\s+/).length - 1 : 1;
+  // A merge commit is reverted only when it is a self-merge of a copy branch
+  // ("Merge branch 'constance/job-…'"): any other merge — a stale or foreign
+  // commit recorded by mistake — is refused so a send-back can never undo
+  // work it did not merge. Plain commits still revert the normal way: the
+  // job's own branch tip is the documented fallback target.
+  if (parents > 1) {
+    const subj = git(repo, "log", "-1", "--format=%s", commit).stdout.trim();
+    if (!/^Merge branch 'constance\/job-/.test(subj)) {
+      return { ok: false, commit, output: `refused: ${String(commit).slice(0, 12)} is not a self-merge commit (${subj.slice(0, 100)})` };
+    }
+  }
   const args = parents > 1 ? ["revert", "-m", "1", "--no-edit", commit] : ["revert", "--no-edit", commit];
   const r = git(repo, ...args);
   const output = `${r.stdout || ""}${r.stderr || ""}`.trim().slice(-800);

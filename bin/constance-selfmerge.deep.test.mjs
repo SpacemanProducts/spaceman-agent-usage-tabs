@@ -499,22 +499,48 @@ console.log("done");
   assert.equal(cleanStatus(repo), true);
 }
 
-// BUG (real, left unfixed per the task): a copy with no commits of its own —
-// branch still at the base, or every commit already contained in main — makes
-// `git merge --no-ff` a no-op ("Already up to date", exit 0), so selfMerge
-// reports { merged: true, commit: <pre-existing main HEAD> }. That commit is
-// NOT a merge commit and contains none of the copy's work; if it is recorded
-// via addPending and later reverted, revertMerge undoes main's real prior
-// commit. The honest result for a no-op merge would be merged:false (nothing
-// to review) or at least a commit that is really a merge of the branch.
-// {
-//   const repo = makeRepo("emptycopy");
-//   const c = makeCopy(repo, 45);   // worktree on constance/job-45, no commits
-//   const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL, suite: okSuite });
-//   assert.equal(r.merged, false, "a no-op merge must not report merged");
-//   // or, if merged:true is kept for the bookkeeping, r.commit must be a real
-//   // merge commit whose second parent is the copy's branch tip.
-// }
+// A copy with no commits of its own — branch still at the base, or every
+// commit already contained in main — makes `git merge --no-ff` a no-op
+// ("Already up to date", exit 0). selfMerge must not report that pre-existing
+// HEAD as a merge: there is nothing to review, and a later send-back revert
+// would undo main's real prior commit.
+{
+  const repo = makeRepo("emptycopy");
+  const c = makeCopy(repo, 45);   // worktree on constance/job-45, no commits
+  const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL, suite: okSuite });
+  assert.equal(r.merged, false, "a no-op merge must not report merged");
+  assert.equal(r.reason, "nothing to merge");
+  assert.equal(git(repo, "rev-parse", "HEAD").trim(), git(repo, "rev-parse", c.branch).trim(), "main never moved");
+
+  // Same for a copy whose commits already landed in main by another route:
+  // its branch tip is an ancestor of HEAD, so the merge is a no-op too.
+  const repo2 = makeRepo("alreadymerged");
+  const c2 = makeCopy(repo2, 46, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
+  const first = selfMergeBranch(repo2, c2.branch);
+  assert.equal(first.ok, true, "setup: the copy's work is already merged");
+  const r2 = selfMerge({ repo: repo2, worktree: c2.worktree, branch: c2.branch, checks: ALL, suite: okSuite });
+  assert.equal(r2.merged, false, "an already-merged copy has nothing to merge");
+  assert.equal(r2.reason, "nothing to merge");
+  assert.equal(fs.readFileSync(path.join(repo2, "b.txt"), "utf8"), "b\n", "the earlier merge's work is untouched");
+}
+
+// revertMerge refuses a merge commit that is not a self-merge of a copy
+// branch: a foreign merge recorded by mistake must not be undone. Plain
+// commits still revert (the job's own branch tip is the fallback target).
+{
+  const repo = makeRepo("revforeign");
+  git(repo, "checkout", "-qb", "side");
+  commitOn(repo, "s.txt", "s\n", "side work");
+  git(repo, "checkout", "-q", "main");
+  git(repo, "merge", "-q", "--no-ff", "--no-edit", "side");
+  const foreign = git(repo, "rev-parse", "HEAD").trim();
+  const rv = revertMerge(repo, foreign);
+  assert.equal(rv.ok, false, "a non-self-merge merge commit must be refused");
+  assert.match(rv.output, /not a self-merge commit/);
+  assert.equal(sh(repo, "rev-parse", "-q", "--verify", "REVERT_HEAD").status !== 0, true, "no revert left in progress");
+  assert.equal(fs.readFileSync(path.join(repo, "s.txt"), "utf8"), "s\n", "the foreign merge's file survived");
+  assert.equal(cleanStatus(repo), true, "repo clean after the refused revert");
+}
 
 // The reviews file tolerates every JSON shape that is not the expected
 // object: scalars, arrays and wrong-typed fields all read as empty lists.
@@ -540,17 +566,16 @@ console.log("done");
   assert.throws(() => addPending(dir, { job: 1, commit: "c", branch: "b" }));
 }
 
-// BUG (minor, left unfixed): when writeReviews fails — here because the
-// target path is a directory — the temp file `<file>.<pid>.tmp` it already
-// wrote is left behind. The rename is the only step that can fail after the
-// write, and there is no cleanup for it.
-// {
-//   const dir = path.join(root, "litter-target");
-//   fs.mkdirSync(dir, { recursive: true });
-//   try { addPending(dir, { job: 1 }); } catch {}
-//   const left = fs.readdirSync(path.dirname(dir)).filter((f) => f.includes(".tmp"));
-//   assert.deepEqual(left, [], "a failed reviews write must not leave .tmp litter");
-// }
+// A failed reviews write must not leave its `<file>.<pid>.tmp` behind: the
+// temp file is removed when the rename fails (here the target is a directory,
+// so the rename is the step that throws).
+{
+  const dir = path.join(root, "litter-target");
+  fs.mkdirSync(dir, { recursive: true });
+  try { addPending(dir, { job: 1 }); } catch {}
+  const left = fs.readdirSync(path.dirname(dir)).filter((f) => f.includes(".tmp"));
+  assert.deepEqual(left, [], "a failed reviews write must not leave .tmp litter");
+}
 
 // addPending creates missing parent directories itself, and afterwards the
 // folder holds exactly the reviews file — the .lock dir and the .tmp file are
