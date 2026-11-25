@@ -19,15 +19,19 @@ const WALL_REASON = /^(Claude|Antigravity) said it hit its limit/;
 // { wall, now, goalStatus } -> { action: "wait"|"resume"|"none", until, why }.
 // wall is the parsed wall.json ({ until, stated, text, at }) or null; goalStatus
 // is the goal object ({ status, pauseReason }) — a bare status string works too.
-export function resumePlan({ wall, now = Date.now(), goalStatus } = {}) {
+export function resumePlan(options) {
+  const { wall, now = Date.now(), goalStatus } = options || {};
   const g = typeof goalStatus === "string" ? { status: goalStatus } : goalStatus || {};
   if (g.status !== "paused" || !WALL_REASON.test(String(g.pauseReason || "")))
     return { action: "none", until: null, why: "the goal isn't paused by the wall" };
   const until = wall && Number(wall.until);
   if (!Number.isFinite(until))
     return { action: "none", until: null, why: "the wall has no readable reset time" };
+  const clock = Number(now);
+  if (!Number.isFinite(clock))
+    return { action: "none", until: null, why: "the clock is unreadable" };
   const ready = until + RESUME_GRACE_MS;
-  if (now < ready)
+  if (clock < ready)
     return { action: "wait", until: ready, why: `the wall stands until ${new Date(until).toISOString()}, plus ${RESUME_GRACE_MS / 1000} s` };
   return { action: "resume", until: ready, why: "the reset time plus the grace has passed" };
 }
