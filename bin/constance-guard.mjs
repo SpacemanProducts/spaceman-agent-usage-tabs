@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { safeGit, trackedDirty } from "./constance-git.mjs";
 
 const names = (dir) => {
   try { return fs.readdirSync(dir).sort(); } catch { return []; }
@@ -25,7 +25,10 @@ export function snapshot(env = process.env, dir = "") {
   return snap;
 }
 
-const git = (dir, ...args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+// Host git after a worker ran in the folder: fsmonitor and hooks off, GIT_DIR
+// pinned (constance-git.mjs). The guard's own `git status` must never be the
+// thing that runs a worker's planted command.
+const git = (dir, ...args) => safeGit(dir, args);
 
 const isHash = (c) => /^[0-9a-f]{7,40}$/i.test(c || "");
 function headOf(dir) {
@@ -33,18 +36,23 @@ function headOf(dir) {
   return r.status === 0 ? r.stdout.trim() : "";
 }
 
-// Paths dirty in the worktree right now.
+// Paths dirty in the worktree right now. -z prints raw unquoted names,
+// --untracked-files=all lists every new file instead of collapsing a wholly
+// untracked folder to "dir/", and a rename reports BOTH sides.
 export function dirtyPaths(dir) {
   const out = [];
-  const st = git(dir, "status", "--porcelain");
+  const st = git(dir, "status", "--porcelain", "-z", "--untracked-files=all");
   if (st.status !== 0) return out;
-  for (const line of st.stdout.split("\n")) {
-    if (!line.trim()) continue;
-    let p = line.slice(3).trim();
-    const arrow = p.indexOf(" -> ");
-    if (arrow >= 0) p = p.slice(arrow + 4);
-    if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
-    out.push(p);
+  const fields = st.stdout.split("\0");
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    if (!f || f.length < 4) continue;
+    out.push(f.slice(3));
+    const xy = f.slice(0, 2);
+    if (xy.includes("R") || xy.includes("C")) {
+      const other = fields[++i];
+      if (other && xy.includes("R")) out.push(other);
+    }
   }
   return out;
 }
@@ -99,27 +107,41 @@ const inside = (p, list) => list.some((f) => { const a = norm(f), b = norm(p); r
 // way we care about leaves visible, project-like folders behind.
 const visible = (names) => names.filter((n) => !n.startsWith("."));
 
-// Everything wrong with one finished run. `allowed` is the job's file list
-// (empty = read-only: any change at all is a violation, .constance/ aside).
-export function checkRun({ dir, files = [], commit = "", before = null, env = process.env } = {}) {
+// Everything wrong with one finished run. `files` is the job's list (empty =
+// read-only: any change at all is a violation). .constance/ is NOT allowed:
+// only Constance writes there (the sandbox keeps it read-only).
+//
+// Attribution: workers can't commit (their git data is read-only), so a commit
+// counts as this job's only when the caller vouches for it as `commit` (the
+// commit Constance made for the job) and it really is new since the pre-run
+// HEAD. Every other commit since then belongs to someone else — another job's
+// merge, the owner, Constance — and is never blamed on this job or reverted.
+// The one exception is a copy's own worktree (`ownTree`): nobody else commits
+// there, so a commit Constance didn't make is flagged (its files are checked
+// too, since they would merge), but still never reverted.
+export function checkRun({ dir, files = [], commit = "", before = null, env = process.env, ownTree = false } = {}) {
   const violations = [];
   const notices = [];
-  if (!before) return { ok: true, violations, notices };
-  const allowed = [...files, ".constance/"];
-  // An old snapshot without a recorded HEAD can't tell the run's commits from
-  // anyone else's: judge the dirty paths only.
+  if (!before) return { ok: true, violations, notices, badPaths: [], badCommits: [], foreignCommits: [] };
+  const allowed = [...files];
   const own = before.head !== undefined ? commitFromRun(dir, commit, before.head) : false;
   if (isHash(commit) && before.head !== undefined && !own) violations.push(`reported commit ${commit.slice(0, 9)} is not a new commit from this run`);
-  // Every commit since the pre-run HEAD is the run's, reported or not: an agent
-  // that commits but reports nothing still gets diff-checked.
-  const ownCommits = before.head !== undefined ? newCommits(dir, before.head) : [];
+  const since = before.head !== undefined ? newCommits(dir, before.head) : [];
+  const fullOf = (c) => { const r = git(dir, "rev-parse", c + "^{commit}"); return r.status === 0 ? r.stdout.trim() : c; };
+  const ownFull = own ? fullOf(commit) : "";
+  const attributed = own ? [commit] : [];
+  const foreignCommits = since.filter((c) => c !== ownFull);
   const paths = new Set();
-  for (const c of ownCommits) commitFiles(dir, c).forEach((p) => paths.add(p));
+  for (const c of attributed) commitFiles(dir, c).forEach((p) => paths.add(p));
+  if (ownTree && foreignCommits.length) {
+    violations.push(`${foreignCommits.length} commit${foreignCommits.length === 1 ? "" : "s"} appeared in its own worktree that Constance didn't make: ${foreignCommits.map((c) => c.slice(0, 9)).join(", ")}`);
+    for (const c of foreignCommits) commitFiles(dir, c).forEach((p) => paths.add(p));
+  }
   const already = new Set(before.dirty || []);
   for (const p of dirtyPaths(dir)) if (!already.has(p)) paths.add(p);
   const bad = [...paths].filter((p) => !inside(p, allowed));
   if (bad.length) violations.push(`changed files outside its list: ${bad.join(", ")}`);
-  const badCommits = ownCommits.filter((c) => commitFiles(dir, c).some((p) => !inside(p, allowed))).reverse();
+  const badCommits = attributed.filter((c) => commitFiles(dir, c).some((p) => !inside(p, allowed)));
   const after = snapshot(env);
   const homeAfter = visible(after.home), homeBefore = visible(before.home || []);
   const projAfter = visible(after.projects), projBefore = visible(before.projects || []);
@@ -133,30 +155,35 @@ export function checkRun({ dir, files = [], commit = "", before = null, env = pr
   if (removedHome.length) notices.push(`removed entries from the home folder: ${removedHome.join(", ")}`);
   if (addedProjects.length) notices.push(`created projects outside the folder: ${addedProjects.join(", ")}`);
   if (removedProjects.length) notices.push(`removed projects: ${removedProjects.join(", ")}`);
-  const ownCommit = own ? commit : ownCommits[ownCommits.length - 1] || "";
-  return { ok: violations.length === 0, violations, notices, badPaths: bad, ownCommit, ownCommits, badCommits, addedProjects, addedHome, removedHome, removedProjects, projectsDir: after.projectsDir };
+  const ownCommit = own ? commit : "";
+  return { ok: violations.length === 0, violations, notices, badPaths: bad, ownCommit, ownCommits: attributed, badCommits, foreignCommits, addedProjects, addedHome, removedHome, removedProjects, projectsDir: after.projectsDir };
 }
 
 // Undo what can be undone, and nothing else. The guard never deletes, moves,
 // checks out or cleans anything: the owner, Constance and other jobs share these
 // folders, so a stray path may well be theirs. The only automatic undo is a
-// `git revert` of the run's own verified commit (a new commit, never a reset);
-// if that revert can't apply cleanly it is aborted, leaving the tree as it was.
+// `git revert` (a new commit, never a reset) of a commit attributed to THIS job:
+// `commit` (the caller vouches for it) or a `commits` entry that is also in
+// `attributed`. Anything else is never reverted. Nothing is reverted on top of
+// uncommitted tracked changes, and a revert that can't apply cleanly is aborted.
 // Everything else is reported for the owner to look at.
-export function restoreRun({ dir, commit = "", commits = [], badPaths = [], addedProjects = [], addedHome = [], removedHome = [], removedProjects = [] } = {}) {
+export function restoreRun({ dir, commit = "", commits = [], attributed = [], badPaths = [], addedProjects = [], addedHome = [], removedHome = [], removedProjects = [] } = {}) {
   const did = [];
   const seen = new Set();
+  const fullOf = (c) => { const r = git(dir, "rev-parse", c + "^{commit}"); return r.status === 0 ? r.stdout.trim() : ""; };
+  const mine = new Set([commit, ...attributed].filter(isHash).map(fullOf).filter(Boolean));
   const revert = (c) => {
-    const full = git(dir, "rev-parse", c + "^{commit}");
-    const key = full.status === 0 ? full.stdout.trim() : c;
-    if (seen.has(key)) return;
+    const key = fullOf(c);
+    if (!key || seen.has(key)) return;
     seen.add(key);
+    if (!mine.has(key)) { did.push(`left commit ${c.slice(0, 9)} alone (not this job's)`); return; }
+    const dirty = trackedDirty(dir);
+    if (dirty === null || dirty.length) { did.push(`could not revert commit ${c.slice(0, 9)}: the folder has uncommitted changes; left it for you`); return; }
     const r = git(dir, "revert", "--no-edit", c);
     if (r.status === 0) did.push(`reverted commit ${c.slice(0, 9)}`);
     else { git(dir, "revert", "--abort"); did.push(`could not revert commit ${c.slice(0, 9)} cleanly; left it for you`); }
   };
   if (isHash(commit)) revert(commit);
-  // `commits` is newest first (badCommits order); each reverts independently.
   for (const c of commits) if (isHash(c)) revert(c);
   const left = [...badPaths.map((p) => `${p} (in the project)`), ...addedProjects.map((n) => `${n} (new in Projects)`), ...addedHome.map((n) => `${n} (new in home)`)];
   if (left.length) did.push(`left in place for you to check: ${left.join(", ")}`);

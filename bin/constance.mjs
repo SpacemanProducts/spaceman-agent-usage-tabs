@@ -43,7 +43,9 @@ import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./cons
 import { NotifyParser, handleNotification, recentSignals, recordSignal, jobFinishSignal, logSaysFinished } from "./constance-notify.mjs";
 import { addTask, peekNext, finishTask, removeTask, queueView, readyTasks } from "./constance-queue.mjs";
 import { withLock } from "./constance-mergelock.mjs";
-import { selfMerge, selfMergeBranch, runSuite, addPending, pendingReviews, markReviewed, revertMerge } from "./constance-selfmerge.mjs";
+import { selfMerge, selfMergeBranch, runSuite, testCommands, addPending, pendingReviews, markReviewed, revertMerge } from "./constance-selfmerge.mjs";
+import { safeGit, trackedDirty } from "./constance-git.mjs";
+import { dirtyPaths } from "./constance-guard.mjs";
 import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
 import { logText } from "./constance-logtext.mjs";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
@@ -132,8 +134,11 @@ const runDir = (j) => j.worktree || j.dir;
 // sandbox tmp for a job that works in the project folder itself (inside the
 // sandbox that tmp is /tmp — see handOut; a done file inside the project would
 // count as a plugin change and reload the owner's shell).
-const jobDoneFile = (j) => doneFile(j.worktree || j.tmp || runDir(j), j.id);
-const jobDoneDir = (j) => j.worktree || j.tmp || runDir(j);
+// Jobs handed out since 1.50.2 (doneInTmp) write their done file in their own
+// sandbox tmp, copies too: a worker can't write .constance/ anywhere. Older
+// copies still running wrote theirs in the worktree.
+const jobDoneDir = (j) => (j.doneInTmp ? j.tmp : j.worktree || j.tmp) || runDir(j);
+const jobDoneFile = (j) => doneFile(jobDoneDir(j), j.id);
 
 // A job's sandbox /tmp is only ever the folder handOut made for it; it goes when the job ends.
 function dropJobTmp(j) {
@@ -174,7 +179,9 @@ function sweep() {
         if (fs.existsSync(f)) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
       }
       if (!done && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
-      if (done) { j.status = "finished"; j.settling = Date.now(); j.summary = String(done.summary || ""); j.commit = String(done.commit || ""); changed.push(j); signals.push({ j, source }); }
+      // A worker can't commit, so its done file's "commit" is only what it claimed
+      // (kept as reportedCommit); the job's commit is the one commitForJob makes.
+      if (done) { j.status = "finished"; j.settling = Date.now(); j.summary = String(done.summary || ""); j.reportedCommit = String(done.commit || ""); j.commit = ""; changed.push(j); signals.push({ j, source }); }
       // Still running, but its own log says it finished: record the signal
       // (deduped in notify.jsonl) without touching its status.
       else if (j.log && logSaysFinished(tailFile(j.log))) signals.push({ j, source: "log" });
@@ -185,7 +192,7 @@ function sweep() {
   // the guard and the self-merge decision are done; maybeSelfMerge swaps it
   // for selfMerging in one update, and it is cleared here otherwise.
   for (const j of changed) {
-    try { guardFinished(j); dropJobTmp(j); maybeSelfMerge(j); }
+    try { guardFinished(j); commitForJob(j); dropJobTmp(j); maybeSelfMerge(j); }
     finally { store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) delete x.settling; }); }
   }
   // Whoever's sweep sees the finish logs the return — status polls can beat `wait` to it.
@@ -212,58 +219,91 @@ function coversPath(files, p) {
 function guardFinished(j) {
   if (!j.guardBefore || j.guardChecked) return;
   const dir = runDir(j);
-  const res = checkRun({ dir, files: j.files || [], commit: j.commit, before: j.guardBefore, env: ENV });
-  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.guardChecked = true; });
-  // Concurrent jobs share the folder and its git history, and the guard sees
-  // every commit since the snapshot: work another overlapping job was allowed
-  // to do is that job's, never this one's violation. A job with its own
-  // worktree (a copy) is never excused and never excuses: its history is all
-  // its own, and its commits only reach the shared repo when its branch merges.
-  const jStart = j.startedAt || 0, jEnd = j.finishedAt || Date.now();
   const hasWorktree = (k) => !!(k.worktree || k.branch);
+  // Workers can't commit (their git data is read-only), so nothing committed
+  // since the snapshot is this job's: the guard judges what the run left in the
+  // tree, and a copy's worktree is also checked for commits nobody should have
+  // made there. Nothing is ever reverted here — the only commit a job gets is
+  // the one Constance makes for it afterwards (commitForJob), from its list.
+  const res = checkRun({ dir, files: j.files || [], commit: "", before: j.guardBefore, env: ENV, ownTree: hasWorktree(j) });
+  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.guardChecked = true; });
+  // Concurrent jobs share the folder: a dirty path another overlapping job may
+  // edit is that job's, never this one's violation. A copy is never excused.
+  const jStart = j.startedAt || 0, jEnd = j.finishedAt || Date.now();
   const others = hasWorktree(j) ? [] : store.read().jobs.filter((k) => k.id !== j.id && k.startedAt && runDir(k) === dir &&
     !hasWorktree(k) && k.startedAt <= jEnd && jStart <= (k.finishedAt || Infinity));
-  const allowed = (k) => [...(k.files || []), ".constance/"];
-  const excusedCommits = new Set(), excusedPaths = new Set();
-  for (const c of res.badCommits || []) {
-    const cfiles = changedFiles(dir, c);
-    if (others.some((k) => k.commit === c || (cfiles.length > 0 && cfiles.every((p) => coversPath(allowed(k), p))))) {
-      excusedCommits.add(c);
-      cfiles.forEach((p) => excusedPaths.add(p));
-    }
-  }
-  for (const p of res.badPaths || []) if (others.some((k) => coversPath(allowed(k), p))) excusedPaths.add(p);
+  const excusedPaths = new Set();
+  for (const p of res.badPaths || []) if (others.some((k) => coversPath(k.files || [], p))) excusedPaths.add(p);
   const badPaths = (res.badPaths || []).filter((p) => !excusedPaths.has(p));
-  const badCommits = (res.badCommits || []).filter((c) => !excusedCommits.has(c));
-  const violations = [...res.violations.filter((v) => v.startsWith("reported commit"))];
+  const violations = [...res.violations.filter((v) => !v.startsWith("changed files outside its list"))];
   if (badPaths.length) violations.push(`changed files outside its list: ${badPaths.join(", ")}`);
   if ((res.notices || []).length) store.log({ kind: "guard-notice", job: j.id, agent: j.agent, text: res.notices.join("; ") });
   if (!violations.length) return;
-  // Revert a commit only when the commit itself touched disallowed files; a
-  // home/projects-only or dirty-leftover violation leaves committed work alone.
-  // Only commits the guard verified as this run's own are ever reverted.
-  const commitBad = !!res.ownCommit && changedFiles(dir, res.ownCommit).some((p) => badPaths.includes(p));
-  const did = restoreRun({ dir, commit: commitBad ? res.ownCommit : "", commits: badCommits, badPaths, addedProjects: res.addedProjects || [],
+  const did = restoreRun({ dir, badPaths, addedProjects: res.addedProjects || [],
     addedHome: res.addedHome || [], removedHome: res.removedHome || [], removedProjects: res.removedProjects || [] });
   const lesson = `${j.agent} broke a guardrail on job ${j.id}: ${violations.join("; ")}.`;
   addLesson(lesson, store.dir);
   store.update((s) => {
     const x = s.jobs.find((k) => k.id === j.id);
-    if (x) x.guardViolation = violations;
+    if (x) { x.guardViolation = violations; x.guardBadPaths = badPaths; }
     const g = (s.guards ||= {})[j.agent] ||= { strikes: 0, violations: [] };
     g.strikes += 1; g.violations.push({ job: j.id, at: Date.now(), what: violations });
   });
-  store.log({ kind: "guard", job: j.id, agent: j.agent, text: `${violations.join("; ")}. Restored: ${did.join("; ") || "nothing to restore"}. Lesson logged; ${j.agent} gets smaller tasks now.` });
+  store.log({ kind: "guard", job: j.id, agent: j.agent, text: `${violations.join("; ")}. ${did.join("; ") || "Nothing was reverted."} Lesson logged; ${j.agent} gets smaller tasks now.` });
+}
+
+// The controller's commit: workers can't write git data, so Constance commits a
+// finished job's work for it, on the host, with the hardened git
+// (constance-git.mjs). Only paths that (a) changed during the run (not dirty
+// before it) and (b) are inside the job's own file list are staged; anything
+// else stays in the tree for the guard's report. A read-only job never gets a
+// commit. The commit becomes the job's `commit`. A busy index (another git
+// command in the same folder) is retried for a few seconds; a commit that still
+// fails is logged and the work stays uncommitted for her review.
+function commitForJob(j) {
+  try {
+    const files = j.files || [];
+    if (!files.length || j.commit && j.controllerCommit) return;
+    const dir = runDir(j);
+    const before = new Set(j.guardBefore?.dirty || []);
+    const paths = dirtyPaths(dir).filter((p) => !before.has(p) && coversPath(files, p) && !isProtectedPath(p));
+    if (!paths.length) return;
+    const first = String(j.summary || j.task || "").split("\n")[0].trim().slice(0, 72) || "work";
+    const msg = `${j.worker || j.agent} (job ${j.id}): ${first}\n\nCommitted by Constance for ${j.agent}; files: ${paths.join(", ")}`;
+    let r = null;
+    for (let i = 0; i < 40; i++) {
+      r = safeGit(dir, ["add", "-A", "--", ...paths]);
+      if (r.status === 0) r = safeGit(dir, ["commit", "-q", "--no-verify", "-m", msg, "--", ...paths]);
+      if (r.status === 0 || !/index\.lock|unable to (create|lock)/i.test(`${r.stderr}${r.stdout}`)) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+    if (r.status !== 0) {
+      store.log({ kind: "note", job: j.id, agent: j.agent, worker: j.worker, text: `Couldn't commit job ${j.id}'s work (${(r.stderr || r.stdout || "").trim().slice(-200)}); it is left uncommitted in ${dir}.` });
+      return;
+    }
+    const head = safeGit(dir, ["rev-parse", "HEAD"]).stdout.trim();
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.commit = head; x.controllerCommit = true; x.committedFiles = paths; } });
+    j.commit = head; j.controllerCommit = true;
+  } catch (e) {
+    store.log({ kind: "note", job: j.id, agent: j.agent, text: `Couldn't commit job ${j.id}'s work: ${e.message}` });
+  }
+}
+
+// Paths only Constance may write: a job may never list them, and her commit
+// never stages them.
+function isProtectedPath(p) {
+  const n = normRel(p);
+  return n === ".git" || n.startsWith(".git/") || n === ".constance" || n.startsWith(".constance/");
 }
 
 function changedFiles(dir, commit) {
   if (!/^[0-9a-f]{7,40}$/i.test(commit || "")) return [];
-  const r = spawnSync("git", ["-C", dir, "show", "--name-only", "--format=", commit], { encoding: "utf8" });
+  const r = safeGit(dir, ["show", "--name-only", "--format=", commit]);
   return r.status === 0 ? r.stdout.split("\n").filter(Boolean) : [];
 }
 
 function excludeDoneFiles(dir) {
-  const r = spawnSync("git", ["-C", dir, "rev-parse", "--git-path", "info/exclude"], { encoding: "utf8" });
+  const r = safeGit(dir, ["rev-parse", "--git-path", "info/exclude"]);
   if (r.status !== 0) return;
   const f = path.resolve(dir, r.stdout.trim());
   let txt = ""; try { txt = fs.readFileSync(f, "utf8"); } catch {}
@@ -284,26 +324,21 @@ function excludeDoneFiles(dir) {
 const reviewsFile = () => path.join(store.dir, "reviews.json");
 const selfMergeOn = () => readSettings().constanceSelfMerge !== false;
 
-// The agent's own word that its tests passed: a done-file `tests` field that
-// says so, or report text naming passing tests. Silence counts as false.
-function ownTestsPassed(done) {
-  if (!done) return false;
-  const t = done.tests;
-  if (t === true || /^(pass|passed|ok|green|success)$/i.test(String(t ?? ""))) return true;
-  const text = `${done.summary || ""}\n${done.report || ""}`;
-  return /\btests?\b[^.\n]{0,80}?\b(pass|passed|green|succeed)/i.test(text) || /\b(pass|passed|green)\b[^.\n]{0,80}?\btests?\b/i.test(text);
-}
-
+// The agent's own word ("tests pass" in its report) is never a merge signal:
+// a self-merge needs the project's real test commands (testCommands in
+// constance-selfmerge.mjs), run sandboxed. A project without one never
+// self-merges; its copies wait for her normal review.
 // Every file the copy's branch changed against the repo's current branch must
-// sit inside the job's allowed list (its files plus .constance/, same as the
-// guard's). Unreadable git means no.
+// sit inside the job's allowed list (never .git/ or .constance/). Unreadable
+// git means no.
 function branchDiffOk(j) {
-  const base = spawnSync("git", ["-C", j.dir, "merge-base", "HEAD", j.branch], { encoding: "utf8" });
+  const base = safeGit(j.dir, ["merge-base", "HEAD", j.branch]);
   if (base.status !== 0) return false;
-  const d = spawnSync("git", ["-C", j.dir, "diff", "--name-only", `${base.stdout.trim()}..${j.branch}`], { encoding: "utf8" });
+  const d = safeGit(j.dir, ["diff", "--name-only", `${base.stdout.trim()}..${j.branch}`]);
   if (d.status !== 0) return false;
-  const allowed = [...(j.files || []), ".constance/"];
-  return d.stdout.split("\n").filter(Boolean).every((p) => coversPath(allowed, p));
+  const allowed = j.files || [];
+  const changed = d.stdout.split("\n").filter(Boolean);
+  return changed.length > 0 && changed.every((p) => coversPath(allowed, p) && !isProtectedPath(p));
 }
 
 // The suite is the slow part of a self-merge, so it never runs inside sweep:
@@ -319,9 +354,10 @@ function maybeSelfMerge(j) {
     // guardChecked with no guardViolation is the guard's clean bill; without it
     // there is no proof the run stayed inside its list, so no self-merge.
     if (!fresh || fresh.status !== "finished" || fresh.selfMergeTried || fresh.selfMerging || fresh.guardViolation?.length || !fresh.guardChecked) return;
-    let done = null;
-    try { done = JSON.parse(fs.readFileSync(jobDoneFile(fresh), "utf8")); } catch {}
-    if (!ownTestsPassed(done)) return;   // normal review handles it
+    if (!testCommands(fresh.dir).length) {
+      store.log({ kind: "note", job: j.id, agent: j.agent, text: `No self-merge for job ${j.id}: ${fresh.dir} has no test command (.constance/rules.md "test: ..." or package.json scripts.test), so it waits for review.` });
+      return;
+    }
     if (!branchDiffOk(fresh)) return;
     store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x && x.status === "finished" && !x.selfMergeTried) { x.selfMergeTried = true; x.selfMerging = true; x.selfMergeAt = Date.now(); delete x.settling; } });
     const marked = store.read().jobs.find((k) => k.id === j.id);
@@ -361,14 +397,14 @@ function runSelfMerge(id) {
   if (!j) return;
   try {
     if (j.status !== "finished" || j.selfMerging !== true || j.guardViolation?.length || !j.guardChecked || !j.worktree || !j.branch) return;
-    let done = null;
-    try { done = JSON.parse(fs.readFileSync(jobDoneFile(j), "utf8")); } catch {}
-    if (!ownTestsPassed(done) || !branchDiffOk(j)) return;
-    const checks = { ownTests: true, guard: true, diff: true };
+    if (!branchDiffOk(j)) return;
+    const commands = testCommands(j.dir);
+    const checks = { guard: true, diff: true };
     // Tests can slow the suite down with CONSTANCE_SELFMERGE_SUITE_DELAY_MS;
     // nothing sets it outside them.
     const delay = Number(process.env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS) || 0;
-    const suite = delay ? (dir) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay); return runSuite(dir); } : runSuite;
+    const run = (dir) => runSuite(dir, { commands, env: ENV });
+    const suite = delay ? (dir) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay); return run(dir); } : run;
     // Re-check right before each merge attempt: a review that landed while the
     // suite ran wins, and the merge must not fire on a job it already took.
     const merge = (repo, branch) => {
@@ -390,6 +426,14 @@ function runSelfMerge(id) {
       addPending(reviewsFile(), { job: j.id, commit: j.commit, branch: j.branch });
       store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "merged"; x.mergedAt = Date.now(); x.mergeCommit = m.commit || ""; x.worktree = ""; x.cleaned = did.join("; "); delete x.selfMerging; delete x.selfMergePid; } });
       store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `self-merged ${j.branch}${m.commit ? ` (${String(m.commit).slice(0, 9)})` : ""}; ${did.join("; ")}` });
+      return;
+    }
+    if (m.failed) {
+      // A copy whose worktree isn't clean can't be rebased or tested as it
+      // merges: it failed. "failed" frees its copy slot and its files; the
+      // worktree and branch stay for the owner to look at.
+      store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "failed"; x.failedAt = Date.now(); x.mergeError = m.reason || ""; delete x.selfMerging; delete x.selfMergePid; } });
+      store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `self-merge failed on ${j.branch}: ${(m.reason || "").slice(-300)}. The copy's slot is free again; its worktree is kept.` });
       return;
     }
     if (m.conflict || m.flagged) {
@@ -473,6 +517,8 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
   const g = store.read().goal;
   if (!g || g.status !== "running") throw new Error("No goal is running (stopped or paused), so nothing is handed out.");
   if (!agent || !task) throw new Error("delegate needs --agent ID and --task TEXT");
+  const banned = files.filter(isProtectedPath);
+  if (banned.length) throw new Error(`Only Constance writes ${banned.join(", ")}: no worker may be given .git/ or .constance/ files.`);
   // Second-try rule: work sent back twice is never resent as it was; it is split
   // into smaller jobs (fewer files each) or she does it herself.
   const twice = secondTry(store.read().jobs, { files, againOf });
@@ -507,7 +553,7 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
       room = s.jobs.some((j) => j.agent === agent && j.status === "held") ? { ok: false, reason: "earlier copies are still held" } : copyRoom(s, agent, machine);
     }
     const id = s.next++;
-    const j = { id, goal: g.id, agent, account, repo: dir, dir, files, task, status: practice ? "finished" : room.ok ? "waiting" : "held", createdAt: Date.now() };
+    const j = { id, goal: g.id, agent, account, repo: dir, dir, files, task, status: practice ? "finished" : room.ok ? "waiting" : "held", createdAt: Date.now(), doneInTmp: true };
     if (items.length) j.items = items;
     if (title) j.title = String(title).trim().slice(0, 80);
     if (Number.isFinite(againOf) && againOf > 0) j.againOf = againOf;
@@ -526,11 +572,11 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
     // that works in the project folder itself can't write its done file there
     // (inside the sandbox its temp folder is /tmp, which is where the prompt
     // must point — a done file in the project would reload the owner's shell).
-    const promptExtra = asCopy ? `${extra}\nNever use git stash: other copies share it.` : extra;
+    const promptExtra = extra;
     const built = asCopy
       ? handoffPrompt({ id, dir, task, files, account, worktree: wt, branch: br, mainDir: dir }, promptExtra)
       : handoffPrompt(j, promptExtra);
-    j.prompt = asCopy ? built : built.split(doneFile(dir, id)).join(doneFile("/tmp", id));
+    j.prompt = built.split(doneFile(asCopy ? wt : dir, id)).join(doneFile("/tmp", id));
     s.jobs.push(j);
     return j;
   });
@@ -584,7 +630,7 @@ function launchJob(job, accountLabel = job.account?.label || "") {
     // The done file goes in a copy's worktree, or in the job's own sandbox tmp
     // for a project-folder job (inside the sandbox that tmp is /tmp, which is
     // what the prompt tells the agent): never inside the project itself.
-    const doneDir = job.worktree ? rd : tmp;
+    const doneDir = job.doneInTmp || !job.worktree ? tmp : rd;
     fs.mkdirSync(path.join(doneDir, ".constance"), { recursive: true });
     try { fs.rmSync(doneFile(doneDir, job.id)); } catch {}
     box = sandboxLaunch(launchCommand(agent, job.prompt), { agent, dir: rd, tmp, env: { ...ENV, ...acctEnv }, extraRw: Object.values(acctEnv), keyringAgents: keyringAgents() });
@@ -609,10 +655,11 @@ function releaseHeld() {
   if (!g || g.status !== "running" || practiceMode()) return [];
   const agents = [...new Set(store.read().jobs.filter((j) => j.status === "held").map((j) => j.agent))];
   if (!agents.length) return [];
-  const machine = readMachine();
   let verdicts = null;
   const started = [];
   for (const agent of agents) {
+    // Memory is read fresh before every start (finding 17).
+    const machine = readMachine();
     verdicts ??= judged(readData());
     const v = verdicts.find((a) => a.id === agent);
     const pick = store.update((s) => {
@@ -762,6 +809,10 @@ function mergeAccepted(j) {
   keepTokens(true);
   const m = mergeBranch(j.dir, j.branch);
   if (!m.ok) {
+    // A real conflict marks the job "conflict"; anything else (the checkout has
+    // uncommitted work, git failed) leaves it finished so it can be accepted
+    // again once the checkout is clean.
+    if (!m.conflict) { store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `merge of ${j.branch} not done: ${(m.output || "").slice(-300)}` }); return m; }
     store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "conflict"; x.mergeError = m.output || ""; } });
     store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `merge ${m.conflict ? "conflict" : "failed"} on ${j.branch}: ${(m.output || "").slice(-300)}` });
     return m;
@@ -804,22 +855,55 @@ function review() {
   if (settling(found)) fail(`Job ${id} just finished and is still being checked; try again in a moment.`);
   if (found.status === "merged") return reviewMerged(found, verdict, note);
   if (found.status !== "finished") fail(`Job ${id} is ${found.status}; only a finished job can be reviewed.`);
-  const j = store.update((s) => { const j = s.jobs.find((x) => x.id === id); if (j) { j.status = verdict === "accept" ? "accepted" : "sent back"; j.reviewNote = note; j.reviewedAt = Date.now(); } return j; });
-  store.log({ kind: "review", job: id, agent: j.agent, worker: j.worker, verdict, text: note });
-  // Accepted means the agent is free: merge its branch first (copies only),
-  // clean up, then hand it the next queued task for this project immediately.
-  if (verdict === "accept" && j.worktree) {
-    const m = withMergeLock(() => mergeAccepted(j));
+  // Accepting a copy merges its branch: take the merge lock FIRST, and mark the
+  // job accepted only once the merge has landed. A busy lock (a self-merge
+  // running its suite) is retried; if it stays busy the job is left exactly as
+  // it was — still finished — and she is told to try again.
+  if (verdict === "accept" && found.worktree) {
+    let m;
+    try { m = acceptMerge(id); }
+    catch (e) { fail(`Job ${id} is still finished: ${e.message}. Nothing changed; run the review again in a minute.`); }
+    if (m.gone) fail(`Job ${id} is ${m.gone}; only a finished job can be reviewed.`);
     if (!m.ok) {
-      score(j, verdict);
-      out(`Job ${id} accepted, but merging ${j.branch} ${m.conflict ? "conflicted" : "failed"}: ${(m.output || "").trim().slice(-300)}. Nothing was forced; the worktree and branch were left in place.`);
+      const j = store.read().jobs.find((x) => x.id === id);
+      if (m.conflict) score(j, verdict);
+      out(m.conflict
+        ? `Job ${id}: merging ${found.branch} conflicted: ${(m.output || "").trim().slice(-300)}. Nothing was forced; the worktree and branch were left in place.`
+        : `Job ${id} is still finished; ${found.branch} was not merged: ${(m.output || "").trim().slice(-300)}. Nothing was forced or reset; review it again once that is sorted.`);
       return;
     }
+    store.log({ kind: "review", job: id, agent: found.agent, worker: found.worker, verdict, text: note });
+    const j = store.update((s) => { const x = s.jobs.find((y) => y.id === id); if (x) { x.status = "accepted"; x.reviewNote = note; x.reviewedAt = Date.now(); } return x; });
+    score(j, verdict);
+    out(`Job ${id} ${j.status}.${autoNext(j)}`);
+    return;
   }
+  const j = store.update((s) => { const j = s.jobs.find((x) => x.id === id); if (j) { j.status = verdict === "accept" ? "accepted" : "sent back"; j.reviewNote = note; j.reviewedAt = Date.now(); } return j; });
+  store.log({ kind: "review", job: id, agent: j.agent, worker: j.worker, verdict, text: note });
   const cleaned = verdict === "send-back" && j.worktree ? ` ${cleanupRejected(j)}` : "";
   score(j, verdict);
   const extra = verdict === "accept" ? autoNext(j) : `${cleaned}${(() => { const a = sendBackAdvice(store.read().jobs, j); return a ? ` ${a}` : ""; })()}`;
   out(`Job ${id} ${j.status}.${extra}`);
+}
+
+// The merge half of accepting a copy, under the merge lock. Each attempt waits
+// up to 10 s for the lock; attempts repeat until CONSTANCE_ACCEPT_WAIT_MS
+// (default 100 s, inside a tool call's time limit) has passed, then it throws
+// and nothing has changed. Inside the lock the job is re-read: a review or a
+// self-merge that got there first wins ({ gone: status }).
+function acceptMerge(id) {
+  const until = Date.now() + (Number(process.env.CONSTANCE_ACCEPT_WAIT_MS) || 100e3);
+  for (;;) {
+    try {
+      return withMergeLock(() => {
+        const cur = store.read().jobs.find((x) => x.id === id);
+        if (!cur || cur.status !== "finished" || cur.selfMerging) return { ok: false, gone: cur ? (cur.selfMerging ? "self-merging" : cur.status) : "gone" };
+        return mergeAccepted(cur);
+      }, { waitMs: 10e3, pollMs: 200 });
+    } catch (e) {
+      if (!/another merge is still running/.test(e.message) || Date.now() > until) throw new Error(/another merge/.test(e.message) ? "another merge held the merge lock the whole time" : e.message);
+    }
+  }
 }
 
 // The background review of a self-merged job: accept only confirms the merge
@@ -835,7 +919,7 @@ function reviewMerged(j, verdict, note) {
     return;
   }
   const target = j.mergeCommit || j.commit;
-  const rv = withMergeLock(() => revertMerge(j.dir, target));
+  const rv = withMergeLock(() => revertMerge(j.dir, target), { waitMs: 90e3, pollMs: 200 });
   if (!rv.ok) {
     out(`Job ${j.id} send-back failed: reverting ${String(target).slice(0, 9)} didn't apply (${(rv.output || "").trim().slice(-300)}). It stays merged and pending; nothing was forced.`);
     return;

@@ -1,5 +1,5 @@
-// Constance self-merge: runSuite runs a repo's bin/*.test.mjs under a throwaway
-// HOME; selfMerge lands a copy's branch once checks, suite and merge pass, and
+// Constance self-merge: runSuite runs a project's test commands in the suite
+// sandbox; selfMerge lands a copy's branch once checks, suite and merge pass, and
 // retries once through a rebase on conflict; the pending list and revertMerge
 // back Constance's later background review. All repos and folders are mkdtemp
 // throwaways; nothing touches the real home or worktree areas.
@@ -41,25 +41,21 @@ const commitFile = (wt, file, text, msg) => {
 };
 const commitOn = (repo, file, text, msg) => commitFile(repo, file, text, msg);
 
-// runSuite: every bin/*.test.mjs runs under node; a failing file is named, the
-// output tail is kept, and each run gets a fresh HOME that is removed after.
+// runSuite: runs the project's commands inside the suite sandbox. A failing
+// command fails the suite, output is kept, HOME inside is the box's fake home,
+// and no commands at all is an empty suite — never a pass.
 {
   const dir = path.join(root, "suite");
   fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
-  const mark = path.join(dir, "home-marker");
-  fs.writeFileSync(path.join(dir, "bin", "aaa-ok.test.mjs"),
-    `import fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(mark)}, process.env.HOME);\nconsole.log("suite-ok-marker");\n`);
-  fs.writeFileSync(path.join(dir, "bin", "zzz-bad.test.mjs"), `console.log("suite-bad-marker"); process.exit(1);\n`);
-  const env = { ...process.env, SM_SUITE_MARK: mark };
-  let s = runSuite(dir, { env });
-  assert.equal(s.ok, false, "a failing test file fails the suite");
-  assert.deepEqual(s.failed, ["zzz-bad.test.mjs"]);
-  assert.ok(s.output.includes("suite-ok-marker") && s.output.includes("suite-bad-marker"), "output keeps both files' prints");
-  const usedHome = fs.readFileSync(mark, "utf8");
-  assert.ok(usedHome.includes("constance-suite-home-"), `HOME was a fresh temp folder, got ${usedHome}`);
-  assert.ok(!fs.existsSync(usedHome), "the temp HOME is removed afterwards");
-  fs.rmSync(path.join(dir, "bin", "zzz-bad.test.mjs"));
-  s = runSuite(dir, { env });
+  git(dir, "init", "-q");
+  const empty = runSuite(dir, { commands: [] });
+  assert.equal(empty.ok, false, "no commands is never a pass"); assert.equal(empty.empty, true);
+  let s = runSuite(dir, { commands: [{ cmd: 'echo "$HOME" > home-marker; echo suite-ok-marker' }, { cmd: "echo suite-bad-marker; exit 1" }] });
+  assert.equal(s.ok, false, "a failing command fails the suite");
+  assert.deepEqual(s.failed, ["echo suite-bad-marker; exit 1"]);
+  assert.ok(s.output.includes("suite-ok-marker") && s.output.includes("suite-bad-marker"), "output keeps both commands' prints");
+  assert.equal(fs.readFileSync(path.join(dir, "home-marker"), "utf8").trim(), "/tmp/home", "HOME inside is the box's fake home");
+  s = runSuite(dir, { commands: [{ cmd: "true" }] });
   assert.equal(s.ok, true); assert.deepEqual(s.failed, []);
 }
 
@@ -80,7 +76,7 @@ const commitOn = (repo, file, text, msg) => commitFile(repo, file, text, msg);
 {
   const repo = makeRepo("checkfail");
   const c = makeCopy(repo, 2, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
-  for (const key of ["ownTests", "guard", "diff"]) {
+  for (const key of ["guard", "diff"]) {
     const checks = { ...ALL, [key]: false };
     let suiteCalled = false;
     const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks, suite: () => { suiteCalled = true; return okSuite(); } });

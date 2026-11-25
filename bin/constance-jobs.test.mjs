@@ -22,8 +22,9 @@ assert.ok(lines.findIndex((l) => l.startsWith("Task (job 7")) > 1, "the task com
 assert.match(p, /Only edit these files: Panel\.qml/);
 assert.match(p, /Everything else is off-limits/);
 assert.match(p, /tests and build/);
-assert.match(p, /commit only your own work in its own commit/);
-assert.match(p, /never `git add -A`/);
+assert.match(p, /Don.t commit, stage, stash/, "workers are told their git data is read-only");
+assert.match(p, /Constance commits exactly the files you were allowed to change/);
+assert.doesNotMatch(p, /git add the files|git commit. with/, "no commit instruction");
 assert.match(p, /Do not push or deploy unless the task explicitly says to/);
 assert.match(p, /Report in plain text: what you changed, the test and build results, and which files you touched/);
 assert.match(p, /No screenshots unless checking the look itself is the task/);
@@ -53,7 +54,7 @@ const wt = handoffPrompt({ id: 12, dir: "/repo", task: "t", files: ["a.js"], wor
 assert.match(wt, /git worktree \/var\/tmp\/wt \(branch constance\/job-12\) of the project \/repo/);
 assert.match(wt, /git branch --show-current`; you should be on constance\/job-12/);
 assert.match(wt, /never touch the main checkout at \/repo or another worktree/);
-assert.match(wt, /commit only your own work on branch constance\/job-12/);
+assert.match(wt, /Don.t commit, stage, stash/, "copies never commit either");
 assert.match(wt, /Do not push or deploy or merge/);
 assert.ok(wt.trim().split("\n").pop().includes(doneFile("/var/tmp/wt", 12)), "the done file lives in the worktree");
 

@@ -122,50 +122,61 @@ assert.deepEqual(newCommits(repo, ""), []);
 assert.deepEqual(newCommits(repo, "0".repeat(40)), []);
 assert.deepEqual(newCommits(repo, before.head).length > 0, true, "commits since the pre-run HEAD are listed");
 
-// Every commit since the pre-run HEAD is diff-checked, reported or not: an
-// agent that commits an outside file but reports nothing is still caught.
+// Finding 5: in a shared folder, a commit nobody attributed to this job (the
+// owner's, another job's merge) is never blamed on it and never reverted.
 const unrepBefore = snapshot(env, repo);
-fs.writeFileSync(path.join(repo, "f.txt"), "f\n"); git("add", "f.txt"); git("commit", "-qm", "unreported bad");
+fs.writeFileSync(path.join(repo, "f.txt"), "f\n"); git("add", "f.txt"); git("commit", "-qm", "someone else's commit");
 const unrepCommit = git("rev-parse", "HEAD").trim();
 res = checkRun({ dir: repo, files: ["b.txt"], commit: "", before: unrepBefore, env });
-assert.equal(res.ok, false, "unreported commit with an outside file is a violation");
-assert.ok(res.violations.some((v) => v.includes("f.txt")), res.violations.join("; "));
-assert.deepEqual(res.ownCommits, [unrepCommit]);
-assert.deepEqual(res.badCommits, [unrepCommit], "the unreported commit is listed");
-assert.equal(res.ownCommit, unrepCommit, "ownCommit falls back to the newest new commit");
+assert.equal(res.ok, true, "a foreign commit in a shared folder is not this job's violation: " + res.violations.join("; "));
+assert.deepEqual(res.ownCommits, []);
+assert.deepEqual(res.badCommits, [], "a foreign commit is never a bad commit");
+assert.deepEqual(res.foreignCommits, [unrepCommit], "it is listed as foreign");
+did = restoreRun({ dir: repo, commits: [unrepCommit] });
+assert.ok(did.some((d) => d.includes("not this job's")), "restoreRun refuses an unattributed commit: " + did.join("; "));
+assert.ok(fs.existsSync(path.join(repo, "f.txt")), "the foreign commit's file is still there");
 
-// Two new commits, one bad: only the bad one lands in badCommits, and a valid
-// reported commit stays ownCommit.
+// In a copy's own worktree, a commit Constance didn't make is flagged (and its
+// files checked), but still never reverted.
+res = checkRun({ dir: repo, files: ["b.txt"], commit: "", before: unrepBefore, env, ownTree: true });
+assert.equal(res.ok, false);
+assert.ok(res.violations.some((v) => v.includes("didn't make")), res.violations.join("; "));
+assert.ok(res.badPaths.includes("f.txt"), "its files are checked: " + res.badPaths);
+assert.deepEqual(res.badCommits, [], "still nothing to revert");
+
+// Two new commits, the attributed one good: the other is foreign, not bad.
 const twoBefore = snapshot(env, repo);
 fs.writeFileSync(path.join(repo, "g.txt"), "g\n"); git("add", "g.txt"); git("commit", "-qm", "good g");
 const goodCommit = git("rev-parse", "HEAD").trim();
-fs.writeFileSync(path.join(repo, "h.txt"), "h\n"); git("add", "h.txt"); git("commit", "-qm", "bad h");
+fs.writeFileSync(path.join(repo, "h.txt"), "h\n"); git("add", "h.txt"); git("commit", "-qm", "foreign h");
 const badH = git("rev-parse", "HEAD").trim();
 res = checkRun({ dir: repo, files: ["g.txt"], commit: goodCommit, before: twoBefore, env });
-assert.deepEqual(res.ownCommits, [goodCommit, badH], "ownCommits is oldest first");
-assert.deepEqual(res.badCommits, [badH], "only the commit touching an outside file is bad");
-assert.equal(res.ownCommit, goodCommit, "the reported new commit stays ownCommit");
-assert.ok(res.badPaths.includes("h.txt") && !res.badPaths.includes("g.txt"), res.badPaths.join(","));
-
-// A commit touching only allowed files is clean, reported or not.
-const okBefore = snapshot(env, repo);
-fs.writeFileSync(path.join(repo, "i.txt"), "i\n"); git("add", "i.txt"); git("commit", "-qm", "allowed i");
-const iCommit = git("rev-parse", "HEAD").trim();
-res = checkRun({ dir: repo, files: ["i.txt"], commit: "", before: okBefore, env });
-assert.equal(res.ok, true, JSON.stringify({ v: res.violations, n: res.notices }));
-assert.deepEqual(res.ownCommits, [iCommit]);
+assert.deepEqual(res.ownCommits, [goodCommit], "only the attributed commit is the job's");
+assert.deepEqual(res.foreignCommits, [badH]);
 assert.deepEqual(res.badCommits, []);
+assert.equal(res.ownCommit, goodCommit);
+assert.ok(!res.badPaths.includes("h.txt"), "a foreign commit's files are not blamed: " + res.badPaths.join(","));
+assert.equal(res.ok, true);
 
-// restoreRun reverts every commit in `commits` (newest first), each verified
-// the same way, and still never deletes, moves, checks out or cleans.
+// An attributed commit touching an outside file is bad, and only it reverts.
+const okBefore = snapshot(env, repo);
+fs.writeFileSync(path.join(repo, "i.txt"), "i\n"); fs.writeFileSync(path.join(repo, "i-out.txt"), "o\n");
+git("add", "i.txt", "i-out.txt"); git("commit", "-qm", "attributed i");
+const iCommit = git("rev-parse", "HEAD").trim();
+res = checkRun({ dir: repo, files: ["i.txt"], commit: iCommit, before: okBefore, env });
+assert.deepEqual(res.badCommits, [iCommit]);
+did = restoreRun({ dir: repo, commits: res.badCommits, attributed: res.ownCommits });
+assert.ok(did.some((d) => d.startsWith("reverted commit")), did.join("; "));
+assert.ok(!fs.existsSync(path.join(repo, "i-out.txt")), "the attributed bad commit was reverted");
+
+// Nothing is reverted on top of uncommitted tracked changes.
 fs.writeFileSync(path.join(repo, "j.txt"), "j\n"); git("add", "j.txt"); git("commit", "-qm", "j");
 const jCommit = git("rev-parse", "HEAD").trim();
-fs.writeFileSync(path.join(repo, "k.txt"), "k\n"); git("add", "k.txt"); git("commit", "-qm", "k");
-const kCommit = git("rev-parse", "HEAD").trim();
-did = restoreRun({ dir: repo, commits: [kCommit, jCommit] });
-assert.equal(did.filter((d) => d.startsWith("reverted commit")).length, 2, did.join("; "));
-assert.ok(!fs.existsSync(path.join(repo, "j.txt")) && !fs.existsSync(path.join(repo, "k.txt")), "both commits reverted");
-assert.equal(git("status", "--porcelain").trim(), "", "worktree clean after the reverts");
+fs.writeFileSync(path.join(repo, "a.txt"), "owner's edit\n");
+did = restoreRun({ dir: repo, commit: jCommit });
+assert.ok(did.some((d) => d.includes("uncommitted changes")), did.join("; "));
+assert.equal(fs.readFileSync(path.join(repo, "a.txt"), "utf8"), "owner's edit\n", "the owner's edit is untouched");
+git("checkout", "--", "a.txt");
 
 // changedPaths sees committed and dirty paths but ignores .constance/.
 assert.deepEqual(changedPaths(repo, ""), [], "clean tree, no commit: nothing");

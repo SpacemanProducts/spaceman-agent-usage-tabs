@@ -8,7 +8,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const STATUSES = ["waiting", "running", "finished", "accepted", "sent back", "stopped", "conflict"];
+// "failed": a copy whose self-merge found its worktree dirty — it frees its
+// copy slot and its files (never counted by copySlots or conflicts).
+export const STATUSES = ["waiting", "running", "finished", "accepted", "sent back", "stopped", "conflict", "failed"];
 
 export function stateDir(env = process.env) {
   const base = env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), ".local/state");
@@ -86,12 +88,12 @@ export function handoffPrompt({ id, dir, task, files = [], account = null, workt
       ? `This is a read-only job: change nothing, create nothing, delete nothing.`
       : `Only edit these files: ${files.join(", ")}. Everything else is off-limits; if the task needs other files, say so in your report instead of editing them.`,
     `Run the project's tests and build, if it has them, and make sure they pass.`,
-    ...(readOnly ? [] : [`When you are done, commit only your own work${branch ? ` on branch ${branch}` : ""} in its own commit: \`git add\` the files you changed by name (never \`git add -A\` or \`git add .\`), then \`git commit\` with a short message.`]),
+    `Don't commit, stage, stash or run any other git command that writes: this folder's git data is read-only for you. Leave your changes in the working tree; Constance commits exactly the files you were allowed to change.`,
     `Do not push or deploy${branch ? " or merge" : ""} unless the task explicitly says to.`,
     ``,
     `Report in plain text: what you changed, the test and build results, and which files you touched. No screenshots unless checking the look itself is the task. If you could not finish, say why in a few lines and stop.`,
     ``,
-    `Last step, even if you could not finish: write the file ${doneFile(runDir, id)} containing JSON like {"summary": "what you did or why you stopped, in a few lines", "commit": "the full hash of your commit, or empty if you made none", "files": ["the files you changed"]}. Do not commit that file.`,
+    `Last step, even if you could not finish: write the file ${doneFile(runDir, id)} containing JSON like {"summary": "what you did or why you stopped, in a few lines", "files": ["the files you changed"]}.`,
     ...(extra ? ["", extra] : []),
   ].join("\n");
 }

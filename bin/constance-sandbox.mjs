@@ -9,8 +9,10 @@
 //
 // Also cut off: the session bus and everything else under /run/user (no D-Bus,
 // so no `systemd-run --user` escape and no keyring; no ssh-agent; no Wayland),
-// and the project's own .git/config and .git/hooks are read-only, so an agent
-// can't plant a hook or fsmonitor command that later runs outside the sandbox.
+// and ALL of the project's git data (.git, or a worktree's pointer and the main
+// repo's git dir) plus its .constance/ folder are read-only: an agent can't
+// commit, move a ref, or plant a hook, commondir or config that host git later
+// trusts. Constance commits the job's allowed files for it, on the host.
 //
 // An agent with no verified profile here is never launched with prompts off.
 import fs from "node:fs";
@@ -89,6 +91,43 @@ function gitPointer(dir) {
   } catch { return null; }
 }
 
+// What stays read-only inside a project bind: ALL of its git data and its
+// .constance/ folder. Workers never write either; Constance (the controller)
+// makes every commit, ref change and .constance/ write herself, on the host.
+//   - a plain repo: <proj>/.git
+//   - a linked worktree: its `.git` pointer file and the main repo's whole git
+//     dir (objects, refs, config, hooks, worktrees/<name> with its commondir)
+// Without this a worker could plant `commondir`, a ref or a config that host
+// git later trusts (core.fsmonitor runs on the next `git status`).
+export function protectedPaths(proj) {
+  const out = [];
+  const gi = gitPointer(proj);
+  if (gi?.type === "dir") out.push(gi.dir);
+  else if (gi?.type === "worktree") out.push(gi.file, gi.common, gi.gitDir);
+  out.push(path.join(proj, ".constance"));
+  return out;
+}
+
+// The --ro-bind args for protectedPaths. .constance/ is made on the host first
+// (bwrap can only bind what exists); a .constance that is not a plain folder is
+// refused, so nothing launches.
+export function protectedBinds(proj, exists = (p) => fs.existsSync(p)) {
+  const a = [];
+  const gi = gitPointer(proj);
+  if (gi?.type === "dir") a.push("--ro-bind", gi.dir, gi.dir);
+  else if (gi?.type === "worktree") {
+    a.push("--ro-bind", gi.file, gi.file);
+    if (exists(gi.common)) a.push("--ro-bind", gi.common, gi.common);
+  }
+  const dc = path.join(proj, ".constance");
+  let st = null;
+  try { st = fs.lstatSync(dc); } catch {}
+  if (st && !st.isDirectory()) throw new Error(`${dc} is not a plain folder`);
+  if (!st) fs.mkdirSync(dc);
+  a.push("--ro-bind", dc, dc);
+  return a;
+}
+
 // The bwrap argv (without the command) for one job. `extraRw` takes absolute
 // folders that also belong to the agent (a non-seated account's login home).
 // Order matters: bwrap applies mounts in order, so the empty home comes first
@@ -119,6 +158,14 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
     const p = path.join(home, rel);
     if (exists(p)) a.push("--ro-bind", p, p);
   }
+  // extraRw is bound verbatim, so it must never mount the real home (or "/")
+  // back over the empty home, or cover the project's git data or .constance/
+  // and re-expose them writable.
+  const ro = protectedPaths(proj);
+  for (const raw of extraRw) {
+    const p = path.resolve(raw);
+    if (p === "/" || under(home, p) || ro.some((r) => under(r, p) || under(p, r))) throw new Error(`extraRw ${p} would reopen the home folder or cover the project's git data`);
+  }
   const rw = [...PROFILES[agent].rw.map((r) => path.join(home, r)), ...extraRw.map((p) => path.resolve(p))];
   for (const p of rw) {
     // The agent's own folders are made if missing, so a first login can land.
@@ -126,32 +173,7 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
     if (exists(p)) a.push("--bind", p, p);
   }
   a.push("--bind", proj, proj);
-  // The project's git config and hooks stay read-only: both can name commands
-  // that git runs later, outside the sandbox (hooks, core.fsmonitor, core.hooksPath).
-  const gi = gitPointer(proj);
-  if (gi?.type === "dir") {
-    const hooks = path.join(gi.dir, "hooks");
-    if (!exists(hooks)) fs.mkdirSync(hooks);
-    a.push("--ro-bind", hooks, hooks);
-    const cfg = path.join(gi.dir, "config");
-    if (exists(cfg)) a.push("--ro-bind", cfg, cfg);
-  } else if (gi?.type === "worktree") {
-    // In a worktree .git is a file: keep the pointer itself read-only, bind the
-    // shared git dir for objects/refs, then re-expose only THIS worktree's
-    // gitdir (index/HEAD) writable. Sibling worktrees' gitdirs stay read-only.
-    a.push("--ro-bind", gi.file, gi.file);
-    a.push("--bind", gi.common, gi.common);
-    const hooks = path.join(gi.common, "hooks");
-    if (!exists(hooks)) fs.mkdirSync(hooks);
-    a.push("--ro-bind", hooks, hooks);
-    const cfg = path.join(gi.common, "config");
-    if (exists(cfg)) a.push("--ro-bind", cfg, cfg);
-    const wts = path.join(gi.common, "worktrees");
-    if (exists(wts)) {
-      a.push("--ro-bind", wts, wts);
-      if (exists(gi.gitDir)) a.push("--bind", gi.gitDir, gi.gitDir);
-    }
-  }
+  a.push(...protectedBinds(proj, exists));
   // Keyring agents get the filtered proxy's socket as their only bus.
   if (busSock) a.push("--bind", busSock, `/run/user/${uid}/bus`);
   a.push("--chdir", proj);
@@ -197,4 +219,57 @@ export function sandboxLaunch(argv, opts, bin = "bwrap") {
   const box = [bin, ...sandboxArgs({ ...opts, busSock }), "--", ...argv];
   const cmd = keyring ? ["sh", "-c", PROXY_SH, "sh", busSock, env.DBUS_SESSION_BUS_ADDRESS, ...box] : ["sh", "-c", PLAIN_SH, "sh", ...box];
   return { cmd, env: sandboxEnv(env, opts.agent, keyring) };
+}
+
+// ---------------------------------------------------------------- the self-merge suite
+// A copy's tests are code the worker wrote, so the self-merge suite runs in the
+// same kind of box as a worker, only tighter: no network (its own empty net
+// namespace), nothing under /run (no session or system bus, no ssh-agent, no
+// display), the real home an empty tmpfs with only the toolchains back
+// read-only, and HOME plus every XDG dir pointed into the job's own temp folder.
+// Writable: the worktree (minus its git data and .constance/) and that temp
+// folder. The environment starts EMPTY, so no token or socket path leaks in.
+export function suiteArgs({ dir, tmp, env = process.env }) {
+  const home = path.resolve(env.HOME || os.homedir());
+  const proj = fs.realpathSync(dir);
+  if (under(home, proj)) throw new Error("the project folder can't be the home folder or above it");
+  const exists = (p) => { try { fs.statSync(p); return true; } catch { return false; } };
+  const a = [
+    "--ro-bind", "/", "/",
+    "--dev", "/dev",
+    "--proc", "/proc",
+    "--tmpfs", "/run",
+    "--bind", tmp, "/tmp",
+    "--tmpfs", home,
+    "--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+    "--new-session", "--die-with-parent",
+  ];
+  for (const rel of HOME_RO) {
+    const p = path.join(home, rel);
+    if (exists(p)) a.push("--ro-bind", p, p);
+  }
+  a.push("--bind", proj, proj);
+  a.push(...protectedBinds(proj, exists));
+  a.push("--chdir", proj);
+  return a;
+}
+
+export function suiteEnv(env = process.env) {
+  const h = "/tmp/home";
+  return {
+    PATH: env.PATH || "/usr/local/bin:/usr/bin:/bin",
+    LANG: env.LANG || "C.UTF-8",
+    HOME: h, TMPDIR: "/tmp", CI: "1",
+    XDG_CONFIG_HOME: `${h}/.config`, XDG_STATE_HOME: `${h}/.local/state`, XDG_DATA_HOME: `${h}/.local/share`,
+    XDG_CACHE_HOME: `${h}/.cache`, XDG_RUNTIME_DIR: "/tmp/run",
+    npm_config_cache: `${h}/.npm`, npm_config_update_notifier: "false",
+  };
+}
+
+// { cmd, env } running `sh -c command` in the suite box. The fake home folders
+// are made inside tmp on the host first.
+export function suiteLaunch(command, { dir, tmp, env = process.env }, bin = "bwrap") {
+  if (!bwrapWorks(bin)) throw new Error("bubblewrap (bwrap) is missing or can't run here, so the suite can't run sandboxed");
+  for (const d of ["home/.config", "home/.local/state", "home/.local/share", "home/.cache", "run"]) fs.mkdirSync(path.join(tmp, d), { recursive: true, mode: 0o700 });
+  return { cmd: [bin, ...suiteArgs({ dir, tmp, env }), "--", "sh", "-c", command], env: suiteEnv(env) };
 }

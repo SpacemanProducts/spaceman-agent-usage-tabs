@@ -72,7 +72,8 @@ p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -
 want=$(grep -o 'if it is not exactly [^ ]*, stop now' <<<"$p" | head -1 | sed 's/^if it is not exactly //; s/, stop now$//')
 here=$(pwd)
 [[ -n "$want" && "$here" == "$want" ]] || { echo "pwd check failed: here=$here want=$want"; exit 1; }
-[[ "$f" == "$here/.constance/"* ]] || { echo "done file $f is not in $here"; exit 1; }
+# Its done file goes in its own sandbox tmp (/tmp), never the worktree: workers can't write .constance/.
+[[ "$f" == "/tmp/.constance/"* ]] || { echo "done file $f is not in the sandbox tmp"; exit 1; }
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-x.txt}
 before=$(git rev-parse HEAD)
@@ -92,6 +93,7 @@ $C delegate --agent grok --task "why is b missing? find the cause, change nothin
 $C delegate --agent grok --files b.txt --task "add b" >> "${root}/brain.out" 2>&1
 $C delegate --agent grok --files b.txt --task "again" >> "${root}/brain.out" 2>&1 || echo "refused-busy" >> "${root}/brain.out"
 $C delegate --agent copilot --files c.txt --task "c" >> "${root}/brain.out" 2>&1 || echo "refused-copilot" >> "${root}/brain.out"
+$C delegate --agent grok --files .constance/rules.md --task "edit the rules" >> "${root}/brain.out" 2>&1 || echo "refused-constance" >> "${root}/brain.out"
 touch "${root}/go"
 $C wait --timeout 30 > "${root}/wait.json"
 $C review 1 accept --note "cause confirmed"
@@ -144,6 +146,8 @@ const out = fs.readFileSync(path.join(root, "brain.out"), "utf8");
 assert.match(fs.readFileSync(s.jobs[1].log, "utf8"), /sandboxed=yes/, "the job ran sandboxed");
 assert.match(out, /refused-busy/, "two jobs never share files"); assert.match(out, /overlap job 2/);
 assert.match(out, /refused-copilot/, "an agent near its limit is never tasked");
+assert.match(out, /refused-constance/, "no worker is ever given a .constance/ file (finding 3)");
+assert.match(out, /Only Constance writes \.constance\/rules\.md/);
 const w = JSON.parse(fs.readFileSync(path.join(root, "wait.json"), "utf8"));
 assert.equal(w.review.id, 1); assert.deepEqual(w.review.changedFiles, [], "a read-only job changes nothing");
 const w2 = JSON.parse(fs.readFileSync(path.join(root, "wait2.json"), "utf8"));
@@ -415,7 +419,8 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   const wt = path.join(worktrees, `job-${pl.job}`);
   assert.equal(pl.worktree, wt, "the log names the would-be worktree");
   assert.ok(pl.prompt.includes(`if it is not exactly ${wt}, stop now`), "the pwd check names the worktree: " + pl.prompt);
-  assert.ok(pl.prompt.includes(`write the file ${wt}/.constance/done-${pl.job}.json`), "the done file is in the worktree");
+  assert.ok(pl.prompt.includes(`write the file /tmp/.constance/done-${pl.job}.json`), "the done file is in the sandbox tmp, not the worktree");
+  assert.ok(!pl.prompt.includes(`${wt}/.constance/`), "never in the worktree");
   assert.ok(!pl.prompt.includes(`not exactly ${repo},`), "never the main folder for the pwd check");
   assert.ok(!fs.existsSync(wt), "practice created no worktree");
   assert.equal(git("branch", "--list", "constance/*").trim(), "", "practice created no branch");
@@ -599,8 +604,9 @@ for (const w of fs.existsSync(worktrees) ? fs.readdirSync(worktrees) : []) { try
 git("worktree", "prune");
 for (const b of git("branch", "--list", "constance/*", "--format=%(refname:short)").split("\n").filter(Boolean)) git("branch", "-D", b);
 
-// Guard wiring, end to end: an agent that commits a file outside its list and
-// reports no commit still gets a violation and the bad commit is reverted; a
+// Guard wiring, end to end: an agent that tries to commit a file outside its
+// list can't (its git data is read-only, finding 1); the stray file is a
+// violation, left in place and reported, and Constance never commits it; a
 // folder the owner makes in the home folder while a job runs is only a
 // guard-notice (no strike, no lesson); and a job that exits without its done
 // file records an "exit" finish signal.
@@ -635,8 +641,11 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
   assert.ok(sneaky && nb && ex, "all three jobs ran: " + JSON.stringify(mine2.map((j) => [j.id, j.task, j.status])));
   assert.equal(sneaky.status, "accepted");
   assert.ok(sneaky.guardViolation && sneaky.guardViolation.some((v) => v.includes("sneaky.txt")), "an unreported bad commit is still a violation: " + JSON.stringify(sneaky.guardViolation));
-  assert.ok(!fs.existsSync(path.join(repo, "sneaky.txt")), "the bad commit was reverted");
-  assert.match(git("log", "--oneline", "-3"), /Revert/, "the revert is a normal commit, nothing was reset");
+  assert.doesNotMatch(git("log", "--format=%s", "-20"), /grok: sneaky/, "the worker could not commit: .git is read-only in its sandbox");
+  assert.ok(fs.existsSync(path.join(repo, "sneaky.txt")), "the stray file is left in place for the owner, never deleted");
+  assert.equal(git("ls-files", "sneaky.txt").trim(), "", "and Constance never committed it");
+  assert.ok(gs2.log.some((l) => l.kind === "guard" && l.job === sneaky.id && /sneaky\.txt \(in the project\)/.test(l.text)), "the guard reported it");
+  fs.rmSync(path.join(repo, "sneaky.txt"));
   assert.equal(gs2.guards.grok.strikes, 2, "the stray file and the sneaky commit are the only strikes: " + JSON.stringify(gs2.guards));
   assert.equal(nb.status, "accepted");
   assert.ok(!nb.guardViolation, "the home-folder change is not a violation");
@@ -911,8 +920,13 @@ $C delegate --agent devin --files d1.txt --task "sneaky copy: also commit cover.
 $C delegate --agent grok --files cover.txt --task "add cover" >> "${root}/copyguard.out" 2>&1
 touch "${root}/go"
 $C wait --timeout 60 > "${root}/cg-wait1.json"
-$C wait --timeout 60 > "${root}/cg-wait2.json"
-$C jobs > "${root}/cg-jobs.json"
+# Both jobs must be finished before reviewing: two waits can hand back the same
+# (not yet reviewed) copy when it finishes first, and the grok review would be refused.
+for i in $(seq 1 240); do
+  $C jobs > "${root}/cg-jobs.json"
+  node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs.filter(j=>j.task==="add cover"||/sneaky copy/.test(j.task));process.exit(js.length>=2&&js.every(j=>j.status==="finished"&&!j.settling)?0:1)' "${root}/cg-jobs.json" && break
+  sleep 0.25
+done
 did=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.agent==="devin"&&j.files.includes("d1.txt")).id)' "${root}/cg-jobs.json")
 gid=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.agent==="grok"&&j.files.includes("cover.txt")).id)' "${root}/cg-jobs.json")
 $C review "$did" send-back --note "strayed outside its list" >> "${root}/copyguard.out" 2>&1
@@ -984,8 +998,11 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 30
   assert.ok(!fs.readdirSync(path.join(repo, ".constance")).some((f) => f.startsWith("done-")), "no done file in the project folder");
 }
 
-// Self-merge: a copy that reports its tests passed, stays inside its files and
-// passes the guard merges itself the moment it finishes — before any review.
+// Self-merge needs a real test command for the project (finding 4): the rules
+// name one. It runs in the suite sandbox, so it must pass there.
+fs.appendFileSync(path.join(repo, ".constance", "rules.md"), "test: test -f a.txt\n");
+// Self-merge: a copy that stays inside its files, passes the guard and passes
+// the project's test command merges itself the moment it finishes — before any review.
 // `reviews` lists it for her background review; send-back reverts the merge,
 // accept only confirms it.
 fs.rmSync(path.join(root, "go"), { force: true });

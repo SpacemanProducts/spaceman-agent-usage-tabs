@@ -131,10 +131,10 @@ assert.equal(busDirs(), busBefore, "a refused launch leaves nothing behind");
   assert.equal(fs.readFileSync(path.join(proj, "late.txt"), "utf8"), "done\n", "the job ran to the end after its launcher exited");
 }
 
-// A linked worktree: .git is a pointer file into the main repo. The sandbox must
-// keep that pointer read-only, bind the shared git dir for objects/refs, expose
-// only THIS worktree's gitdir writable, and keep the main repo's hooks/config
-// read-only — exactly like a normal repo's .git.
+// A linked worktree: .git is a pointer file into the main repo. The sandbox
+// keeps that pointer AND the main repo's whole git dir read-only (objects,
+// refs, config, hooks, worktrees/<name> with its commondir): workers never
+// write git data; Constance commits for them on the host.
 {
   const wt = path.join(base, "wt");
   execFileSync("git", ["-C", proj, "config", "user.email", "t@t"]);
@@ -149,12 +149,10 @@ assert.equal(busDirs(), busBefore, "a refused launch leaves nothing behind");
   const wtGitDir = path.join(common, "worktrees", wtGit);
   for (const frag of [
     `--ro-bind ${wt}/.git ${wt}/.git`,
-    `--bind ${common} ${common}`,
-    `--ro-bind ${common}/hooks ${common}/hooks`,
-    `--ro-bind ${common}/config ${common}/config`,
-    `--ro-bind ${path.join(common, "worktrees")} ${path.join(common, "worktrees")}`,
-    `--bind ${wtGitDir} ${wtGitDir}`,
+    `--ro-bind ${common} ${common}`,
+    `--ro-bind ${wt}/.constance ${wt}/.constance`,
   ]) assert.ok(wargs.includes(frag), `worktree sandbox args contain ${frag}: ${wargs}`);
+  for (const frag of [`--bind ${common} `, `--bind ${wtGitDir} `]) assert.ok(!wargs.includes(frag), `no writable git bind ${frag}: ${wargs}`);
   execFileSync("git", ["-C", proj, "worktree", "remove", "--force", wt]);
   execFileSync("git", ["-C", proj, "branch", "-D", "wt-test"]);
 }
