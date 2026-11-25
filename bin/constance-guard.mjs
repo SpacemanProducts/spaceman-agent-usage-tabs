@@ -73,7 +73,7 @@ export function commitFromRun(dir, commit, baseHead) {
 // deleted source; --name-status shows "R<score>\told\tnew", so both sides of a
 // rename are checked (a copy's source is untouched, so only its destination
 // counts).
-const commitFiles = (dir, commit) => {
+export const commitFiles = (dir, commit) => {
   const out = [];
   // `git show --name-status` prints nothing for a clean merge commit, which
   // would hide every file the merge brought in: for a merge, diff the commit
@@ -95,6 +95,24 @@ const commitFiles = (dir, commit) => {
   }
   return out;
 };
+
+// Every commit a recorded self-merge brought into the shared history: the
+// merge commit itself plus the branch-side commits `rev-list <merge>^1..<merge>`
+// lists (the merge is already in that range). Empty when the commit is not a
+// merge or does not resolve — a merge an agent made itself is never excused
+// through this, only one a copy job recorded as its self-merge.
+export function mergedInCommits(dir, mergeCommit) {
+  const full = git(dir, "rev-parse", "--verify", "--quiet", String(mergeCommit || "") + "^{commit}");
+  if (full.status !== 0) return [];
+  const sha = full.stdout.trim();
+  const p = git(dir, "rev-list", "--parents", "-n", "1", sha);
+  const parents = p.status === 0 ? p.stdout.trim().split(/\s+/).length - 1 : 0;
+  if (parents < 2) return [];
+  const r = git(dir, "rev-list", sha + "^1.." + sha);
+  if (r.status !== 0) return [];
+  const list = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  return list.includes(sha) ? list : [sha, ...list];
+}
 
 // Every commit the run made: baseHead..HEAD, oldest first. A missing or
 // unresolvable base means "can't tell which commits are the run's", so the
