@@ -513,26 +513,29 @@ for (const [label, raw] of [
   }
 }
 
-// ---------- briefFor: non-git projects never hit the cache ----------
+// ---------- briefFor: non-git projects use cache age + file mtimes ----------
 
-// headOf() returns "" outside a repo, so the stored head is "" and
-// changedSince() short-circuits to Infinity on EVERY call — the age check can
-// never save it. Documented behavior: a plain folder rebuilds every time.
+// Outside a repo there is no HEAD to diff, so staleness falls back to the
+// cache age and the folder files' mtimes: a fresh (<7d) cache is served even
+// after small churn, and only >20 touched files or a week-old cache rebuilds.
 {
   const d = path.join(tmp, "plain-cache");
   fs.mkdirSync(d);
   fs.writeFileSync(path.join(d, "one.txt"), "1\n");
   const cd = fs.mkdtempSync(path.join(tmp, "plain-cd-"));
-  briefFor(d, { cacheDir: cd, now: T0 });
+  const first = briefFor(d, { cacheDir: cd, now: T0 });
   fs.writeFileSync(path.join(d, "two.txt"), "2\n");
   const b = briefFor(d, { cacheDir: cd, now: T0 + 1000 });
-  assert.match(b, /two\.txt/, "current behavior: a non-git dir rebuilds on every call");
-  // BUG: for a non-git project the cache can never be served — headOf() is ""
-  // so cached.head is falsy and changedSince() returns Infinity forever. The
-  // "rebuilt only when ... the cache is a week old" contract silently does not
-  // apply to plain folders (every delegate prompt rebuilds the brief). The
-  // test below shows the intended behavior and FAILS today:
-  // assert.ok(!b.includes("two.txt"), "a fresh (<7d) cache should be served even without git");
+  assert.equal(b, first, "a fresh cache is served for a plain folder too");
+  assert.ok(!b.includes("two.txt"), "small churn keeps the cached brief without git");
+  // More than 20 files touched since the cached build -> rebuild.
+  for (let i = 0; i < 21; i++) fs.writeFileSync(path.join(d, `n${i}.txt`), `${i}\n`);
+  const rebuilt = briefFor(d, { cacheDir: cd, now: T0 + 2000 });
+  assert.notEqual(rebuilt, first, "21 touched files rebuilds a plain folder's brief");
+  assert.match(rebuilt, /n0\.txt/);
+  // And a week-old cache still rebuilds with no churn at all.
+  const week = briefFor(d, { cacheDir: cd, now: T0 + 8 * 24 * 3600 * 1000 });
+  assert.equal(typeof week, "string");
 }
 
 // ---------- the injected `exec` seam ----------
