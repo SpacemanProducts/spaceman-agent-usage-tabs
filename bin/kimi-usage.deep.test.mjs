@@ -101,16 +101,17 @@ try {
     "fractional and negative-zero counts are finite numbers >= 0");
   // An all-zero record carries no usage and is skipped.
   assert.deepEqual(parseWireJsonl(rec({ time: 1, usage: ZERO_USAGE })), [], "zero tokens is not a record");
-  // BUG: the module header documents inputCacheRead?/inputCacheCreation? as
-  // optional, but parseWireJsonl requires ALL four fields to be finite
-  // numbers — a record missing a cache field is dropped entirely, undercounting
-  // real usage on turns that never touched the cache.
-  // const noCache = JSON.stringify({ type: "usage.record", agentId: "a", model: "m",
-  //   usage: { inputOther: 10, output: 5 }, time: 1 });
-  // assert.equal(parseWireJsonl(noCache).length, 1, "missing optional cache fields should still count");
+  // The module header documents inputCacheRead?/inputCacheCreation? as
+  // optional, so a record missing them counts with those fields as 0.
+  const noCache = JSON.stringify({ type: "usage.record", agentId: "a", model: "m",
+    usage: { inputOther: 10, output: 5 }, time: 1 });
+  const noCacheRows = parseWireJsonl(noCache);
+  assert.equal(noCacheRows.length, 1, "missing optional cache fields should still count");
+  assert.equal(noCacheRows[0].tokens, 15, "missing cache fields count as 0");
+  // A present-but-invalid cache field still drops the record.
   assert.deepEqual(parseWireJsonl(JSON.stringify({ type: "usage.record", agentId: "a", model: "m",
-    usage: { inputOther: 10, output: 5 }, time: 1 })), [],
-    "currently: a record without the cache fields is rejected outright");
+    usage: { inputOther: 10, output: 5, inputCacheRead: "lots" }, time: 1 })), [],
+    "a non-number cache field still rejects the record");
   // Extra usage fields are ignored; only the four known fields count.
   assert.equal(parseWireJsonl(rec({ time: 1, usage: { ...ZERO_USAGE, output: 4, costUsd: 999 } }))[0].tokens, 4);
   // time must be a finite number; 0 and negatives are fine (they just fall
