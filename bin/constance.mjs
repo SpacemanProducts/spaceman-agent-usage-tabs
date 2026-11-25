@@ -44,7 +44,7 @@ import { writeWall, wallFile, clock } from "./constance-wall.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps, settling, inHand } from "./constance-jobs.mjs";
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
-import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
+import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap, mergedInCommits, commitFiles } from "./constance-guard.mjs";
 import { NotifyParser, handleNotification, recentSignals, recordSignal, jobFinishSignal, logSaysFinished } from "./constance-notify.mjs";
 import { addTask, peekNext, finishTask, removeTask, queueView, readyTasks } from "./constance-queue.mjs";
 import { withLock } from "./constance-mergelock.mjs";
@@ -204,6 +204,7 @@ function tailFile(f, n = 8192) {
 
 function sweep() {
   const signals = [];
+  const recheck = [];
   const changed = store.update((s) => {
     const changed = [];
     for (const j of s.jobs) {
@@ -213,6 +214,9 @@ function sweep() {
         // No pid yet means the spawn is still under way: give it 30 s.
         const gone = j.selfMergePid ? !alive(j.selfMergePid, "selfmerge") : Date.now() - (j.selfMergeAt || 0) > 30000;
         if (j.selfMerging && gone) { delete j.selfMerging; delete j.selfMergePid; delete j.selfMergeAt; }
+        // A shared-folder job whose guard deferred on a copy's in-flight
+        // self-merge is checked again here on every sweep until it passes.
+        if (j.status === "finished" && j.guardDeferred && !j.guardChecked) recheck.push(j);
         continue;
       }
       const f = jobDoneFile(j);
@@ -238,6 +242,10 @@ function sweep() {
       if (kiloPaidFail(j)) { dropJobTmp(j); continue; }
       guardFinished(j); dropJobTmp(j); autoRetry(j); maybeSelfMerge(j);
     }
+    finally { store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) delete x.settling; }); }
+  }
+  for (const j of recheck) {
+    try { guardFinished(j); }
     finally { store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) delete x.settling; }); }
   }
   // Whoever's sweep sees the finish logs the return — status polls can beat `wait` to it.
@@ -279,22 +287,40 @@ function kiloPaidFail(j) {
 function guardFinished(j) {
   if (!j.guardBefore || j.guardChecked) return;
   const dir = runDir(j);
+  const hasWorktree = (k) => !!(k.worktree || k.branch);
+  const shared = !hasWorktree(j);
+  // Copy jobs of this same folder (a worktree or a branch marks them; a merged
+  // copy's worktree is already gone, so match on k.dir, not runDir). While one
+  // is mid-self-merge its commits are not in the repo yet, so checking the
+  // shared job now would blame them on it: wait for the merge to record —
+  // bounded at 10 minutes — and let a later sweep check it (guardDeferred).
+  const copies = shared ? store.read().jobs.filter((k) => k.id !== j.id && k.dir === dir && (k.copy || k.branch)) : [];
+  if (copies.some((k) => k.selfMerging && !k.mergeCommit) && Date.now() - (j.finishedAt || 0) < 600000) {
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x && !x.guardChecked) x.guardDeferred = true; });
+    return;
+  }
   const res = checkRun({ dir, files: j.files || [], commit: j.commit, before: j.guardBefore, env: ENV });
-  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.guardChecked = true; });
+  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.guardChecked = true; delete x.guardDeferred; } });
   // Concurrent jobs share the folder and its git history, and the guard sees
   // every commit since the snapshot: work another overlapping job was allowed
   // to do is that job's, never this one's violation. A job with its own
   // worktree (a copy) is never excused and never excuses: its history is all
   // its own, and its commits only reach the shared repo when its branch merges.
   const jStart = j.startedAt || 0, jEnd = j.finishedAt || Date.now();
-  const hasWorktree = (k) => !!(k.worktree || k.branch);
-  const others = hasWorktree(j) ? [] : store.read().jobs.filter((k) => k.id !== j.id && k.startedAt && runDir(k) === dir &&
-    !hasWorktree(k) && k.startedAt <= jEnd && jStart <= (k.finishedAt || Infinity));
+  const others = shared ? store.read().jobs.filter((k) => k.id !== j.id && k.startedAt && runDir(k) === dir &&
+    !hasWorktree(k) && k.startedAt <= jEnd && jStart <= (k.finishedAt || Infinity)) : [];
+  // A copy that self-merged into this folder while the shared job ran lands
+  // its merge commit and everything the merge pulled in inside the job's
+  // before..HEAD window; that work passed the copy's own guard already, so it
+  // is never this job's violation. Only a RECORDED mergeCommit counts — a
+  // merge the shared job's agent made itself is still checked.
+  const merged = new Set();
+  if (shared) for (const k of copies) if (k.mergeCommit) for (const c of mergedInCommits(dir, k.mergeCommit)) merged.add(c);
   const allowed = (k) => [...(k.files || []), ".constance/"];
   const excusedCommits = new Set(), excusedPaths = new Set();
   for (const c of res.badCommits || []) {
-    const cfiles = changedFiles(dir, c);
-    if (others.some((k) => k.commit === c || (cfiles.length > 0 && cfiles.every((p) => coversPath(allowed(k), p))))) {
+    const cfiles = merged.has(c) ? commitFiles(dir, c) : changedFiles(dir, c);
+    if (merged.has(c) || others.some((k) => k.commit === c || (cfiles.length > 0 && cfiles.every((p) => coversPath(allowed(k), p))))) {
       excusedCommits.add(c);
       cfiles.forEach((p) => excusedPaths.add(p));
     }
