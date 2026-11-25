@@ -4,10 +4,10 @@
 // per-project rules.md quirks. Complements constance-lessons.test.mjs. State
 // dirs are mktemp; nothing touches a real home, network or agent CLI.
 //
-// Suspected bugs (block-builder type crashes, addLesson coercing non-strings,
-// the unlocked read-modify-write race, seeding into an unwritable dir) are
-// pinned in commented-out tests and reported, not fixed.
+// Remaining suspected bugs (the lessons.json-as-directory crash, seeding into
+// an unwritable dir) stay pinned in commented-out tests and reported.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -456,52 +456,75 @@ assert.ok(!guardrailBlock(["a.js"]).endsWith("\n"), "guardrailBlock has no trail
   assert.equal(r.at(-1), "burst 59");
 }
 
-// ===================================================== reported bugs (not fixed — test-only job)
-// BUG 1 (already pinned above): lessons.json existing as a directory crashes
+// ===================================================== reported bugs (not fixed)
+// BUG 1: lessons.json existing as a directory crashes
 // readLessons — readFileSync throws EISDIR, the catch falls through to seeding,
 // and writeLessons' renameSync(tmp, dir) throws EISDIR instead of returning
 // the seeds the "missing or unreadable" comment promises.
 //
-// BUG 2: the block builders trust their argument types. lessonsBlock(null) and
-// lessonsBlock("abc") throw TypeError (null.length / string.map);
-// guardrailBlock(null) and guardrailBlock("a.js") throw TypeError the same
-// way, and guardrailBlock({}) silently renders the read-only "(none)" list for
-// a non-array; rulesBlock({}) embeds "[object Object]". Internal callers pass
-// strings/arrays today, so this is latent. Uncomment when fixed:
-// {
-//   assert.equal(lessonsBlock(null), "");
-//   assert.equal(lessonsBlock("x"), "");
-//   assert.equal(guardrailBlock(null), guardrailBlock([]));
-//   assert.equal(rulesBlock({}), "");
-// }
-//
-// BUG 3: addLesson coerces with String(text || "") — truthy non-strings become
-// junk lessons: {} -> "[object Object]", ["a","b"] -> "a,b", 42 -> "42".
-// readLessons filters non-strings on read but these are stored AS strings, so
-// they survive every later read. Falsy input (null, 0, false, NaN, "") is
-// ignored. Uncomment when fixed:
-// {
-//   const d = state();
-//   addLesson({ note: "x" }, d);
-//   assert.ok(!readLessons(d).includes("[object Object]"), "objects must not become lessons");
-//   addLesson(["a", "b"], d);
-//   assert.ok(!readLessons(d).includes("a,b"), "arrays must not become lessons");
-// }
-//
-// BUG 4: addLesson is a read-modify-write with no lock (jobs.json has
-// jobs.lock; lessons.json does not). Two processes adding at once lose each
-// other's lessons — verified by hand: 3 children x 3 addLesson calls on one
-// dir lost updates in 5 of 20 runs (7 seeds + 9 tagged = 16 entries, under the
-// 20 cap, so the cap is not the cause). Needs execFileSync from
-// node:child_process to reproduce; flaky until fixed, so kept commented:
-// {
-//   const d = state();
-//   const mod = new URL("./constance-lessons.mjs", import.meta.url).href;
-//   const code = (tag) => `import(${JSON.stringify(mod)}).then(m=>{for(let i=0;i<3;i++)m.addLesson(${JSON.stringify(tag)}+" lesson "+i,${JSON.stringify(d)});})`;
-//   for (const tag of ["A", "B", "C"]) execFileSync(process.execPath, ["-e", code(tag)]);
-//   const tagged = new Set(readLessons(d).filter((l) => /^[ABC] lesson/.test(l)));
-//   assert.equal(tagged.size, 9, "concurrent addLesson calls must not lose lessons");
-// }
+// BUG 2 (fixed, regression test): the block builders trust their argument
+// types. lessonsBlock(null) and lessonsBlock("abc") threw TypeError
+// (null.length / string.map); guardrailBlock(null) and guardrailBlock("a.js")
+// threw the same way, and guardrailBlock({}) silently rendered the read-only
+// "(none)" list for a non-array; rulesBlock({}) embedded "[object Object]".
+// Non-array lessons/files and non-string rules now render as empty.
+{
+  assert.equal(lessonsBlock(null), "");
+  assert.equal(lessonsBlock("x"), "");
+  assert.equal(lessonsBlock({}), "");
+  assert.equal(lessonsBlock(42), "");
+  assert.equal(guardrailBlock(null), guardrailBlock([]));
+  assert.equal(guardrailBlock("a.js"), guardrailBlock([]));
+  assert.equal(guardrailBlock({}), guardrailBlock([]));
+  assert.equal(rulesBlock({}), "");
+  assert.equal(rulesBlock(42), "");
+}
+
+// BUG 3 (fixed, regression test): addLesson coerced with String(text || "") —
+// truthy non-strings became junk lessons: {} -> "[object Object]",
+// ["a","b"] -> "a,b", 42 -> "42". readLessons filters non-strings on read but
+// these were stored AS strings, so they survived every later read. Non-string
+// input is now ignored entirely.
+{
+  const d = state();
+  addLesson({ note: "x" }, d);
+  assert.ok(!readLessons(d).includes("[object Object]"), "objects must not become lessons");
+  addLesson(["a", "b"], d);
+  assert.ok(!readLessons(d).includes("a,b"), "arrays must not become lessons");
+  addLesson(42, d);
+  assert.ok(!readLessons(d).includes("42"), "numbers must not become lessons");
+  assert.deepEqual(readLessons(d), SEED_LESSONS, "non-string adds leave the seeds untouched");
+}
+
+// BUG 4 (fixed, regression test): addLesson was a read-modify-write with no
+// lock (jobs.json has jobs.lock; lessons.json did not). Two processes adding at
+// once lost each other's lessons — verified by hand: 3 children x 3 addLesson
+// calls on one dir lost updates in 5 of 20 runs. addLesson now serializes on
+// lessons.json.lock (O_EXCL, holder pid, stale break on a dead pid). The
+// children run truly concurrently via spawn; sequential execFileSync could
+// never interleave.
+{
+  const d = state();
+  const mod = new URL("./constance-lessons.mjs", import.meta.url).href;
+  const code = (tag) => `import(${JSON.stringify(mod)}).then(m=>{for(let i=0;i<3;i++)m.addLesson(${JSON.stringify(tag)}+" lesson "+i,${JSON.stringify(d)});})`;
+  const kids = ["A", "B", "C"].map((tag) => spawn(process.execPath, ["-e", code(tag)], { stdio: ["ignore", "ignore", "inherit"] }));
+  const codes = await Promise.all(kids.map((k) => new Promise((res) => k.on("exit", res))));
+  assert.deepEqual(codes, [0, 0, 0], "every writer exits cleanly");
+  assert.ok(!fs.existsSync(path.join(d, "lessons.json.lock")), "the lock file is released");
+  const tagged = new Set(readLessons(d).filter((l) => /^[ABC] lesson/.test(l)));
+  assert.equal(tagged.size, 9, "concurrent addLesson calls must not lose lessons");
+}
+// A stale lock (holder pid dead) is broken, not waited on forever.
+{
+  const d = state();
+  addLesson("before stale", d); // seeds the file
+  const dead = spawn(process.execPath, ["-e", "0"], { stdio: "ignore" });
+  const deadPid = await new Promise((res) => dead.on("exit", () => res(dead.pid)));
+  fs.writeFileSync(path.join(d, "lessons.json.lock"), String(deadPid));
+  const kept = addLesson("after stale", d);
+  assert.ok(kept.includes("after stale"), "a dead holder's lock does not block the add");
+  assert.ok(!fs.existsSync(path.join(d, "lessons.json.lock")), "the broken lock is cleaned up");
+}
 //
 // BUG 5: readLessons' try/catch covers only the read; when the state dir is
 // not writable the seed-path writeLessons() throws (verified: chmod 0555 ->
