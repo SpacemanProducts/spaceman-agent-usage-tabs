@@ -9,6 +9,9 @@ import { took } from "./constance-board.mjs";
 const MAX_RECENT = 20;
 const MAX_SEEN = 500;
 const EMPTY_AGENT = () => ({ jobs: 0, accepted: 0, sentBack: 0, tokensSum: 0, tokensN: 0, msSum: 0, msN: 0, recent: [] });
+// Workers that get a row before their first reviewed job, so they can be
+// compared with the rest (jobs 0, accepted 0, etc.).
+const ALWAYS_ROWED = ["freebuff", "kilo"];
 
 export function scorecardFile(dir) {
   return path.join(dir, "scorecard.json");
@@ -71,7 +74,16 @@ export function recordReview(dir, job, verdict, now = Date.now()) {
 }
 
 export function scoreRows(card, name = (id) => id) {
-  const rows = Object.entries((card && card.agents) || {}).map(([agent, a]) => {
+  const entries = Object.entries((card && card.agents) || {});
+  // A card that has recorded reviews also lists the newest workers with a
+  // zeroed record; a card with nothing reviewed at all stays empty so callers
+  // still print "No reviewed jobs yet".
+  const seen = card && Array.isArray(card.seen) ? card.seen : [];
+  if (seen.length) {
+    const have = new Set(entries.map(([id]) => id));
+    for (const id of ALWAYS_ROWED) if (!have.has(id)) entries.push([id, EMPTY_AGENT()]);
+  }
+  const rows = entries.map(([agent, a]) => {
     const decided = a.accepted + a.sentBack;
     return {
       agent,
