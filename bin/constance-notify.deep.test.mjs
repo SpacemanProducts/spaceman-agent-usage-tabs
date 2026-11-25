@@ -24,13 +24,11 @@
 //     a dir now only counts as a whole path token.
 //  7. recordSignal(dir, null) appended a literal "null" line and returned
 //     true — null/non-object events are now refused.
-//
-// STILL OPEN (assertions commented out under '// BUG:' below):
-//  8. agentInText/agentApp hand out the live KNOWN entries; mutating the
-//     returned `names` array changes what agentApp()/allowedSender() accept —
+//  8. agentInText/agentApp handed out the live KNOWN entries; mutating the
+//     returned `names` array changed what agentApp()/allowedSender() accept —
 //     the privacy allowlist — while agentInText's precompiled NAME_RES
-//     regexes never see the new name, so text matching and sender matching
-//     diverge.
+//     regexes never saw the new name, so text matching and sender matching
+//     diverged. KNOWN (entries and their names arrays) is now deep-frozen.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -684,17 +682,18 @@ assert.equal(agentApp({}), null);
 assert.equal(allowedSender('Kilo'), true);
 assert.equal(allowedSender('kilo auto'), false);
 
-// BUG: agentInText/agentApp hand out the LIVE KNOWN entries. Pushing onto the
-// returned `names` array changes what agentApp()/allowedSender() accept — the
-// privacy allowlist — while agentInText's precompiled NAME_RES regexes never
-// see the new name, so text matching and sender matching diverge.
-// {
-//   const k = agentInText('Devin finished');
-//   k.names.push('made-up-sender');
-//   // assert.equal(agentApp('made-up-sender'), null);          // FAILS: returns devin's entry
-//   // assert.equal(allowedSender('made-up-sender'), false);   // FAILS: returns true
-//   k.names.pop();
-// }
+// KNOWN entries and their names arrays are frozen: a caller holding the
+// entry agentInText/agentApp returned cannot widen the privacy allowlist.
+{
+  const k = agentInText('Devin finished');
+  assert.throws(() => k.names.push('made-up-sender'), TypeError, 'names array is frozen');
+  assert.throws(() => { k.id = 'made-up'; }, TypeError, 'entry object is frozen');
+  assert.equal(agentApp('made-up-sender'), null);
+  assert.equal(allowedSender('made-up-sender'), false);
+  // The real names still work after the freeze attempt.
+  assert.equal(agentApp('Devin').id, 'devin');
+  assert.equal(agentInText('Devin finished').id, 'devin');
+}
 
 // ---------- matchJob: wrong types and tiebreak edges ----------
 
