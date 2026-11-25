@@ -9,7 +9,10 @@ import path from "node:path";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-goalqueue-deep-"));
 process.env.HOME = dir; // fake HOME: nothing in this test may read the real one
-const { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner } =
+process.env.XDG_STATE_HOME = path.join(dir, "xdg-state");
+process.env.XDG_CONFIG_HOME = path.join(dir, "xdg-config");
+process.env.XDG_CACHE_HOME = path.join(dir, "xdg-cache");
+const { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner, queueStops } =
   await import("./constance-goalqueue.mjs");
 
 const qfile = path.join(dir, "goal-queue.json");
@@ -302,4 +305,172 @@ assert.throws(() => editGoal(dir, mv.id, { text: "" }), /empty/, "empty string s
 // needsOwner({ id: "g", text: "1. a\n2. b", status: "done" }, [{ id: 9, status: "conflict" }], { practice: true });
 // // currently returns [] — arguably should report "job 9 hit a merge conflict"
 
+// ---- Aliasing: the objects add/edit return are the live parsed records; mutating them after the
+// save does not rewrite the file, and the next change() re-reads from disk anyway ---------------
+fresh();
+const al = addGoal(dir, { text: "alias", dir: "/al" }, 5);
+al.text = "mutated after save";
+al.addedAt = 999;
+assert.equal(find(al.id).text, "alias", "mutating addGoal's return value does not touch the file");
+assert.equal(find(al.id).addedAt, 5);
+const ed = editGoal(dir, al.id, { dir: "/al2" });
+ed.dir = "/hijacked";
+assert.equal(find(al.id).dir, "/al2", "same for editGoal's return value");
+addGoal(dir, { text: "next", dir: "/nx" });
+assert.equal(find(al.id).dir, "/al2", "the mutation is gone for good once another change() re-reads");
+
+// ---- Goals without ids: readGoalQueue only requires text+dir, so hand-edited or foreign records
+// can live in the queue with no id — and undefined then matches the FIRST one -------------------
+fresh();
+writeQueue({ goals: [
+  { text: "noid1", dir: "/n1" },
+  { id: "x", text: "hasid", dir: "/h" },
+  { text: "noid2", dir: "/n2" },
+] });
+assert.equal(takeNext(dir).text, "noid1", "takeNext hands an id-less goal out whole");
+writeQueue({ goals: [
+  { id: "", text: "emptyid", dir: "/e" },
+  { text: "noid", dir: "/n" },
+  { id: "x", text: "hasid", dir: "/h" },
+] });
+editGoal(dir, undefined, { text: "edited-noid" });
+assert.equal(readGoalQueue(dir).goals[1].text, "edited-noid", "editGoal(undefined) hits the first id-less goal, not id:''");
+assert.equal(removeGoal(dir, "").text, "emptyid", "removeGoal('') matches id:'' exactly — '' !== undefined");
+moveGoal(dir, undefined, "down");
+assert.equal(readGoalQueue(dir).goals[0].text, "hasid", "moveGoal(undefined) moves the first id-less goal down");
+writeQueue({ goals: [{ id: "k", text: "keep", dir: "/k", custom: { a: 1 } }] });
+assert.deepEqual(takeNext(dir).custom, { a: 1 }, "takeNext returns the stored record verbatim, extras included");
+
+// ---- addedAt is stored verbatim; only the JSON round-trip coerces --------------------------------
+fresh();
+assert.equal(addGoal(dir, { text: "zero", dir: "/z" }, 0).addedAt, 0, "0 is a valid injected clock");
+assert.equal(addGoal(dir, { text: "str", dir: "/s" }, "soon").addedAt, "soon", "a non-number clock is stored as-is");
+assert.ok(Number.isNaN(addGoal(dir, { text: "nan", dir: "/nan" }, NaN).addedAt), "NaN survives in the returned object");
+assert.equal(readGoalQueue(dir).goals.find((g) => g.text === "nan").addedAt, null,
+  "but JSON.stringify turns NaN into null on disk");
+const live = addGoal(dir, { text: "live", dir: "/l" });
+assert.ok(Math.abs(live.addedAt - Date.now()) < 60_000, "the default clock is ~now");
+
+// ---- moveGoal: the remaining coercion edges -----------------------------------------------------
+fresh();
+const mA = addGoal(dir, { text: "a", dir: "/a" });
+addGoal(dir, { text: "b", dir: "/b" });
+addGoal(dir, { text: "c", dir: "/c" });
+for (const bad of [true, " "]) {
+  assert.throws(() => moveGoal(dir, mA.id, bad), /up, down/, `to=${JSON.stringify(bad)}`);
+}
+moveGoal(dir, mA.id, "1e2"); // exponent notation parses via Number(): 100 -> clamps to last
+assert.deepEqual(readGoalQueue(dir).goals.map((g) => g.text), ["b", "c", "a"]);
+
+// ---- paused is orthogonal to editing: every mutating op preserves it; only takeNext honours it -
+fresh();
+const hp = addGoal(dir, { text: "hp", dir: "/hp" });
+addGoal(dir, { text: "hp2", dir: "/hp2" });
+pauseQueue(dir, "owner needed");
+addGoal(dir, { text: "hp3", dir: "/hp3" });
+assert.equal(readGoalQueue(dir).paused, "owner needed", "addGoal preserves the pause");
+editGoal(dir, hp.id, { text: "hp-edited" });
+assert.equal(find(hp.id).text, "hp-edited", "editGoal works on a paused queue");
+moveGoal(dir, hp.id, "down");
+assert.equal(readGoalQueue(dir).paused, "owner needed", "moveGoal preserves the pause too");
+removeGoal(dir, hp.id);
+assert.equal(readGoalQueue(dir).paused, "owner needed", "even removeGoal preserves it");
+assert.equal(takeNext(dir), null, "only takeNext honours the pause");
+
+// ---- side effects: reads never create anything; writes create dir+file even when they change
+// nothing, and wrong-type dir arguments read as an empty queue ----------------------------------
+const ghost = path.join(dir, "ghost-state");
+assert.deepEqual(readGoalQueue(ghost), { goals: [], paused: "" });
+assert.deepEqual(readGoalQueue(null), { goals: [], paused: "" }, "path.join throws inside the try: swallowed");
+assert.deepEqual(readGoalQueue(42), { goals: [], paused: "" });
+assert.ok(!fs.existsSync(ghost), "readGoalQueue creates nothing");
+const tstate = path.join(dir, "t-state");
+assert.equal(takeNext(tstate), null);
+assert.ok(fs.existsSync(path.join(tstate, "goal-queue.json")),
+  "even a no-op takeNext on a missing dir persists an empty queue file");
+const rstate = path.join(dir, "r-state");
+resumeQueue(rstate);
+assert.ok(fs.existsSync(path.join(rstate, "goal-queue.json")), "resumeQueue on a missing dir creates it");
+
+// ---- goal-queue.json being a directory: reads as empty, writes fail without corrupting it ------
+fresh();
+fs.mkdirSync(qfile);
+assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" }, "EISDIR on read is swallowed like any read error");
+assert.throws(() => addGoal(dir, { text: "x", dir: "/x" }), /EISDIR|ENOTDIR/, "rename onto a directory fails");
+assert.ok(fs.statSync(qfile).isDirectory(), "the directory itself is untouched");
+assert.equal(fs.readdirSync(dir).filter((f) => f.includes(".tmp")).length, 1,
+  "the failed save leaves its .tmp file behind");
+// BUG: save() writes goal-queue.json.<pid>.tmp then renames it; when the rename fails (target is a
+// directory, or any IO error) the tmp file is orphaned in the state dir — every failed write leaks
+// one file. Pinned above; not fixed here.
+fs.rmSync(qfile, { recursive: true });
+fresh();
+
+// ---- writes own the schema: unknown top-level fields in goal-queue.json are dropped ------------
+writeQueue({ goals: [{ id: "f", text: "f", dir: "/f" }], paused: "", futureField: { keep: true } });
+addGoal(dir, { text: "g", dir: "/g" });
+const rawQ = JSON.parse(fs.readFileSync(qfile, "utf8"));
+assert.equal(rawQ.futureField, undefined,
+  "readGoalQueue keeps only goals+paused, so the next save erases any foreign top-level field");
+assert.equal(rawQ.paused, "", "the pause survives the round-trip as ''");
+
+// ---- needsOwner / queueStops edges ----------------------------------------------------------------
+assert.throws(() => queueStops(G("x"), null), TypeError, "queueStops crashes on jobs:null like needsOwner");
+assert.throws(() => editGoal(dir, "nope", null), TypeError, "editGoal(dir,id,null) destructures null -> TypeError");
+assert.throws(() => addGoal(dir, null), TypeError, "addGoal(dir,null) destructures null -> TypeError");
+// A goal-less job (no `goal` field) is invisible to needsOwner's own filters but checklist() counts
+// it (!j.goal || j.goal === goal.id): it can poison an item without ever being named in a message.
+const NGL = { id: 9, items: [2], status: "conflict" };
+assert.deepEqual(needsOwner(G("1. a\n2. b"), [J(1, "accepted", { items: [1] }), NGL]),
+  ["item 2 of the checklist not done"],
+  "the strict j.goal === goal.id filter and checklist's looser one disagree on goal-less jobs");
+assert.deepEqual(queueStops(G("1. a\n2. b"), [J(1, "accepted", { items: [1] }), NGL]),
+  { stop: [], notes: ["item 2 of the checklist not done"] }, "same divergence inside queueStops");
+// merged jobs: needsOwner passes the raw job list to checklist() (merged is not 'accepted'), while
+// queueStops maps merged -> accepted first — the same input reports differently.
+const mg = G("1. a\n2. b");
+const mgJobs = [J(1, "accepted", { items: [1] }), J(2, "merged", { items: [2] })];
+assert.deepEqual(needsOwner(mg, mgJobs), ["item 2 of the checklist not done"],
+  "needsOwner sees the raw jobs: a merged job does not satisfy the checklist");
+assert.deepEqual(queueStops(mg, mgJobs),
+  { stop: [], notes: ["job 2 merged and still waiting for review"] },
+  "queueStops counts merged as accepted for the checklist: no item note, only the review note");
+// A checked tick counts even when its note is an empty string (the test is !== undefined).
+assert.deepEqual(needsOwner(G("1. a\n2. b", { checked: { 2: "" } }), [J(1, "accepted", { items: [1] })]), [],
+  "checked[n] !== undefined: an empty-string tick still marks the item done");
+// goal.items must be a non-empty array to override the text; any other type falls back to parsing.
+assert.deepEqual(needsOwner(G("1. a\n2. b", { items: "not-an-array" }), [
+  J(1, "accepted", { items: [1] }), J(2, "accepted", { items: [2] }),
+]), [], "a string items field is ignored and the goal text is parsed instead");
+assert.deepEqual(needsOwner(G("1. a\n2. b"), [J(1, "accepted", { items: [1] })], { practice: 1 }), [],
+  "practice is a truthiness check, not === true");
+// queueStops: failReason only rides along when it is a non-empty string; failed is always a note,
+// never a stop — even next to a real stop reason.
+for (const fr of [42, {}, ""]) {
+  assert.deepEqual(queueStops({ id: "g", text: "x", status: "failed", failReason: fr }, [], { practice: true }),
+    { stop: [], notes: ["she couldn't finish the goal"] }, `failReason=${JSON.stringify(fr)}`);
+}
+assert.deepEqual(queueStops({ id: "g", text: "1. a\n2. b", status: "failed", failReason: "out of ideas" },
+  [J(1, "accepted", { items: [1] }), J(2, "conflict", { items: [2] })]),
+  { stop: ["job 2 hit a merge conflict"], notes: ["she couldn't finish the goal: out of ideas"] },
+  "a failed goal skips the checklist entirely and reports its failure as a note beside the stop");
+// An accepted job whose summary marks it a practice run is not 'merged' for the checklist either.
+assert.deepEqual(queueStops(G("1. a\n2. b"), [
+  J(1, "accepted", { items: [1] }),
+  J(2, "accepted", { items: [2], summary: "(practice run: logged only)" }),
+]), { stop: [], notes: ["item 2 of the checklist not done"] },
+  "isPractice() excludes practice-summary jobs from the merged check");
+
+// BUG: change() is read-modify-write with no inter-process lock. Two processes calling
+// addGoal/takeNext at the same time lose updates: each reads the same file, writes its own
+// version, and the last rename wins. Reproduced 2026-11-25: two `node child.mjs <state> A|B`
+// processes doing 30 addGoal() calls each on an ~8 MB queue file (40 goals x 200 KB text)
+// produced 70 goals instead of the expected 100 (A:13 B:17 — 30 updates silently lost).
+// Disabled test sketch — enable once a fix lands (e.g. an inter-process lock like
+// constance-mergelock.mjs, or append-only journaling):
+//   const state = fs.mkdtempSync(...); seed goal-queue.json with 40 fat goals;
+//   spawn two children each running `for (i<30) addGoal(state, {text: tag+i, dir:"/p"})`;
+//   await both; assert.equal(readGoalQueue(state).goals.length, 100); // FAILS today
+
+fs.rmSync(dir, { recursive: true, force: true });
 console.log("constance-goalqueue.deep: ok");
