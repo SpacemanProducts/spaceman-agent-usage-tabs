@@ -5,8 +5,9 @@
 // goal lines, the day() header at calendar edges, and writeReport's tmp+rename
 // failure modes. The module is synchronous with no timers or shared state, so
 // there are no real races to test; the fake HOME/XDG dirs are a guard so
-// nothing can ever touch the real one. Suspected bugs are commented out with a
-// note, not fixed (this job is test-only).
+// nothing can ever touch the real one. Former suspected bugs are now
+// regression tests; only the invalid-`now` NaN-NaN-NaN header quirk stays
+// commented out (unfixed, out of scope).
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -144,36 +145,37 @@ assert.match(r.text, /\(1 job can't tell\)/);
 r = buildReport({ records: [rec({ tokensCantTell: 2 })], now: NOW2 });
 assert.match(r.text, /\(2 jobs can't tell\)/);
 
-// BUG: a whitespace-only needsOwner adds an empty string to the needs-you set —
-// the markdown gets a bare "- " bullet and the notification body ends with
-// "Needs you: ." (the `needs` array path trims-and-skips empties; the record
-// path does not).
-// const ws = buildReport({ records: [rec({ needsOwner: "   " })], now: NOW2 });
-// assert.ok(!ws.text.includes("\n- \n"), "no empty needs bullet");
-// assert.ok(!ws.body.includes("Needs you: ."), "no empty needs clause");
+// A whitespace-only needsOwner must not add an empty string to the needs-you
+// set — no bare "- " bullet and no "Needs you: ." clause (the `needs` array
+// path already trims-and-skips empties; the record path now does too).
+const ws = buildReport({ records: [rec({ needsOwner: "   " })], now: NOW2 });
+assert.ok(!ws.text.includes("\n- \n"), "no empty needs bullet");
+assert.ok(!ws.body.includes("Needs you: ."), "no empty needs clause");
+assert.match(ws.text, /Nothing needs you\./);
 
-// BUG: with no finished goals the notification body names only the FIRST
-// need-you ("Needs you: A."), silently dropping the rest, while the markdown
-// lists them all. The goals>0 path joins every need.
-// const nb = buildReport({ records: [], needs: ["First need", "Second need"], now: NOW2 });
-// assert.ok(nb.body.includes("Second need"), "body should mention every need");
+// With no finished goals the notification body names every need-you, not just
+// the first — same join the goals>0 path uses.
+const nb = buildReport({ records: [], needs: ["First need", "Second need"], now: NOW2 });
+assert.ok(nb.body.includes("First need") && nb.body.includes("Second need"),
+  "body should mention every need");
+assert.match(nb.body, /Needs you: First need; Second need\./);
 
-// BUG: `needs` is iterated with for..of, so a bare string splinters into one
-// single-character "need" per letter instead of being rejected or treated as one.
-// const ns = buildReport({ records: [], needs: "oops", now: NOW2 });
-// assert.deepEqual(ns.text.split("## Needs you\n")[1].trim().split("\n"), ["- o", "- o", "- p", "- s"].slice(0, 3));
-// (dedup leaves o,o,p,s -> four bullets of single chars; assert the splinter)
-// assert.equal(ns.text.split("## Needs you\n")[1].trim().split("\n").length, 4);
+// A bare string `needs` is one item, not an iterable of characters.
+const ns = buildReport({ records: [], needs: "oops", now: NOW2 });
+assert.deepEqual(ns.text.split("## Needs you\n")[1].trim().split("\n"), ["- oops"]);
+assert.match(ns.body, /Needs you: oops\./);
 
-// BUG: tokens: NaN passes the typeof check, poisons the sum, and crashes inside
-// fmtTokens (units[-1] destructure) — same constance-tokens.mjs bug the board
-// deep test documents. Can't arrive via JSON history, only via in-memory records.
-// assert.throws(() => buildReport({ records: [rec({ tokens: NaN })], now: NOW2 }), TypeError);
+// Non-finite tokens (NaN, Infinity) are treated as unknown: counted as
+// can't-tell instead of poisoning the sum and crashing inside fmtTokens.
+const nan = buildReport({ records: [rec({ tokens: NaN }), rec({ id: "b", tokens: Infinity })], now: NOW2 });
+assert.match(nan.text, /Tokens: 0 \(2 jobs can't tell\)/);
+assert.match(nan.body, /0 tokens/);
 
-// BUG: a goal with an empty/whitespace text renders "-  — done · …" (double
-// space, no title at all). There is no fallback label.
-// const et = buildReport({ records: [rec({ text: "   " })], now: NOW2 });
-// assert.ok(!et.text.includes("-  —"), "empty goal text should not leave a blank title");
+// A goal with empty/whitespace text falls back to a placeholder title instead
+// of rendering "-  — done · …".
+const et = buildReport({ records: [rec({ text: "   " })], now: NOW2 });
+assert.ok(!et.text.includes("-  —"), "empty goal text should not leave a blank title");
+assert.match(et.text, /- \(untitled\) — done ·/);
 
 // ---------- buildReport: needs array coercion ----------
 
