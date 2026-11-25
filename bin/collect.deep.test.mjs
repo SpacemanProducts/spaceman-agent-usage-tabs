@@ -33,6 +33,10 @@ import { fileURLToPath } from "node:url";
 //                      (atomic data.json rename, per-pid history tmp) plus
 //                      argv edge cases (--notify with no value, non-numeric
 //                      --volume/--notify).
+//   6. reset-fired     a reset-fired.json holding a JSON primitive is treated
+//                      as empty state instead of crashing applyResets.
+//   7. resets-at       fromBuiltin keeps only a valid ISO resetsAt; numbers and
+//                      junk strings count as missing.
 //
 // Every file a run touches lives under one mkdtemp dir per scenario; nothing
 // here reads or writes the real home folder.
@@ -348,6 +352,49 @@ try {
     assert.ok(Array.isArray(data.agents) && data.agents.length > 0);
     assert.ok(noTmpLeft(e.outDir), "concurrent atomic writes leave no tmp files");
   }
+
+  // ------------------------------------------- 6. primitive reset-fired.json
+  // (was BUG: readJson(RESET_FIRED) || {} handed a primitive to applyResets,
+  // which then crashed assigning fired[key] — a TypeError in strict mode.)
+  {
+    const e = makeEnv("resetfired", { fakes: ["codex"] });
+    const future = iso(Date.now() + 6 * 3600 * 1000);
+    fs.writeFileSync(path.join(e.outDir, "reset-fired.json"), "5");
+    fs.writeFileSync(path.join(e.outDir, "data.json"), JSON.stringify({
+      schemaVersion: 1, agents: [{ id: "codex", limits: [{ title: "Session", percent: 0.97, resetsAt: future }] }],
+    }));
+    fs.writeFileSync(path.join(e.builtinDir, "codex.json"), JSON.stringify({
+      limits: [{ title: "Session", percent: 0.2, resetsAt: future }],
+    }));
+    const r = runCollect(e.env);
+    assert.equal(r.status, 0, `collect.mjs crashed on primitive reset-fired.json:\n${r.stderr}`);
+    const fired = readJsonFile(path.join(e.outDir, "reset-fired.json"));
+    assert.ok(fired && typeof fired === "object" && !Array.isArray(fired), "reset-fired.json rewritten as a plain object");
+  }
+
+  // ------------------------------------------- 7. non-string resetsAt
+  // (was BUG: fromBuiltin passed l.resetsAt through raw, so a number like
+  // 1893456000000 leaked into data.json — and a small one like 123 parsed as
+  // year 123 and silently expired the meter.)
+  {
+    const e = makeEnv("resetsat", { fakes: ["codex"] });
+    fs.writeFileSync(path.join(e.builtinDir, "codex.json"), JSON.stringify({
+      ready: true, tierLabel: "Pro",
+      limits: [
+        { title: "Session", percent: 0.5, resetsAt: 1893456000000 },
+        { title: "Weekly", percent: 0.5, resetsAt: "not a date" },
+        { title: "Monthly", percent: 0.5, resetsAt: FUTURE },
+      ],
+    }));
+    const r = runCollect(e.env);
+    assert.equal(r.status, 0, `collect.mjs failed:\n${r.stderr}`);
+    const codex = agentOf(readData(e.outDir), "codex");
+    const byTitle = Object.fromEntries(codex.limits.map((l) => [l.title, l]));
+    assert.equal(byTitle.Session.resetsAt, "", "a numeric resetsAt counts as missing");
+    assert.equal(byTitle.Weekly.resetsAt, "", "a non-ISO resetsAt counts as missing");
+    assert.equal(byTitle.Monthly.resetsAt, FUTURE, "a real ISO resetsAt survives");
+    for (const l of codex.limits) assert.equal(typeof l.resetsAt, "string");
+  }
 } finally {
   for (const d of tmpdirs) fs.rmSync(d, { recursive: true, force: true });
 }
@@ -372,45 +419,7 @@ try {
 //     assert.ok(fs.existsSync(path.join(e.outDir, "data.json")), "data.json still written");
 //   }
 //
-// BUG: a reset-fired.json holding a JSON primitive (5, "x", true) crashes the
-// run when a reset is detected. collect.mjs does `readJson(RESET_FIRED) || {}`
-// and hands the primitive to applyResets, which assigns `fired[key] = ...` —
-// a TypeError in strict mode. Verified: exit 1,
-// "Cannot create property 'codex|Session' on number '5'".
-//
-//   // BUG: primitive reset-fired.json must be treated as empty state
-//   {
-//     const e = makeEnv("bug-resetfired", { fakes: ["codex"] });
-//     const future = iso(Date.now() + 6 * 3600 * 1000);
-//     fs.writeFileSync(path.join(e.outDir, "reset-fired.json"), "5");
-//     fs.writeFileSync(path.join(e.outDir, "data.json"), JSON.stringify({
-//       schemaVersion: 1, agents: [{ id: "codex", limits: [{ title: "Session", percent: 0.97, resetsAt: future }] }],
-//     }));
-//     fs.writeFileSync(path.join(e.builtinDir, "codex.json"), JSON.stringify({
-//       limits: [{ title: "Session", percent: 0.2, resetsAt: future }],
-//     }));
-//     const r = runCollect(e.env);
-//     assert.equal(r.status, 0, `collect.mjs crashed on primitive reset-fired.json:\n${r.stderr}`);
-//   }
-//
-// BUG: fromBuiltin passes a non-string resetsAt straight through
-// (`resetsAt: l.resetsAt || ""`), so data.json can carry e.g.
-// "resetsAt": 1893456000000 where the panel expects an ISO string. Worse, a
-// small number like 123 parses as a real date (year 123) and expireResets
-// silently zeroes the meter. Verified: the numeric resetsAt survives into
-// data.json unchanged (and trips a dataWarning, but is not sanitized).
-//
-//   // BUG: non-string resetsAt must count as missing, not leak into data.json
-//   {
-//     const e = makeEnv("bug-resetsat", { fakes: ["codex"] });
-//     fs.writeFileSync(path.join(e.builtinDir, "codex.json"), JSON.stringify({
-//       ready: true, tierLabel: "Pro",
-//       limits: [{ title: "Session", percent: 0.5, resetsAt: 1893456000000 }],
-//     }));
-//     const r = runCollect(e.env);
-//     assert.equal(r.status, 0, `collect.mjs failed:\n${r.stderr}`);
-//     const codex = agentOf(readData(e.outDir), "codex");
-//     assert.equal(typeof codex.limits[0].resetsAt, "string", "resetsAt must be an ISO string or empty");
-//   }
+// Fixed 2026-11-25 (now scenarios 6 and 7 above): a primitive reset-fired.json
+// is treated as empty state, and fromBuiltin keeps only a valid ISO resetsAt.
 
 console.log("collect.deep: all assertions passed");

@@ -83,6 +83,10 @@ for (const c of CATALOG.agents) AGENTS.push({ id: c.id, name: c.name, bins: c.bi
 const isInstalled = makeInstalledCheck({ dirs: PATH_DIRS, env: ENV });
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
+// Only a real ISO timestamp survives into data.json: anything else (a number,
+// a junk string) would leak through raw or be misread by Date.parse downstream.
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/;
+const isoOrEmpty = (v) => (typeof v === "string" && ISO_TIME.test(v) && Number.isFinite(Date.parse(v)) ? v : "");
 const localDate = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const lastDays = (n) => Array.from({ length: n }, (_, i) => localDate(Date.now() - (n - 1 - i) * 86400000));
 const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
@@ -246,7 +250,7 @@ function fromBuiltin(id, agentId = id) {
   return {
     plan: r.tierLabel || "",
     limits: (Array.isArray(r.limits) ? r.limits : []).filter((l) => l && typeof l === "object" && Number(l.percent) >= 0)
-      .map((l) => ({ title: l.title || titleFor(l.label), percent: clamp01(Number(l.percent)), resetsAt: l.resetsAt || "" })),
+      .map((l) => ({ title: l.title || titleFor(l.label), percent: clamp01(Number(l.percent)), resetsAt: isoOrEmpty(l.resetsAt) })),
     models: modelRows(modelUsage), modelScope: "all time",
     days: week.some((date) => date in byDay) ? daysFrom(byDay) : [],
     resets: codexResets(r),
@@ -478,7 +482,8 @@ function notifyHighUsage(list) {
 const SOUND_VOLUME = Number.isFinite(argAfter("--volume")) ? argAfter("--volume") : 60;
 const pendingResets = [];
 const RESET_FIRED = path.join(OUT_DIR, "reset-fired.json");   // which windows already celebrated, kept across restarts
-const resetFired = readJson(RESET_FIRED) || {};
+const resetFiredRaw = readJson(RESET_FIRED);
+const resetFired = resetFiredRaw && typeof resetFiredRaw === "object" && !Array.isArray(resetFiredRaw) ? resetFiredRaw : {};
 applyResets(agents, prev?.agents, (a, windows, info) => pendingResets.push({ a, windows, info }), Date.now(), resetFired);
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(RESET_FIRED, JSON.stringify(resetFired) + "\n", { mode: 0o600 });
