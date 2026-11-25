@@ -40,6 +40,31 @@ export function surpriseStateFile(stateDir) {
   return path.join(stateDir, "antigravity-surprise.json");
 }
 
+// A lock file records its holder's pid. It is stale when that pid is dead, or
+// — for locks with no readable pid (written before pids were recorded, or
+// caught mid-creation) — once it is older than LOCK_STALE_MS. A lock with a
+// live pid is held no matter its age: the critical section is a tiny
+// read-modify-write, so a live holder always finishes in milliseconds.
+export const LOCK_STALE_MS = 2000;
+
+const pidAlive = (pid) => {
+  if (!(pid > 0)) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+};
+const lockPid = (lock) => {
+  try {
+    const pid = Number(fs.readFileSync(lock, "utf8").trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : 0;
+  } catch { return 0; }
+};
+// Why the lock at `lock` can be taken over, or "" while it is really held.
+function staleLockReason(lock) {
+  const pid = lockPid(lock);
+  if (pid) return pidAlive(pid) ? "" : `holder ${pid} is gone`;
+  try { return Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS ? "no holder recorded" : ""; }
+  catch { return ""; }   // gone or unreadable: just retry the create
+}
+
 export function writeSurpriseState(file, action, at) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const lock = `${file}.lock`;
@@ -49,16 +74,39 @@ export function writeSurpriseState(file, action, at) {
   while (lockFd === undefined) {
     try { lockFd = fs.openSync(lock, "wx", 0o600); }
     catch (error) {
-      if (error.code !== "EEXIST" || Date.now() >= deadline) throw error;
+      if (error.code !== "EEXIST") throw error;
+      if (staleLockReason(lock)) {
+        // Stale: take it over atomically by renaming the corpse aside first,
+        // so two waiters can never both delete-and-recreate `lock` (same
+        // scheme as constance-mergelock.mjs).
+        const aside = `${lock}.gone-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        try { fs.renameSync(lock, aside); }
+        catch (e2) { if (e2.code !== "ENOENT") throw e2; continue; }
+        // The path may have changed hands between the check and the rename:
+        // a live lock moved aside is put back if `lock` is still free; a
+        // corpse is deleted.
+        if (staleLockReason(aside) === "") {
+          if (!fs.existsSync(lock)) { try { fs.renameSync(aside, lock); } catch {} }
+        } else {
+          try { fs.unlinkSync(aside); } catch {}
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) throw error;
       Atomics.wait(wait, 0, 0, 10);
     }
   }
+  fs.writeSync(lockFd, String(process.pid));
   try {
-    let current = null;
+    let current = null, corrupt = false;
     try { current = JSON.parse(fs.readFileSync(file, "utf8")); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
+    catch (error) {
+      if (error.code === "ENOENT") {}
+      else if (error instanceof SyntaxError) corrupt = true;
+      else throw error;
+    }
     const next = updateSurpriseState(current, action, at);
-    if (JSON.stringify(next) === JSON.stringify(current)) return next;
+    if (!corrupt && JSON.stringify(next) === JSON.stringify(current)) return next;
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(next) + "\n", { mode: 0o600 });
     fs.renameSync(tmp, file);
@@ -93,7 +141,14 @@ async function showNotification(at, title, body) {
 
 async function main() {
   const [action, at, title, body] = process.argv.slice(2);
-  if (action === "notify") await showNotification(at, title, body);
+  if (action === "notify") {
+    if (!title || !body) {
+      console.error("usage: antigravity-surprise.mjs notify <at> <title> <body>");
+      process.exitCode = 1;
+      return;
+    }
+    await showNotification(at, title, body);
+  }
   else writeSurpriseState(stateFile, action, at);
 }
 
