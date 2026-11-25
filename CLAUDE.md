@@ -224,6 +224,13 @@ keeps the developer in flow:
   machine/ramp (no NaN admits); tokens, scorecard, queue (locked writes), pace, backlog, agents
   (`judge()` treats malformed input as unavailable, never a crash), notify (never stores a body) and
   spare/goalqueue all take bad input without crashing or leaking.
+  Since 1.52.0: the goal queue stops only for `queueStops()` stops (Stop, `C needs-owner`, a merge conflict);
+  failed goals, unreviewed jobs and open items are logged notes and the next goal starts (`failReason`/`endNotes`
+  in history). `C summary` (Copy summary chip) is `bin/constance-summary.mjs`, max 80 lines. Her brain is
+  `constanceBrain` (claude | antigravity, `bin/constance-brain.mjs`, docs/brain-backends.md): agy only with
+  "antigravity" in constanceKeyringAgents, pacing from its model's pool bars renamed Session/Weekly, no resume
+  (fresh prompt each start), a quota line is a wall ("Antigravity said it hit its limit"), and it is never a
+  worker while it is her brain.
 
 ## Working rules
 
