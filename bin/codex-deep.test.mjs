@@ -300,7 +300,7 @@ for (const [label, record, check] of [
       { title: "OldZero", percent: 0, resetsAt: pastIso },     // already 0 -> untouched
       { title: "Future", percent: 0.5, resetsAt: future() },
       { title: "NoDate", percent: 0.5 },
-      { title: "BadDate", percent: 0.5, resetsAt: "soon" },    // unparseable -> kept + diagnosed
+      { title: "BadDate", percent: 0.5, resetsAt: "soon" },    // not ISO -> ""
     ],
   });
   const r = ctx.run();
@@ -313,9 +313,9 @@ for (const [label, record, check] of [
   assert.equal(byTitle.OldZero.resetsAt, pastIso, "a 0% meter keeps its stale resetsAt (current behaviour)");
   assert.equal(byTitle.Future.percent, 0.5);
   assert.equal(byTitle.NoDate.resetsAt, "");
-  assert.equal(byTitle.BadDate.resetsAt, "soon", "unparseable resetsAt passes through raw");
+  assert.equal(byTitle.BadDate.resetsAt, "", "a non-ISO resetsAt is dropped, not passed through");
   assert.equal(byTitle.BadDate.percent, 0.5);
-  assert.match(r.codex.dataWarning || "", /Data looks wrong/, "bad resetsAt is diagnosed");
+  assert.equal(r.codex.dataWarning || "", "", "no bad reset time survives to be diagnosed");
   ctx.cleanup();
 }
 

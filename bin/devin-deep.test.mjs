@@ -281,8 +281,8 @@ for (const [label, recentDays] of [["object", {}], ["number", 5], ["null element
       { label: "5h session", percent: 0.4 },                      // no title -> titleFor(label) -> "Session"
       { label: "Monthly quota", percent: 0.3 },                   // -> "Monthly"
       { title: "OldZero", percent: 0, resetsAt: PAST },           // 0% + past reset: kept verbatim (quirk)
-      { title: "NumericReset", percent: 0.5, resetsAt: 123 },     // Date.parse(123) is a past date -> expired
-      { title: "BadDate", percent: 0.5, resetsAt: "not-a-date" }, // unparseable -> kept, flagged in dataWarning
+      { title: "NumericReset", percent: 0.5, resetsAt: 123 },     // non-string -> ""
+      { title: "BadDate", percent: 0.5, resetsAt: "not-a-date" }, // not ISO -> ""
       { title: 5, percent: 0.5 },                                 // non-string title passes through
     ],
   };
@@ -312,17 +312,17 @@ for (const [label, recentDays] of [["object", {}], ["number", 5], ["null element
   assert.equal(one("Fine print").percent, 0.5, "QUIRK: fromBuiltin keeps only title/percent/resetsAt, so planLimitsOnly's detail check never fires for Omarchy records");
   assert.equal(one("OldZero").resetsAt, PAST, "QUIRK: a 0% meter keeps its stale past resetsAt");
   const numReset = one("NumericReset");
-  assert.equal(numReset.percent, 0);
+  assert.equal(numReset.percent, 0.5, "a non-ISO resetsAt no longer expires the meter");
   assert.equal(numReset.resetsAt, "");
-  assert.equal(numReset.note, RESET_NOTE, "QUIRK: resetsAt:123 parses as a date (year 123) and expires the meter");
+  assert.equal(numReset.note, undefined, "no expiry note without a parseable reset time");
   const badDate = one("BadDate");
-  assert.equal(badDate.resetsAt, "not-a-date", "an unparseable resetsAt is passed through");
+  assert.equal(badDate.resetsAt, "", "a non-ISO resetsAt is dropped, not passed through");
   assert.equal(one(5).percent, 0.5, "a numeric title survives as a number");
   assert.equal(d.plan, "Pro");
   assert.equal(d.planNote, undefined, "the free note only applies to free-ish plans");
   assert.equal(d.signedIn, true);
   assert.equal(d.status, "");
-  assert.ok(d.dataWarning, "negative days / bad reset times set the one-line warning");
+  assert.equal(d.dataWarning, "", "non-ISO resetsAt is dropped before diagnostics, so nothing is flagged");
   cleanup(ctx);
   console.log("ok: limits edge cases");
 }
