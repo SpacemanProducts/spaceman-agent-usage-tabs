@@ -104,8 +104,8 @@ function titleFor(text, seconds) {
 
 function modelRows(usageByModel) {
   return Object.entries(usageByModel || {}).map(([name, b]) => {
-    const input = +b.inputTokens || 0, output = +b.outputTokens || 0;
-    const cacheRead = +b.cacheReadInputTokens || 0, cacheWrite = +b.cacheCreationInputTokens || 0;
+    const input = +(b?.inputTokens) || 0, output = +(b?.outputTokens) || 0;
+    const cacheRead = +(b?.cacheReadInputTokens) || 0, cacheWrite = +(b?.cacheCreationInputTokens) || 0;
     return { name, input, output, cacheRead, cacheWrite, total: input + output + cacheRead + cacheWrite };
   }).sort((a, b) => b.total - a.total);
 }
@@ -230,17 +230,29 @@ function fromBuiltin(id, agentId = id) {
   const r = readJson(file);
   if (!r) { if (fs.existsSync(file)) diag.add(agentId, "Omarchy's usage record exists but isn't readable JSON", { file }); return null; }
   if (!Array.isArray(r.limits ?? [])) diag.add(agentId, "Omarchy's usage record has limits that aren't a list", { type: typeof r.limits });
-  const days = {}; for (const d of r.recentDays || []) days[d.date] = +d.messageCount || 0;
+  if (r.recentDays != null && !Array.isArray(r.recentDays)) diag.add(agentId, "Omarchy's usage record has recentDays that aren't a list", { type: typeof r.recentDays });
+  // Wrong-typed fields count as missing: a record that parses but carries no
+  // real numbers must not fabricate a zero-usage week.
+  const byDay = {};
+  if (Array.isArray(r.recentDays)) {
+    for (const d of r.recentDays) {
+      if (d && typeof d === "object" && typeof d.date === "string") byDay[d.date] = +d.messageCount || 0;
+    }
+  }
+  const week = lastDays(7);
+  const modelUsage = r.modelUsage && typeof r.modelUsage === "object" && !Array.isArray(r.modelUsage) ? r.modelUsage : null;
+  const usageText = typeof r.usageStatusText === "string" ? r.usageStatusText : "";
+  const authText = typeof r.authHelpText === "string" ? r.authHelpText : "";
   return {
     plan: r.tierLabel || "",
-    limits: (r.limits || []).filter((l) => Number(l.percent) >= 0)
+    limits: (Array.isArray(r.limits) ? r.limits : []).filter((l) => l && typeof l === "object" && Number(l.percent) >= 0)
       .map((l) => ({ title: l.title || titleFor(l.label), percent: clamp01(Number(l.percent)), resetsAt: l.resetsAt || "" })),
-    models: modelRows(r.modelUsage), modelScope: "all time",
-    days: daysFrom(days),
+    models: modelRows(modelUsage), modelScope: "all time",
+    days: week.some((date) => date in byDay) ? daysFrom(byDay) : [],
     resets: codexResets(r),
     signedIn: r.ready === true,
-    status: r.ready === false ? String(r.usageStatusText || r.authHelpText || "") : "",
-    note: String(r.usageStatusText || ""),
+    status: r.ready === false ? (usageText || authText) : "",
+    note: usageText,
   };
 }
 
