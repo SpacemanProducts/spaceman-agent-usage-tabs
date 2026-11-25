@@ -44,19 +44,25 @@ function writeCard(dir, card) {
 export function recordReview(dir, job, verdict, now = Date.now()) {
   if (verdict !== "accept" && verdict !== "send-back") return readScorecard(dir);
   if (!job || !Number.isFinite(job.startedAt)) return readScorecard(dir);
-  if (String(job.summary || "").startsWith("(practice run")) return readScorecard(dir);
+  const summary = String(job.summary || "");
+  if (/^\(practice run[ :)]/.test(summary)) return readScorecard(dir);
   const card = readScorecard(dir);
-  const key = job.goal + ":" + job.id;
-  if (card.seen.includes(key)) return card;
-  card.seen.push(key);
-  if (card.seen.length > MAX_SEEN) card.seen = card.seen.slice(-MAX_SEEN);
+  // Jobs with no id have nothing to dedup on; count each review rather than
+  // letting every id-less job share the "goal:undefined" key.
+  if (job.id != null) {
+    const key = job.goal + ":" + job.id;
+    if (card.seen.includes(key)) return card;
+    card.seen.push(key);
+    if (card.seen.length > MAX_SEEN) card.seen = card.seen.slice(-MAX_SEEN);
+  }
   const agent = job.agent || "";
   const a = card.agents[agent] ||= EMPTY_AGENT();
   a.jobs += 1;
   if (verdict === "accept") a.accepted += 1; else a.sentBack += 1;
   const tokens = job.tokens && Number.isFinite(job.tokens.n) ? job.tokens.n : null;
   if (tokens !== null) { a.tokensSum += tokens; a.tokensN += 1; }
-  const ms = Number.isFinite(job.startedAt) && Number.isFinite(job.finishedAt) ? job.finishedAt - job.startedAt : null;
+  const span = Number.isFinite(job.startedAt) && Number.isFinite(job.finishedAt) ? job.finishedAt - job.startedAt : null;
+  const ms = span !== null && span >= 0 ? span : null;
   if (ms !== null) { a.msSum += ms; a.msN += 1; }
   a.recent.push({ job: job.id, verdict, tokens, ms, files: (job.files || []).length, at: now });
   if (a.recent.length > MAX_RECENT) a.recent = a.recent.slice(-MAX_RECENT);

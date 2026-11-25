@@ -246,12 +246,11 @@ assert.deepEqual(scoreRows(null), []);
 assert.deepEqual(scoreRows({}), []);
 assert.doesNotThrow(() => scoreRows({ agents: { a: {} } }));
 
-// ---- Suspected real bugs: commented out, reported, not fixed ----
+// ---- Edge cases that used to be real bugs, now fixed ----
 
-/*
-// BUG?: two reviewed jobs with no `id` in the same goal share the seen key
-// "goal:undefined", so only the first ever counts. Jobs are expected to have
-// ids, but nothing enforces it.
+// Two reviewed jobs with no `id` in the same goal have no dedup key, so
+// both count (previously they shared "goal:undefined" and the second was
+// silently dropped).
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
   const noId = (extra = {}) => ({ goal: "g1", agent: "devin", startedAt: 1, finishedAt: 2, ...extra });
@@ -260,17 +259,16 @@ assert.doesNotThrow(() => scoreRows({ agents: { a: {} } }));
   assert.equal(readScorecard(d).agents.devin.jobs, 2, "two id-less jobs should both count");
 }
 
-// BUG?: practice detection is a bare prefix match - a real job whose summary
-// starts "(practice run..." is silently ignored and never recorded.
+// Practice detection is a strict match on the real "(practice run ..." shape,
+// so a real job whose summary starts "(practice runbook)" still counts.
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
   recordReview(d, job(1, "devin", { summary: "(practice runbook) update docs" }), "accept", 1);
   assert.equal(readScorecard(d).agents.devin.jobs, 1, "real summary starting with the prefix should count");
 }
 
-// BUG?: a job with finishedAt < startedAt records a negative ms, which can
-// drag avgMs negative; scoreLine then appends ", avg " with took() returning ""
-// for negatives, leaving a dangling fragment.
+// A job with finishedAt < startedAt records no ms sample, so avgMs can't go
+// negative and scoreLine can't end with a dangling ", avg ".
 {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
   recordReview(d, job(1, "devin", { startedAt: 10000, finishedAt: 5000 }), "accept", 1);
@@ -279,7 +277,6 @@ assert.doesNotThrow(() => scoreRows({ agents: { a: {} } }));
   const line = scoreLine(scoreRows(readScorecard(d))[0]);
   assert.ok(!line.endsWith(", avg "), "scoreLine should not end with a dangling avg");
 }
-*/
 
 fs.rmSync(dir, { recursive: true, force: true });
 fs.rmSync(process.env.HOME, { recursive: true, force: true });
