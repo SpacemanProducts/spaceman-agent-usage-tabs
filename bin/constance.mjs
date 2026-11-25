@@ -67,7 +67,7 @@ import { planSpare, useItOrLoseItOn } from "./constance-spare.mjs";
 import { readBacklog, addItem as addBacklogItem, markTaken, markDone, removeItem as removeBacklogItem, openItems as openBacklog, formatItem, KINDS as BACKLOG_KINDS } from "./constance-backlog.mjs";
 import { buildReport, writeReport, lastReportAt } from "./constance-morning.mjs";
 import { addSample, readSamples, sessionSpent, leverage, bestReturnLesson, TARGET_PER_PCT } from "./constance-leverage.mjs";
-import { readMilk, milkPolicy, milkPrompt } from "./constance-milk.mjs";
+import { readMilk, milkPolicy, milkPrompt, milkStep, MILK_STEPS } from "./constance-milk.mjs";
 import { writeRemoteStatus } from "./constance-remote.mjs";
 import { briefFor } from "./constance-brief.mjs";
 import { progressLine, tick as progressTick } from "./constance-progress.mjs";
@@ -1812,6 +1812,16 @@ function ratioReportFor(g) {
   for (const l of saveReport(store.dir, report)) addLesson(l, store.dir);
 }
 
+// status.milk: the slider's policy plus the step it sits on (name, one-line
+// description) and the five steps themselves, so the panel can caption the
+// knob without duplicating bin/constance-milk.mjs. Additive fields only.
+function milkStatus() {
+  const v = readMilk(readSettings());
+  const step = milkStep(v);
+  return { ...milkPolicy(v), stepName: step.name, stepDescription: step.description,
+    steps: MILK_STEPS.map((s) => ({ name: s.name, value: s.value, description: s.description })) };
+}
+
 function statusPayload() {
   sweep();   // the panel's 3 s poll is what notices done files and starts self-merges
   const records = keepTokens();
@@ -1832,7 +1842,7 @@ function statusPayload() {
     model: b.id === "antigravity" ? (brainTop(d, b)?.name || "") : modelName(s.goal?.model || "opus"),
     milkLabel: milkLabel(b.id) };
   return { goal: s.goal, board, progress: { line: pline }, tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p, brain,
-    leverage: leverageView(s, tv.goal?.total ?? null), milk: milkPolicy(readMilk(readSettings())), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
+    leverage: leverageView(s, tv.goal?.total ?? null), milk: milkStatus(), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
 }
 

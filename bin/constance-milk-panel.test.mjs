@@ -1,8 +1,10 @@
 // Constance's screen header and Milk Opus slider: four big-number tiles (done,
-// copies running, her Session % used, her per-1% leverage), a 0..100 step-5
-// slider that saves constanceMilk through settings-set.mjs, and each history
-// row's leverage.label. Source-level checks on Panel.qml plus applyMilk and a
-// CLI round-trip with a mktemp fake HOME — nothing touches the real home folder.
+// copies running, her Session % used, her per-1% leverage), a 0..100 slider that
+// snaps to the five steps (0/25/50/75/100), captions the current step's name and
+// one-line description, and saves constanceMilk through settings-set.mjs; each
+// history row's leverage.label. Source-level checks on Panel.qml and
+// bin/constance.mjs's status milk object plus applyMilk and a CLI round-trip
+// with a mktemp fake HOME — nothing touches the real home folder.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,6 +20,7 @@ const env = { ...process.env, HOME: home, XDG_STATE_HOME: stateHome };
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const qml = fs.readFileSync(path.join(here, "..", "Panel.qml"), "utf8");
+const mjs = fs.readFileSync(path.join(here, "constance.mjs"), "utf8");
 
 // The four tiles: labels, values and their color rules.
 for (const label of ['label: "done"', 'label: "copies"', 'label: "session"', 'label: "per 1%"'])
@@ -38,7 +41,8 @@ assert.ok(qml.includes("font.bold: true"), "tile numbers are bold");
 // The old checklist progress line is gone (the done tile replaced it).
 assert.ok(!qml.includes("root.constanceBoard.checklist.line"), "checklist line text is hidden");
 
-// The Milk Opus slider: labels, band word, step-5 saving through settings-set.
+// The Milk Opus slider: labels, band word, five-step snapping, step caption,
+// saving through settings-set.
 assert.ok(qml.includes('text: "Milk Opus"'), "slider title exists");
 assert.ok(qml.includes('text: "less Opus"'), "less-Opus end label exists");
 assert.ok(qml.includes('text: "more quality · " + root.constanceMilkBand'), "more-quality end shows the band word");
@@ -47,7 +51,26 @@ assert.match(qml, /readonly property int constanceMilk:/, "constanceMilk propert
 assert.match(qml, /readonly property string constanceMilkBand:/, "constanceMilkBand property exists");
 assert.match(qml, /constance\.milk/, "the slider prefers status.milk when present");
 assert.ok(qml.includes('root.writeSetting(["constanceMilk", String(pending)])'), "releasing it writes constanceMilk");
-assert.ok(qml.includes("Math.round(f * 20) * 5"), "the slider steps by 5 over 0..100");
+// The knob snaps to the five steps only: quarter turns of the rail, nothing finer.
+assert.ok(qml.includes("Math.round(f * 4) * 25"), "the slider snaps to 0/25/50/75/100");
+assert.ok(!qml.includes("Math.round(f * 20) * 5"), "the old step-5 snapping is gone");
+for (const v of [0, 25, 50, 75, 100]) assert.ok(qml.includes(`value: ${v}`), `step ${v} is in the panel's step list`);
+// The caption under the slider shows the step name and its one-line description,
+// following the pending drag value while moving.
+assert.match(qml, /readonly property var constanceMilkSteps:/, "the five steps are exposed to the caption");
+assert.match(qml, /function constanceMilkStepAt\(v\)/, "a value maps to its step");
+assert.match(qml, /readonly property var constanceMilkStep:/, "the current step is tracked");
+assert.match(qml, /milkArea\.pending >= 0 \? milkArea\.pending : root\.constanceMilk/, "dragging shows the pending step");
+assert.match(qml, /readonly property string constanceMilkStepText:/, "step name + description text exists");
+assert.ok(qml.includes("text: root.constanceMilkStepText"), "the caption Text under the slider uses it");
+// status.milk carries the current step's name and description plus the steps list.
+assert.match(mjs, /function milkStatus\(\)/, "status builds milk via milkStatus()");
+assert.match(mjs, /milk: milkStatus\(\)/, "statusPayload uses milkStatus()");
+assert.ok(mjs.includes("milkStep("), "status resolves the current step");
+assert.ok(mjs.includes("MILK_STEPS"), "status lists the five steps");
+assert.ok(mjs.includes("stepName:"), "status.milk carries the step name");
+assert.ok(mjs.includes("stepDescription:"), "status.milk carries the step description");
+assert.ok(mjs.includes("steps:"), "status.milk carries the steps list");
 
 // History rows show leverage.label when the record carries it.
 assert.ok(qml.includes("modelData.leverage && modelData.leverage.label"), "history shows leverage.label");

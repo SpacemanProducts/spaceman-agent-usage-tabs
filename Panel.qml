@@ -1105,8 +1105,9 @@ Panel {
     if (p >= 2.5e6) return root.amber
     return root.red
   }
-  // The Milk Opus slider (settings.json constanceMilk, 0..100 step 5; bin/constance-milk.mjs):
-  // status.milk wins when the payload carries it, else the saved setting, else the default 25.
+  // The Milk Opus slider (settings.json constanceMilk, 0..100 snapping to the five
+  // steps 0/25/50/75/100; bin/constance-milk.mjs): status.milk wins when the payload
+  // carries it, else the saved setting, else the default 25.
   readonly property int constanceMilk: {
     var m = constance.milk
     var v = m && isFinite(Number(m.value)) ? Number(m.value)
@@ -1118,6 +1119,37 @@ Panel {
     if (b !== "") return b
     var v = root.constanceMilk
     return v <= 33 ? "milk" : (v <= 66 ? "balanced" : "quality")
+  }
+  // The five steps the knob snaps to (bin/constance-milk.mjs MILK_STEPS): the status
+  // payload's list wins when it carries one, else the same five copied here so the
+  // step caption still works before the first status arrives.
+  readonly property var constanceMilkSteps: (constance.milk && constance.milk.steps && constance.milk.steps.length)
+    ? constance.milk.steps
+    : [
+        { name: "Max delegation", value: 0, description: "free agents do nearly everything; she only plans and checks reports" },
+        { name: "Lean", value: 25, description: "she reads the reports closely and plans once up front" },
+        { name: "Balanced", value: 50, description: "she skims the diffs of risky files and re-checks the plan between waves" },
+        { name: "Thorough", value: 75, description: "she reads every diff, re-plans each wave and may edit the hard parts herself" },
+        { name: "Max Opus", value: 100, description: "she plans carefully, re-plans after each wave and reads every diff" }
+      ]
+  // The step a slider value belongs to: nearest step wins, a tie goes to the lower one.
+  function constanceMilkStepAt(v) {
+    var steps = root.constanceMilkSteps
+    if (!steps || !steps.length) return null
+    var n = Math.max(0, Math.min(100, Math.round(Number(v) || 0))), best = steps[0]
+    for (var i = 0; i < steps.length; i++) {
+      var s = steps[i]
+      if (Math.abs(Number(s.value) - n) < Math.abs(Number(best.value) - n)) best = s
+    }
+    return best
+  }
+  // The step under the knob: the pending drag value while moving, else the saved one.
+  readonly property var constanceMilkStep: root.constanceMilkStepAt(milkArea.pending >= 0 ? milkArea.pending : root.constanceMilk)
+  readonly property string constanceMilkStepText: {
+    var s = root.constanceMilkStep
+    if (!s) return ""
+    var d = s.description === undefined || s.description === null ? "" : " — " + String(s.description)
+    return String(s.name || "") + d
   }
   // The Brain picker (settings.json constanceBrain, "claude" or "antigravity"): which agent's
   // model she thinks with. status.brain reports the live pick; every field is optional, and
@@ -2849,10 +2881,11 @@ Panel {
                   cursorShape: Qt.PointingHandCursor
                   preventStealing: true
                   // Dragging only moves the knob; the setting is saved once, on release.
+                  // The knob snaps to the five steps (0/25/50/75/100).
                   property int pending: -1
                   function setFromX(x) {
                     var f = Math.max(0, Math.min(1, (x - milkRail.x) / milkRail.width))
-                    pending = Math.round(f * 20) * 5
+                    pending = Math.round(f * 4) * 25
                   }
                   onPressed: function(m) { setFromX(m.x) }
                   onPositionChanged: function(m) { if (pressed) setFromX(m.x) }
@@ -2863,6 +2896,17 @@ Panel {
                   onCanceled: pending = -1
                 }
                 PanelToolTip { visible: milkArea.containsMouse; text: root.constanceMilkLabel + " " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
+              }
+              // The step the knob sits on: name plus its one-line description. While
+              // dragging it follows milkArea.pending; otherwise the saved value.
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: root.constanceMilkStepText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
               }
               Item {
                 width: parent.width
