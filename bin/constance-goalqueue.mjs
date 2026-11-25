@@ -24,6 +24,9 @@ export function readGoalQueue(dir) {
 // O_EXCL create holding this pid, a short poll while a live holder finishes, and a
 // stale break only when the recorded pid is dead. An empty lock file gets the same
 // grace mergelock gives an ownerless dir — the pid write lands a tick after the create.
+// Both the stale break and the release move the lock aside by rename before touching
+// it: rm'ing `lock` directly after a check can delete a fresh holder's lock that was
+// created in between (the lost-update race mergelock's comments describe).
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const pidAlive = (pid) => {
   if (!(pid > 0)) return false;
@@ -52,14 +55,41 @@ function withQueueLock(dir, fn, { waitMs = 10000, pollMs = 25 } = {}) {
     } catch (e) {
       try { if (fd !== undefined) fs.closeSync(fd); } catch {}
       if (e.code !== "EEXIST") throw e;
-      if (lockStale(lock)) { try { fs.rmSync(lock, { force: true }); } catch {} continue; }
+      if (lockStale(lock)) {
+        // Take the corpse aside atomically: rename(2) moves exactly the file that was
+        // checked, so a lock created after the check can't be deleted by our rm.
+        const aside = `${lock}.gone-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        try {
+          fs.renameSync(lock, aside);
+        } catch (e2) {
+          if (e2.code !== "ENOENT") throw e2;
+          continue; // already gone: just retry the create
+        }
+        // The path may have changed hands between the stale check and the rename: a
+        // live lock moved aside by mistake goes back if `lock` is still free, and a
+        // corpse is deleted. (Same dance as constance-mergelock.mjs.)
+        if (!lockStale(aside)) {
+          if (!fs.existsSync(lock)) { try { fs.renameSync(aside, lock); } catch {} }
+        } else {
+          try { fs.rmSync(aside, { force: true }); } catch {}
+        }
+        continue;
+      }
       if (Date.now() > until) throw new Error("another queue change is still running");
       sleepSync(pollMs);
     }
   }
   try { return fn(); } finally {
+    // Release the same way: move whatever sits at `lock` aside, delete it only when it
+    // is ours, otherwise put it back — a read-then-rm could delete a new holder's lock.
     try {
-      if (Number(fs.readFileSync(lock, "utf8").trim()) === process.pid) fs.rmSync(lock, { force: true });
+      const aside = `${lock}.rel-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      fs.renameSync(lock, aside);
+      if (Number(fs.readFileSync(aside, "utf8").trim()) === process.pid) {
+        fs.rmSync(aside, { force: true });
+      } else if (!fs.existsSync(lock)) {
+        try { fs.renameSync(aside, lock); } catch {}
+      }
     } catch {}
   }
 }
