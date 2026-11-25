@@ -23,7 +23,7 @@ export function buildAccounts(list) {
       label: String(a.label || a.id),
       plan: String(a.plan || ""),
       active: !!a.active,
-      limits: (a.limits || []).filter((l) => Number(l.percent) >= 0)
+      limits: (Array.isArray(a.limits) ? a.limits : []).filter((l) => l != null && Number(l.percent) >= 0)
         .map((l) => ({ title: titleFor(l.label || l.title), percent: clamp01(Number(l.percent)), resetsAt: l.resetsAt || "" })),
     }));
   }

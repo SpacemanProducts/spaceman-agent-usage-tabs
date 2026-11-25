@@ -4,8 +4,8 @@
 // Complements accounts.test.mjs (which only checks the happy path, the
 // 2-signed-in rule and the no-email/org/home leak).
 //
-// Tests that pin down SUSPECTED BUGS are kept commented out under "// BUG:"
-// lines - this job is test-only, nothing is fixed.
+// Tests that pin down bugs live next to the behaviour they guard; a fix in
+// bin/accounts.mjs turns them from crashes into passing assertions.
 import assert from "node:assert/strict";
 import { buildAccounts } from "./accounts.mjs";
 
@@ -120,16 +120,16 @@ assert.deepEqual(buildAccounts([two(acc("a"), { ...acc("b"), signedIn: false })]
       `limits=${JSON.stringify(limits)} -> []`);
   assert.deepEqual(buildAccounts([two(acc("a", { limits: [] }), acc("b"))]).p[0].limits, []);
 }
-// BUG: a truthy non-array `limits` (string, number, plain object) reaches
-// `.filter` and throws TypeError, taking down the whole buildAccounts call -
-// and with it every provider's accounts in collect.mjs.
-// assert.throws(() => buildAccounts([two(acc("a", { limits: "abc" }), acc("b"))]), TypeError);
-// assert.throws(() => buildAccounts([two(acc("a", { limits: 5 }), acc("b"))]), TypeError);
-// assert.throws(() => buildAccounts([two(acc("a", { limits: {} }), acc("b"))]), TypeError);
-// BUG: a null/undefined entry inside `limits` throws on `l.percent` before the
-// NaN filter can drop it.
-// assert.throws(() => buildAccounts([two(acc("a", { limits: [null] }), acc("b"))]), TypeError);
-// assert.throws(() => buildAccounts([two(acc("a", { limits: [undefined] }), acc("b"))]), TypeError);
+// A truthy non-array `limits` (string, number, plain object) is treated as no
+// limits: no meter is shown that the source did not report.
+for (const limits of ["abc", 5, {}])
+  assert.deepEqual(buildAccounts([two(acc("a", { limits }), acc("b"))]).p[0].limits, [],
+    `limits=${JSON.stringify(limits)} -> []`);
+// Null/undefined entries inside `limits` are skipped like any other junk entry.
+assert.deepEqual(buildAccounts([two(acc("a", { limits: [null] }), acc("b"))]).p[0].limits, []);
+assert.deepEqual(buildAccounts([two(acc("a", { limits: [undefined] }), acc("b"))]).p[0].limits, []);
+assert.deepEqual(buildAccounts([two(acc("a", { limits: [null, lim("Session", 0.5), undefined] }), acc("b"))]).p[0].limits.map((l) => l.title), ["Session"],
+  "null entries are skipped, real meters survive");
 
 // ============================================================ titleFor via label/title
 {
