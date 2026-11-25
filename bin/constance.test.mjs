@@ -1099,6 +1099,58 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 12
   assert.equal(sf.queue.length, 0, "the queue drained itself");
 }
 
+// Self-merge never blocks: with the suite slowed by CONSTANCE_SELFMERGE_SUITE_DELAY_MS,
+// a status call while the merge runs still returns in under 2 s, `jobs` (which
+// sweeps) too, wait never hands the job out mid-merge, and it ends up merged
+// for her background review.
+fs.rmSync(path.join(root, "go"), { force: true });
+const jobsJson = path.join(tabs, "constance", "jobs.json");
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files smx.txt --task "add smx selfmerge" >> "${root}/smx.out" 2>&1
+touch "${root}/go"
+# Wait for the self-merge to start, then time status and jobs calls mid-suite.
+for i in $(seq 1 160); do
+  node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.exit(s.jobs.some(j=>j.selfMerging)?0:1)' "${jobsJson}" 2>/dev/null && break
+  sleep 0.25
+done
+node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(!s.jobs.some(j=>j.selfMerging))process.exit(3)' "${jobsJson}"
+t0=$(date +%s%N); $C status > "${root}/smx-status.json"; t1=$(date +%s%N)
+echo $(( (t1-t0)/1000000 )) > "${root}/smx-status-ms.txt"
+t0=$(date +%s%N); $C jobs > "${root}/smx-jobs.json"; t1=$(date +%s%N)
+echo $(( (t1-t0)/1000000 )) > "${root}/smx-jobs-ms.txt"
+$C wait --timeout 90 > "${root}/smx-wait.json"
+id=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/smx-wait.json")
+$C reviews > "${root}/smx-reviews.json"
+$C review "$id" accept --note "fine" >> "${root}/smx.out" 2>&1
+echo "SMX report: done."
+`, { mode: 0o755 });
+writeData();
+// The delay has to reach whichever process sweeps first (the panel-style status
+// polls included), so it goes into the shared env for this goal only.
+env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS = "8000";
+assert.equal(run("start", "--dir", repo, "--goal", "async selfmerge goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 120000), "the async selfmerge goal finishes: " + JSON.stringify(status().goal));
+delete env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS;
+{
+  const smxMs = Number(fs.readFileSync(path.join(root, "smx-status-ms.txt"), "utf8"));
+  assert.ok(smxMs > 0 && smxMs < 2000, `status during the self-merge suite returned in ${smxMs} ms`);
+  const jobsMs = Number(fs.readFileSync(path.join(root, "smx-jobs-ms.txt"), "utf8"));
+  assert.ok(jobsMs > 0 && jobsMs < 2000, `jobs during the self-merge suite returned in ${jobsMs} ms`);
+  const w = JSON.parse(fs.readFileSync(path.join(root, "smx-wait.json"), "utf8"));
+  const rev = JSON.parse(fs.readFileSync(path.join(root, "smx-reviews.json"), "utf8"));
+  const smx = status();
+  const j = smx.jobs.find((x) => x.files.includes("smx.txt") && x.goal === smx.goal.id);
+  assert.ok(j, "the async selfmerge job ran");
+  assert.equal(j.status, "accepted", "the self-merged job was reviewed: " + j.status);
+  assert.ok(!j.selfMerging && !j.selfMergePid, "selfMerging cleared afterwards");
+  assert.ok(fs.existsSync(path.join(repo, "smx.txt")), "the merge landed");
+  assert.equal(w.review.id, j.id, "wait handed her the merged job, not one mid-merge");
+  assert.equal(rev.length, 1, "reviews listed the pending self-merge: " + JSON.stringify(rev));
+  assert.equal(rev[0].job, j.id);
+  assert.ok(smx.log.some((l) => l.kind === "merge" && /self-merged constance\/job-/.test(l.text) && l.job === j.id), "self-merge is in the log");
+}
+
 // Every finished or stopped job removed its own sandbox /tmp.
 {
   const jobsNow = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "jobs.json"), "utf8")).jobs;

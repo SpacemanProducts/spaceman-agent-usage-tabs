@@ -42,7 +42,7 @@ import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, gua
 import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
 import { NotifyParser, handleNotification, recentSignals, recordSignal, jobFinishSignal, logSaysFinished } from "./constance-notify.mjs";
 import { addTask, peekNext, finishTask, removeTask, queueView, readyTasks } from "./constance-queue.mjs";
-import { selfMerge, addPending, pendingReviews, markReviewed, revertMerge } from "./constance-selfmerge.mjs";
+import { selfMerge, runSuite, addPending, pendingReviews, markReviewed, revertMerge } from "./constance-selfmerge.mjs";
 import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
 import { logText } from "./constance-logtext.mjs";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
@@ -158,7 +158,12 @@ function sweep() {
   const changed = store.update((s) => {
     const changed = [];
     for (const j of s.jobs) {
-      if (j.status !== "running") continue;
+      if (j.status !== "running") {
+        // A self-merge runs in a detached process (selfMerging); if it died
+        // mid-run the flag is stuck, so clear it and let the review take the job.
+        if (j.selfMerging && !alive(j.selfMergePid, "selfmerge")) { delete j.selfMerging; delete j.selfMergePid; }
+        continue;
+      }
       const f = jobDoneFile(j);
       let done = null, source = "";
       try { done = JSON.parse(fs.readFileSync(f, "utf8")); j.finishedAt = fs.statSync(f).mtimeMs; source = "done-file"; }
@@ -174,6 +179,8 @@ function sweep() {
     return changed;
   });
   for (const j of changed) { guardFinished(j); dropJobTmp(j); maybeSelfMerge(j); }
+  // Whoever's sweep sees the finish logs the return — status polls can beat `wait` to it.
+  for (const j of changed) store.log({ kind: "returned", job: j.id, agent: j.agent, worker: j.worker, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
   for (const { j, source } of signals) recordSignal(store.dir, jobFinishSignal(j, { source, runDir: jobDoneDir(j) }));
   fillSlots();
   return changed;
@@ -263,7 +270,8 @@ function excludeDoneFiles(dir) {
 // A flagged conflict is marked "conflict" and keeps its worktree, exactly like
 // a review-time one; anything else stays "finished" for the normal review.
 // constanceSelfMerge: false turns it all off. Best-effort only: a failure is
-// logged and the sweep moves on, never blocked.
+// logged and the sweep moves on, never blocked — the merge itself runs in a
+// detached `selfmerge` process so the suite never stalls a status call.
 const reviewsFile = () => path.join(store.dir, "reviews.json");
 const selfMergeOn = () => readSettings().constanceSelfMerge !== false;
 
@@ -289,36 +297,95 @@ function branchDiffOk(j) {
   return d.stdout.split("\n").filter(Boolean).every((p) => coversPath(allowed, p));
 }
 
+// The suite is the slow part of a self-merge, so it never runs inside sweep:
+// maybeSelfMerge only does the cheap checks, marks the job (selfMergeTried,
+// selfMerging — status stays "finished") and spawns `selfmerge ID` detached.
+// That process re-checks everything, runs the suite and merge under the merge
+// lock, logs the outcome and clears selfMerging; if it dies first, the next
+// sweep clears the flag and the normal review takes the job.
 function maybeSelfMerge(j) {
   try {
     if (!selfMergeOn() || !j.worktree || !j.branch) return;
     const fresh = store.read().jobs.find((k) => k.id === j.id);
     // guardChecked with no guardViolation is the guard's clean bill; without it
     // there is no proof the run stayed inside its list, so no self-merge.
-    if (!fresh || fresh.status !== "finished" || fresh.selfMergeTried || fresh.guardViolation?.length || !fresh.guardChecked) return;
+    if (!fresh || fresh.status !== "finished" || fresh.selfMergeTried || fresh.selfMerging || fresh.guardViolation?.length || !fresh.guardChecked) return;
     let done = null;
     try { done = JSON.parse(fs.readFileSync(jobDoneFile(fresh), "utf8")); } catch {}
     if (!ownTestsPassed(done)) return;   // normal review handles it
-    const checks = { ownTests: true, guard: true, diff: branchDiffOk(fresh) };
-    if (!checks.diff) return;
-    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.selfMergeTried = true; });
-    const m = withMergeLock(() => selfMerge({ repo: fresh.dir, worktree: fresh.worktree, branch: fresh.branch, checks }));
+    if (!branchDiffOk(fresh)) return;
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x && x.status === "finished" && !x.selfMergeTried) { x.selfMergeTried = true; x.selfMerging = true; } });
+    const marked = store.read().jobs.find((k) => k.id === j.id);
+    if (marked?.selfMerging) spawnSelfMerge(marked);
+  } catch (e) {
+    store.log({ kind: "note", job: j.id, agent: j.agent, text: `self-merge skipped for job ${j.id}: ${e.message}` });
+  }
+}
+
+const clearSelfMerging = (id) => store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { delete x.selfMerging; delete x.selfMergePid; } });
+
+// `node constance.mjs selfmerge ID`, detached with its output appended to the
+// job's own log. On a spawn failure the flag is cleared so review takes it.
+function spawnSelfMerge(j) {
+  let fd = null;
+  for (const f of [j.log, path.join(store.dir, `selfmerge-${j.id}.log`)]) {
+    if (!f) continue;
+    try { fd = fs.openSync(f, "a"); break; } catch {}
+  }
+  try {
+    const child = spawn(process.execPath, [SELF, "selfmerge", String(j.id)], { detached: true, stdio: ["ignore", fd ?? "ignore", fd ?? "ignore"], env: ENV });
+    child.unref();
+    if (fd !== null) fs.closeSync(fd);
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.selfMergePid = child.pid; });
+  } catch (e) {
+    if (fd !== null) try { fs.closeSync(fd); } catch {}
+    clearSelfMerging(j.id);
+    store.log({ kind: "note", job: j.id, agent: j.agent, text: `self-merge could not start for job ${j.id}: ${e.message}` });
+  }
+}
+
+// The detached half of a self-merge: re-check the job fresh (a review may have
+// taken it meanwhile), then the same checks/selfMerge/withMergeLock/drop/log
+// work maybeSelfMerge used to do inline — minus the part that blocked sweep.
+function runSelfMerge(id) {
+  const j = store.read().jobs.find((k) => k.id === id);
+  if (!j) return;
+  try {
+    if (j.status !== "finished" || j.selfMerging !== true || j.guardViolation?.length || !j.guardChecked || !j.worktree || !j.branch) return;
+    let done = null;
+    try { done = JSON.parse(fs.readFileSync(jobDoneFile(j), "utf8")); } catch {}
+    if (!ownTestsPassed(done) || !branchDiffOk(j)) return;
+    const checks = { ownTests: true, guard: true, diff: true };
+    // Tests can slow the suite down with CONSTANCE_SELFMERGE_SUITE_DELAY_MS;
+    // nothing sets it outside them.
+    const delay = Number(process.env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS) || 0;
+    const suite = delay ? (dir) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay); return runSuite(dir); } : runSuite;
+    // Re-check right before each merge attempt: a review that landed while the
+    // suite ran wins, and the merge must not fire on a job it already took.
+    const merge = (repo, branch) => {
+      const cur = store.read().jobs.find((k) => k.id === id);
+      if (!cur || cur.status !== "finished" || cur.selfMerging !== true) return { ok: false, output: "the job was reviewed while the suite ran" };
+      return mergeBranch(repo, branch);
+    };
+    const m = withMergeLock(() => selfMerge({ repo: j.dir, worktree: j.worktree, branch: j.branch, checks, suite, merge }));
     if (m.merged) {
       keepTokens(true);
-      const did = dropWorktree(fresh.dir, fresh.worktree, fresh.branch, { deleteBranch: true, merged: true });
-      store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "merged"; x.mergedAt = Date.now(); x.mergeCommit = m.commit || ""; x.worktree = ""; x.cleaned = did.join("; "); } });
-      addPending(reviewsFile(), { job: j.id, commit: fresh.commit, branch: fresh.branch });
-      store.log({ kind: "merge", job: j.id, agent: fresh.agent, worker: fresh.worker, text: `self-merged ${fresh.branch}${m.commit ? ` (${String(m.commit).slice(0, 9)})` : ""}; ${did.join("; ")}` });
+      const did = dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true, merged: true });
+      store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "merged"; x.mergedAt = Date.now(); x.mergeCommit = m.commit || ""; x.worktree = ""; x.cleaned = did.join("; "); } });
+      addPending(reviewsFile(), { job: j.id, commit: j.commit, branch: j.branch });
+      store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `self-merged ${j.branch}${m.commit ? ` (${String(m.commit).slice(0, 9)})` : ""}; ${did.join("; ")}` });
       return;
     }
     if (m.conflict || m.flagged) {
-      store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "conflict"; x.mergeError = m.reason || ""; } });
-      store.log({ kind: "merge", job: j.id, agent: fresh.agent, worker: fresh.worker, text: `self-merge ${m.conflict ? "conflict" : "failed"} on ${fresh.branch}: ${(m.reason || "").slice(-300)}` });
+      store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "conflict"; x.mergeError = m.reason || ""; } });
+      store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `self-merge ${m.conflict ? "conflict" : "failed"} on ${j.branch}: ${(m.reason || "").slice(-300)}` });
       return;
     }
-    store.log({ kind: "note", job: j.id, agent: fresh.agent, worker: fresh.worker, text: `self-merge didn't land ${fresh.branch}: ${m.reason || "unknown"}` });
+    store.log({ kind: "note", job: j.id, agent: j.agent, worker: j.worker, text: `self-merge didn't land ${j.branch}: ${m.reason || "unknown"}` });
   } catch (e) {
     store.log({ kind: "note", job: j.id, agent: j.agent, text: `self-merge skipped for job ${j.id}: ${e.message}` });
+  } finally {
+    clearSelfMerging(id);
   }
 }
 
@@ -627,15 +694,20 @@ function queueCmd() {
   out(q.map((t) => `${t.id}. ${t.task}${t.files.length ? `  [${t.files.join(", ")}]` : "  [read-only]"}${t.agent ? `  → ${t.agent}` : ""}`).join("\n"));
 }
 
+// What `wait` reports as still working: running jobs plus finished ones whose
+// self-merge is still running in the background.
+const busyJobs = (s) => s.jobs.filter((j) => j.status === "running" || j.selfMerging)
+  .map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, ...(j.selfMerging ? { selfMerging: true } : {}) }));
+
 async function waitJob() {
   const until = Date.now() + Math.min(560, Number(arg("--timeout", "100")) || 100) * 1000;
   for (;;) {
-    for (const j of sweep()) store.log({ kind: "returned", job: j.id, agent: j.agent, worker: j.worker, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
+    sweep();
     releaseHeld();
     const s = store.read();
     // Finished jobs and self-merged ones waiting for their background review,
-    // oldest finish first.
-    const next = [...reviewQueue(s.jobs), ...s.jobs.filter((j) => j.status === "merged")]
+    // oldest finish first. A job still self-merging is not hers to review yet.
+    const next = [...reviewQueue(s.jobs).filter((j) => !j.selfMerging), ...s.jobs.filter((j) => j.status === "merged")]
       .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0) || a.id - b.id)[0];
     if (next) {
       const files = changedFiles(next.dir, next.commit);
@@ -645,13 +717,13 @@ async function waitJob() {
       let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
       return out({ review: { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
         guardViolation: next.guardViolation || null,
-        checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null })), signals: recentSignals(store.dir, 6),
+        checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     const held = s.jobs.filter((j) => j.status === "held").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, heldReason: j.heldReason || "" }));
-    if (!s.jobs.some((j) => j.status === "running" || j.status === "waiting") && !held.length) return out({ review: null, stillRunning: [], next: "No jobs are running." });
+    if (!s.jobs.some((j) => j.status === "running" || j.status === "waiting" || j.selfMerging) && !held.length) return out({ review: null, stillRunning: [], next: "No jobs are running." });
     if (s.goal?.status === "stopped") return out({ review: null, next: "Stopped by the owner. End now." });
-    if (Date.now() > until) return out({ review: null, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null })), held,
+    if (Date.now() > until) return out({ review: null, stillRunning: busyJobs(s), held,
       next: held.length ? `Still running; ${held.length} held cop${held.length === 1 ? "y starts" : "ies start"} by itself when the machine has room. Call \`wait\` again.` : "Still running; call `wait` again." });
     await sleep(5000);
   }
@@ -719,6 +791,7 @@ function review() {
   sweep();
   const found = store.read().jobs.find((x) => x.id === id);
   if (!found) fail(`No job ${id}.`);
+  if (found.selfMerging) fail(`Job ${id} is self-merging right now; try again in a moment.`);
   if (found.status === "merged") return reviewMerged(found, verdict, note);
   if (found.status !== "finished") fail(`Job ${id} is ${found.status}; only a finished job can be reviewed.`);
   const j = store.update((s) => { const j = s.jobs.find((x) => x.id === id); if (j) { j.status = verdict === "accept" ? "accepted" : "sent back"; j.reviewNote = note; j.reviewedAt = Date.now(); } return j; });
@@ -1276,6 +1349,9 @@ function stopAll() {
     for (const j of s.jobs) if (j.status === "running" || j.status === "waiting" || j.status === "held") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; j.stoppedAt = Date.now(); }
     return JSON.parse(JSON.stringify(s));
   });
+  // A self-merge still running in the background dies with everything else;
+  // the next sweep clears its flag and the job stays finished for the record.
+  for (const j of s.jobs) if (j.selfMerging && alive(j.selfMergePid, "selfmerge")) killGroup(j.selfMergePid);
   // Keep the halted workers' token counts before their worktrees go (only when any ran).
   if (halted.size) keepTokens(true);
   for (const j of s.jobs) if (j.status === "stopped") { if (halted.has(j.id)) guardFinished(j); dropJobTmp(j); if (j.worktree) dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true }); }
@@ -1367,6 +1443,7 @@ function leverageView(s, tokens) {
 }
 
 function statusPayload() {
+  sweep();   // the panel's 3 s poll is what notices done files and starts self-merges
   const records = keepTokens();
   fillSlots();
   const s = store.read(), d = readData();
@@ -1409,6 +1486,8 @@ if (process.argv[1] === SELF) {
   // The whole log as plain text (the panel's Copy all): every entry, practice prompts in full.
   else if (cmd === "log") { const names = Object.fromEntries((readData().agents || []).map((a) => [a.id, a.name || a.id])); process.stdout.write(logText(store.readLog(Infinity), (id) => names[id] || id)); }
   else if (cmd === "watch") await watch();
+  // Internal: the detached half of a self-merge (spawned by maybeSelfMerge).
+  else if (cmd === "selfmerge") runSelfMerge(Number(process.argv[3]));
   else if (cmd === "delegate") delegate();
   else if (cmd === "wait") await waitJob();
   else if (cmd === "review") review();
@@ -1433,5 +1512,5 @@ if (process.argv[1] === SELF) {
     out("noted: the goal queue waits for the owner after this goal");
   }
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|stop|recover");
+  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|selfmerge|stop|recover");
 }
