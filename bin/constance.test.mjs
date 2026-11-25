@@ -1077,27 +1077,34 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
 // slot is free — no review needed. sf1 self-merges; sf2 and sf3 are handed to
 // Devin 2 and Devin 3 while sf1 still waits for its background review.
 fs.rmSync(path.join(root, "go"), { force: true });
+const jobsJson = path.join(tabs, "constance", "jobs.json");
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
 $C delegate --agent devin --files sf1.txt --task "add sf1 selfmerge" >> "${root}/sf.out" 2>&1
 $C queue --task "add sf2" --files sf2.txt --agent devin >> "${root}/sf.out" 2>&1
 $C queue --task "add sf3" --files sf3.txt --agent devin >> "${root}/sf.out" 2>&1
 touch "${root}/go"
-$C wait --timeout 60 > "${root}/sf-wait1.json"
+# sf1's self-merge runs in a detached process; wait for the merged state itself
+# (a fixed sleep races it under load), then snapshot while its review pends.
+for i in $(seq 1 240); do
+  node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const j=s.jobs.find(j=>j.files&&j.files.includes("sf1.txt"));process.exit(j&&j.status==="merged"?0:1)' "${jobsJson}" 2>/dev/null && break
+  sleep 0.5
+done
 $C jobs > "${root}/sf-jobs-mid.json"
+$C wait --timeout 120 > "${root}/sf-wait1.json"
 id1=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait1.json")
 $C review "$id1" accept --note "ok" >> "${root}/sf.out" 2>&1
-$C wait --timeout 60 > "${root}/sf-wait2.json"
+$C wait --timeout 120 > "${root}/sf-wait2.json"
 id2=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait2.json")
 $C review "$id2" accept --note "ok" >> "${root}/sf.out" 2>&1
-$C wait --timeout 60 > "${root}/sf-wait3.json"
+$C wait --timeout 120 > "${root}/sf-wait3.json"
 id3=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait3.json")
 $C review "$id3" accept --note "ok" >> "${root}/sf.out" 2>&1
 echo "SF report: done."
 `, { mode: 0o755 });
 writeData();
 assert.equal(run("start", "--dir", repo, "--goal", "slot fill goal").status, 0);
-assert.ok(await until(() => status().goal && status().goal.status === "done", 120000), "the slot fill goal finishes: " + JSON.stringify(status().goal));
+assert.ok(await until(() => status().goal && status().goal.status === "done", 180000), "the slot fill goal finishes: " + JSON.stringify(status().goal));
 {
   const mid = JSON.parse(fs.readFileSync(path.join(root, "sf-jobs-mid.json"), "utf8"));
   const sf1 = mid.jobs.find((j) => j.files.includes("sf1.txt"));
@@ -1117,7 +1124,6 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 12
 // sweeps) too, wait never hands the job out mid-merge, and it ends up merged
 // for her background review.
 fs.rmSync(path.join(root, "go"), { force: true });
-const jobsJson = path.join(tabs, "constance", "jobs.json");
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
 $C delegate --agent devin --files smx.txt --task "add smx selfmerge" >> "${root}/smx.out" 2>&1
@@ -1267,12 +1273,14 @@ delete env.CONSTANCE_NOTIFY_CMD;
 
 // Claude's own limit wall: the exit writes wall.json, the goal pauses, and the
 // driver resumes her once the stated reset plus the 60 s grace has passed —
-// without asking the owner and without waiting on a fresh reading.
+// without asking the owner and without waiting on a fresh reading. The stated
+// reset is minute-precision, so it must be minutes ahead: +3 min is the
+// smallest offset whose truncated minute is always more than 2 min out.
 fs.rmSync(path.join(root, "go"), { force: true });
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 echo run >> "${root}/wall-resume-runs"
 if [[ "$*" == *"--session-id"* ]]; then
-  echo "You've hit your 5-hour limit · resets $(date -u -d '+20 seconds' '+%-I:%M%p') (UTC)"
+  echo "You've hit your 5-hour limit · resets $(date -u -d '+3 minutes' '+%-I:%M%p') (UTC)"
   exit 1
 fi
 node ${CLI} check 1 --note "done after the reset" >> "${root}/wall-resume.out" 2>&1
@@ -1282,7 +1290,7 @@ exit 0
 writeData();
 assert.equal(run("start", "--dir", repo, "--goal", "wall resume goal").status, 0);
 assert.ok(await until(() => { const g = status().goal; return g && g.status === "paused" && /hit its limit/.test(g.pauseReason || ""); }, 30000), "the wall exit pauses the goal: " + JSON.stringify(status().goal));
-assert.ok(await until(() => status().goal && status().goal.status === "done", 240000), "the wall-paused goal resumes by itself: " + JSON.stringify(status().goal));
+assert.ok(await until(() => status().goal && status().goal.status === "done", 360000), "the wall-paused goal resumes by itself: " + JSON.stringify(status().goal));
 {
   assert.equal(fs.readFileSync(path.join(root, "wall-resume-runs"), "utf8").trim().split("\n").length, 2, "one wall exit, one resume — no retries into the wall");
   const wl = status().log.filter((l) => l.kind === "resumed").pop();
