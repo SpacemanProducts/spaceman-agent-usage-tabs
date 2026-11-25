@@ -182,21 +182,30 @@ const job = (over) => ({ id: 1, agent: "grok", dir: repo, status: "running", sta
   assert.match(m[1].why, /no session/);
 }
 
-/* REAL BUG (not fixed, per job rules): matchJobs crashes on a null/undefined entry in
-   the records array — `r.agent` throws before any filtering. folder-usage.json is read
-   from disk, so one corrupt record would take down `constance status`.
-   Repro:
-     matchJobs([{ id: 1, agent: "grok", dir: "/x", status: "running", startedAt: Date.now() - 60000 }], [null], Date.now())
-   throws "Cannot read properties of null (reading 'agent')".
-*/
+// A null/undefined/non-record entry in the records array is skipped, never a crash:
+// folder-usage.json is read from disk, so one corrupt record must not take down `constance status`.
+{
+  const j = job({ id: 1, worktree: wt(1), status: "running", startedAt: now - min });
+  const m = matchJobs([j], [null, undefined, "junk", 42, rec("grok", wt(1), "s", now - 30e3, 10)], now);
+  assert.equal(m[1].tokens, 10, "non-record entries are ignored");
+  const empty = matchJobs([j], [null, undefined], now);
+  assert.equal(empty[1].tokens, null);
+  assert.match(empty[1].why, /no session/);
+}
 
-/* QUESTIONABLE (not fixed): amount handling is `Number(r.amount) || 0`, so
-   - a record with NO amount field reports 0 tokens and the job shows "0 tokens"
-     (a number the source never reported — "honest data" says can't tell);
-   - a negative amount subtracts, so a job can show a negative total.
-   Repro: matchJobs over a worktree job with rec(..., undefined) -> { tokens: 0 };
-   rec(..., -500) -> { tokens: -500 }.
-*/
+// Honest data: a session with NO amount field can't be summed into a real 0, and a
+// negative amount can't produce a negative total — both are "can't tell".
+{
+  const w = (id) => job({ id, worktree: wt(id), status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  for (const [id, amount] of [[1, undefined], [2, null], [3, -500], [4, "-50"]]) {
+    const m = matchJobs([w(id)], [{ agent: "grok", folder: wt(id), session: "s", start: now - 25 * min, amount, unit: "tokens" }], now);
+    assert.equal(m[id].tokens, null, `amount=${JSON.stringify(amount)} is not a usable total`);
+    assert.match(m[id].why, /token total/);
+  }
+  // A reported 0 is a real count, and junk that coerces to NaN still counts as 0 (see above).
+  const zero = matchJobs([w(5)], [rec("grok", wt(5), "s", now - 25 * min, 0)], now);
+  assert.equal(zero[5].tokens, 0);
+}
 
 // ---------------------------------------------------------------- jobTokens / snapshots
 
@@ -253,13 +262,14 @@ assert.equal(fmtTokens(10000000000), "10B");
 assert.equal(fmtTokens(undefined), CANT_TELL);
 assert.equal(fmtTokens(-5), "-5");
 
-/* REAL BUG (not fixed): rounding at a unit boundary produces "1000K" / "1000M" /
-   "1000B" instead of rolling into the next unit (there is no T branch at all).
-     fmtTokens(999500)    -> "1000K"   (want "1M")
-     fmtTokens(999999)    -> "1000K"
-     fmtTokens(999500000) -> "1000M"   (want "1B")
-     fmtTokens(999999999999) -> "1000B" (no T formatting exists)
-*/
+// Rounding at a unit boundary rolls into the next unit (never "1000K"), and T exists.
+assert.equal(fmtTokens(999500), "1M");
+assert.equal(fmtTokens(999999), "1M");
+assert.equal(fmtTokens(999999999), "1B");
+assert.equal(fmtTokens(999999999999), "1T");
+assert.equal(fmtTokens(1e12), "1T");
+assert.equal(fmtTokens(2.5e12), "2.5T");
+assert.equal(fmtTokens(1.5e13), "15T");
 
 // ---------------------------------------------------------------- tokenMeter
 

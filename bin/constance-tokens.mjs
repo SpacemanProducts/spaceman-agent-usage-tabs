@@ -40,9 +40,12 @@ export function matchJobs(jobs, records, now = Date.now()) {
     const folder = folderOf(j);
     if (!folder) { out[j.id] = { tokens: null, why: "its worktree is gone" }; continue; }
     const start = j.startedAt - SLACK_MS, end = endOf(j, now);
-    const mine = records.filter((r) => r.agent === j.agent && r.folder === folder && Number(r.start) >= start && Number(r.start) <= end);
+    const mine = records.filter((r) => r && typeof r === "object" && r.agent === j.agent && r.folder === folder &&
+      Number(r.start) >= start && Number(r.start) <= end);
     if (mine.some((r) => r.unit !== "tokens")) { out[j.id] = { tokens: null, why: "its agent reports credits, not tokens" }; continue; }
     if (!mine.length) { out[j.id] = { tokens: null, why: "no session of its agent found in its folder yet" }; continue; }
+    // A session that reported no amount, or a negative one, means the total can't be told.
+    if (mine.some((r) => r.amount == null || Number(r.amount) < 0)) { out[j.id] = { tokens: null, why: "a session reported no usable token total" }; continue; }
     if (!j.worktree) {
       if (mine.length > 1) { out[j.id] = { tokens: null, why: "several sessions of its agent started in that folder during it" }; continue; }
       const r = mine[0];
@@ -78,10 +81,13 @@ export function snapshots(jobs, live, now = Date.now()) {
 
 export function fmtTokens(n) {
   if (n === null || n === undefined) return CANT_TELL;
-  if (n >= 1e9) return `${+(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)}B`;
-  if (n >= 1e6) return `${+(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
-  if (n >= 1e3) return `${+(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}K`;
-  return String(Math.round(n));
+  if (n < 1e3) return String(Math.round(n));
+  const units = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]];
+  let i = units.findIndex(([size]) => n >= size);
+  let [size, suffix] = units[i];
+  let v = +(n / size).toFixed(n >= size * 10 ? 0 : 1);
+  if (v >= 1000 && i > 0) { [size, suffix] = units[--i]; v = +(n / size).toFixed(n >= size * 10 ? 0 : 1); }
+  return `${v}${suffix}`;
 }
 
 const startOfDay = (now) => { const d = new Date(now); d.setHours(0, 0, 0, 0); return d.getTime(); };
