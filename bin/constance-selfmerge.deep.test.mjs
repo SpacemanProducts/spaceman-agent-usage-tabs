@@ -376,8 +376,8 @@ console.log("RESULT " + JSON.stringify(r));
 // that overlap lose each other's entries (observed: 83 of 200 adds survived
 // with 8 processes x 25 adds). Production hits this whenever two selfmerge
 // children finish close together: one merge's pending review silently
-// disappears. The strict invariant is a commented-out test below; what runs
-// here only checks the file stays well-formed JSON with unique jobs.
+// disappears. What runs here checks the file stays well-formed JSON with
+// unique jobs; the strict no-loss invariant runs below now that writers lock.
 const PENDING_CHILD = path.join(root, "pending-child.mjs");
 fs.writeFileSync(PENDING_CHILD, `import { pathToFileURL } from "node:url";
 const [mod, file, base, n] = process.argv.slice(2);
@@ -398,15 +398,17 @@ console.log("done");
   assert.equal(jobs.size, pend.length, "surviving entries are unique, none half-written");
   for (const p of pend) assert.ok(p.job >= 0 && p.commit && p.branch, "every entry is well-formed");
 }
-// BUG (left unfixed per the task): the same race loses entries. Uncomment
-// once addPending/markReviewed take a lock:
-// {
-//   const file = path.join(root, "race-reviews-strict.json");
-//   const kids = 8, per = 25;
-//   await Promise.all(Array.from({ length: kids }, (_, k) =>
-//     spawnNode(PENDING_CHILD, [SELF, file, k * per, per])));
-//   assert.equal(pendingReviews(file).length, kids * per, "no addPending may be lost");
-// }
+// addPending/markReviewed serialize on a `<file>.lock` directory (the same
+// pid-owned lock as merges), so no writer's entries are lost: all 200 adds
+// from 8 racing processes must land.
+{
+  const file = path.join(root, "race-reviews-strict.json");
+  const kids = 8, per = 25;
+  const res = await Promise.all(Array.from({ length: kids }, (_, k) =>
+    spawnNode(PENDING_CHILD, [SELF, file, k * per, per])));
+  for (const r of res) assert.equal(r.code, 0, r.err);
+  assert.equal(pendingReviews(file).length, kids * per, "no addPending may be lost");
+}
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance-selfmerge.deep: tests passed");
