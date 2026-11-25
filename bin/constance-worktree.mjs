@@ -47,13 +47,27 @@ export function createWorktree(repo, id) {
 // conflict is aborted and reported so Constance can stop and tell the owner.
 export function mergeBranch(repo, branch, { noFf = false } = {}) {
   const before = git(repo, "rev-parse", "HEAD");
+  // A merge can fail after staging its result but before MERGE_HEAD exists
+  // (e.g. update_ref loses a ref lock): the index is reset only in that case,
+  // and only when the tree was clean before the merge started, so the owner's
+  // own uncommitted changes are never reset away.
+  const cleanBefore = git(repo, "status", "--porcelain").stdout.trim() === "";
   const r = git(repo, "merge", "--no-edit", ...(noFf ? ["--no-ff"] : []), branch);
   if (r.status === 0) {
     const head = git(repo, "rev-parse", "HEAD");
-    return { ok: true, commit: head.status === 0 ? head.stdout.trim() : "", fastForward: before.status === 0 && head.status === 0 && head.stdout.trim() !== before.stdout.trim() ? false : true };
+    const tip = git(repo, "rev-parse", branch);
+    const moved = before.status === 0 && head.status === 0 && head.stdout.trim() !== before.stdout.trim();
+    // A fast-forward lands HEAD exactly on the branch tip; a merge commit never does.
+    const fastForward = moved && tip.status === 0 && head.stdout.trim() === tip.stdout.trim();
+    return { ok: true, commit: head.status === 0 ? head.stdout.trim() : "", fastForward };
   }
   const merging = git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").status === 0;
   if (merging) git(repo, "merge", "--abort");
+  else if (cleanBefore && git(repo, "status", "--porcelain").stdout.trim() !== "") {
+    git(repo, "reset", "-q");
+    git(repo, "checkout", "-q", "--", ".");
+    git(repo, "clean", "-fdq");
+  }
   return { ok: false, conflict: merging, output: `${r.stdout || ""}${r.stderr || ""}`.trim().slice(-800) };
 }
 

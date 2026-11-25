@@ -67,6 +67,7 @@ function newRepo(name) {
   const base = head(repo);
   const m = mergeBranch(repo, w.branch);
   assert.equal(m.ok, true, "a branch ahead of HEAD merges");
+  assert.equal(m.fastForward, true, "a fast-forward merge reports fastForward: true");
   assert.equal(head(repo), head(w.worktree), "a fast-forward lands exactly on the branch tip");
   assert.equal(parents(repo), 1, "a fast-forward creates no merge commit");
   assert.equal(fs.readFileSync(path.join(repo, "ff.txt"), "utf8"), "ff\n");
@@ -84,6 +85,7 @@ function newRepo(name) {
   commitFile(w.worktree, "copy.txt", "copy\n", "copy moves on");     // branch advances too
   const m = mergeBranch(repo, w.branch);
   assert.equal(m.ok, true, "diverged branches with different files merge");
+  assert.equal(m.fastForward, false, "a merge commit is not a fast-forward");
   assert.equal(parents(repo), 2, "a real merge makes a two-parent commit");
   assert.equal(fs.readFileSync(path.join(repo, "main.txt"), "utf8"), "main\n");
   assert.equal(fs.readFileSync(path.join(repo, "copy.txt"), "utf8"), "copy\n", "both sides' files are present");
@@ -98,6 +100,7 @@ function newRepo(name) {
   commitFile(w.worktree, "noff.txt", "noff\n", "copy noff");
   const m = mergeBranch(repo, w.branch, { noFf: true });
   assert.equal(m.ok, true);
+  assert.equal(m.fastForward, false, "--no-ff is never a fast-forward");
   assert.equal(parents(repo), 2, "--no-ff makes a merge commit even though a fast-forward was possible");
   clean(repo);
   dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true, merged: true });
@@ -112,6 +115,7 @@ function newRepo(name) {
   const before = head(repo);
   const m = mergeBranch(repo, w.branch);
   assert.equal(m.ok, true, "merging the same branch again is not an error");
+  assert.equal(m.fastForward, false, "an up-to-date no-op is not a fast-forward");
   assert.equal(head(repo), before, "HEAD does not move on an up-to-date merge");
   clean(repo);
   dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true, merged: true });
@@ -146,15 +150,44 @@ function newRepo(name) {
   clean(repo);
 }
 
-// SUSPECTED BUG, reported not fixed: the `fastForward` flag is named like it
-// should say whether the merge fast-forwarded, but it is computed as
-// "HEAD did not move" — so a real fast-forward (and a --no-ff merge commit)
-// both report fastForward:false, and only an up-to-date no-op reports true.
-// Nothing reads the field today (only constance.mjs/selfmerge use ok/commit/
-// conflict), so it is dead misleading data rather than a live failure.
-//
-// assert.equal(mergeBranch(ffRepo, ffBranch).fastForward, true,
-//   "a fast-forward merge should report fastForward: true");
+// ============================================================ mergeBranch: failure without MERGE_HEAD still cleans up
+// The race case from constance-selfmerge.deep.test.mjs, made deterministic: a
+// held ref lock makes `git merge` fail at update_ref AFTER the fast-forward
+// already staged the result, so there is no MERGE_HEAD to abort — but the
+// repo must still come out clean because it was clean before the merge.
+{
+  const repo = newRepo("merge-nomergehead");
+  const w = createWorktree(repo, 940);
+  commitFile(w.worktree, "locked.txt", "locked\n", "copy work");
+  const current = git(repo, "branch", "--show-current").trim();
+  const lock = path.join(repo, ".git", "refs", "heads", `${current}.lock`);
+  fs.writeFileSync(lock, "");
+  const before = head(repo);
+  const m = mergeBranch(repo, w.branch);
+  fs.rmSync(lock);
+  assert.equal(m.ok, false, "the locked ref makes the merge fail");
+  assert.equal(m.conflict, false, "no MERGE_HEAD was written, so it is not a conflict");
+  assert.equal(head(repo), before, "HEAD never moved");
+  clean(repo);   // the staged merge result must be gone: index reset, tree restored, strays cleaned
+  assert.equal(fs.existsSync(path.join(repo, "locked.txt")), false, "the staged file did not survive");
+  dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true });
+}
+
+// ============================================================ mergeBranch: a dirty repo keeps the owner's changes
+// Same failure shape, but the tree was already dirty: the cleanup must not
+// run, so pre-existing uncommitted work is never reset away.
+{
+  const repo = newRepo("merge-dirtytree");
+  const w = createWorktree(repo, 941);
+  commitFile(w.worktree, "seed.txt", "copy version\n", "copy edits seed");
+  fs.writeFileSync(path.join(repo, "seed.txt"), "owner edit\n");   // unstaged, tracked
+  const m = mergeBranch(repo, w.branch);
+  assert.equal(m.ok, false, "git refuses to merge over local changes");
+  assert.equal(m.conflict, false);
+  assert.equal(fs.readFileSync(path.join(repo, "seed.txt"), "utf8"), "owner edit\n", "pre-existing changes are never reset away");
+  assert.equal(git(repo, "status", "--porcelain"), " M seed.txt\n", "the owner's edit is still there, unstaged");
+  dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true });
+}
 
 // ============================================================ dropWorktree
 {
