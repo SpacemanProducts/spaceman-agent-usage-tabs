@@ -10,8 +10,10 @@
 // point there for spawned children. No real notification is sent: notify-send
 // is a stub on PATH that records its argv.
 //
-// Quirks are pinned with comments; suspected bugs are kept commented out
-// under "// BUG:" lines and listed in the job report (this job is test-only).
+// Quirks are pinned with comments. The three bugs this pass originally
+// found under "// BUG:" lines (corrupt state file, unreclaimed stale lock,
+// notify without title/body) are now fixed and pinned here as regression
+// tests.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -140,19 +142,21 @@ try {
     assert.equal(fs.readdirSync(path.dirname(nested)).filter((f) => f.endsWith(".tmp") || f.endsWith(".lock")).length, 0,
       "no tmp or lock files are left behind");
 
-    // Corrupt JSON is rethrown (only ENOENT is tolerated) and the lock is
-    // still released.
+    // Corrupt JSON is treated as empty state and rewritten on the next save,
+    // so a damaged state file self-heals instead of throwing forever.
     const corrupt = path.join(work, "corrupt.json");
     fs.writeFileSync(corrupt, "{ this is not json");
-    assert.throws(() => writeSurpriseState(corrupt, "record", ts), SyntaxError);
-    assert.equal(fs.readFileSync(corrupt, "utf8"), "{ this is not json", "the corrupt file is left untouched");
-    assert.equal(fs.existsSync(`${corrupt}.lock`), false, "the lock is released even on failure");
-    // BUG: a corrupt state file is never recovered — every call throws
-    // SyntaxError forever, so record/click/played are all dead until the
-    // file is deleted by hand. The collector catches it (a diag warning
-    // every cycle) but the panel's acknowledgements keep failing.
-    // Treating unparseable JSON like a missing file would self-heal.
-    // assert.doesNotThrow(() => writeSurpriseState(corrupt, "record", ts));
+    assert.deepEqual(writeSurpriseState(corrupt, "record", ts), { at: ts, clickedAt: 0, playedAt: 0 },
+      "a corrupt state file does not throw");
+    assert.deepEqual(JSON.parse(fs.readFileSync(corrupt, "utf8")), { at: ts, clickedAt: 0, playedAt: 0 },
+      "the corrupt file is rewritten by the next save");
+    assert.equal(fs.existsSync(`${corrupt}.lock`), false, "the lock is released even on a healed write");
+
+    // Even a no-op acknowledgement rewrites a corrupt file (there is no
+    // "unchanged" state to compare against).
+    fs.writeFileSync(corrupt, "not json at all");
+    assert.equal(writeSurpriseState(corrupt, "click", ts), null, "clicking with no recorded reset is still a no-op");
+    assert.equal(JSON.parse(fs.readFileSync(corrupt, "utf8")), null, "the corrupt file is replaced, not left in place");
 
     // Valid JSON of the wrong shape is treated as "no state" and overwritten.
     for (const [i, content] of ["null", '"just a string"', "42", "true", "[1,2,3]", '{"at":"bogus"}', '{"at":1.5}'].entries()) {
@@ -177,20 +181,40 @@ try {
     writeSurpriseState(noop, "click", ts);
     assert.notEqual(fs.statSync(noop).ino, ino1, "a real change goes through tmp+rename");
 
-    // A stale lock file makes the call spin out the 5 s deadline and throw
-    // EEXIST; once the lock is gone the write succeeds.
+    // A lock left by a dead process is broken and reclaimed immediately —
+    // the lock file records its holder's pid, and a dead pid means the
+    // critical section can never finish.
     const locked = path.join(work, "locked.json");
-    fs.writeFileSync(`${locked}.lock`, "held");
+    const deadPid = spawnSync(process.execPath, ["-e", ""], { stdio: "ignore" }).pid;
+    fs.writeFileSync(`${locked}.lock`, String(deadPid));
     const lockStart = Date.now();
-    assert.throws(() => writeSurpriseState(locked, "record", ts), { code: "EEXIST" });
-    assert.ok(Date.now() - lockStart >= 4500, "the lock wait honours its ~5 s deadline");
-    fs.unlinkSync(`${locked}.lock`);
     assert.deepEqual(writeSurpriseState(locked, "record", ts), { at: ts, clickedAt: 0, playedAt: 0 },
-      "the write recovers once the stale lock is removed");
-    // BUG: a .lock left by a killed process is never reclaimed — there is no
-    // staleness check, so every call burns 5 s and then throws EEXIST,
-    // forever, until someone deletes the file by hand. The collector catches
-    // it, but each surprise reset costs 5 s of collect time per cycle.
+      "a lock whose holder pid is dead is taken over");
+    assert.ok(Date.now() - lockStart < 4500, "a dead holder's lock does not burn the 5 s deadline");
+    assert.equal(fs.existsSync(`${locked}.lock`), false, "the reclaimed lock is released after the write");
+    assert.deepEqual(JSON.parse(fs.readFileSync(locked, "utf8")), { at: ts, clickedAt: 0, playedAt: 0 });
+
+    // A lock with no readable pid is stale once it is older than a short
+    // limit; a fresh one is still treated as held and waited out (the `held`
+    // case below).
+    const oldLock = path.join(work, "oldlock.json");
+    fs.writeFileSync(`${oldLock}.lock`, "held");
+    const longAgo = new Date(Date.now() - 60000);
+    fs.utimesSync(`${oldLock}.lock`, longAgo, longAgo);
+    assert.deepEqual(writeSurpriseState(oldLock, "record", ts), { at: ts, clickedAt: 0, playedAt: 0 },
+      "an old pid-less lock is taken over");
+    assert.equal(fs.existsSync(`${oldLock}.lock`), false);
+
+    // A lock held by a live pid is never broken, no matter how long it is
+    // held: the call still spins out the 5 s deadline and throws EEXIST.
+    const liveLock = path.join(work, "livelock.json");
+    fs.writeFileSync(`${liveLock}.lock`, String(process.pid));
+    const liveStart = Date.now();
+    assert.throws(() => writeSurpriseState(liveLock, "record", ts), { code: "EEXIST" });
+    assert.ok(Date.now() - liveStart >= 4500, "a live holder's lock is honoured to the deadline");
+    fs.unlinkSync(`${liveLock}.lock`);
+    assert.deepEqual(writeSurpriseState(liveLock, "record", ts), { at: ts, clickedAt: 0, playedAt: 0 },
+      "the write recovers once the live lock is removed");
 
     // A lock that is released while we wait is simply waited out.
     const held = path.join(work, "held.json");
@@ -394,17 +418,18 @@ try {
     assert.match(fs.readFileSync(cliLogFile(d), "utf8"), /notify-send|ENOENT/);
   }
   {
-    // BUG: `notify <at>` with no title/body is not rejected — spawn
-    // stringifies the undefined args to the literal text "undefined", so a
-    // real critical notification titled "undefined" is shown and the command
-    // still exits 0. Missing arguments should be a usage error.
-    // Pinned here with the stub so no real notification is ever sent:
+    // `notify <at>` without title/body is a usage error: exit 1 with a plain
+    // message and notify-send is never spawned (previously the undefined
+    // args were stringified to the literal text "undefined" and a real
+    // critical notification titled "undefined" was shown).
     const d = freshDir("cli-notify-notitle");
-    const r = runCli(d, ["notify", String(ts)], notifyEnv(d));
-    assert.equal(r.status, 0);
-    const sent = fs.readFileSync(argvFile, "utf8").split("\n");
-    sent.pop();
-    assert.deepEqual(sent.slice(-2), ["undefined", "undefined"], "missing title/body become the literal string 'undefined'");
+    fs.rmSync(argvFile, { force: true });
+    for (const args of [["notify", String(ts)], ["notify", String(ts), "only a title"]]) {
+      const r = runCli(d, args, notifyEnv(d));
+      assert.equal(r.status, 1, `notify ${args.slice(1).join(" ")} exited ${r.status}`);
+      assert.match(r.stderr, /usage: antigravity-surprise\.mjs notify <at> <title> <body>/);
+    }
+    assert.equal(fs.existsSync(argvFile), false, "notify-send was not spawned for a malformed notify");
   }
 } finally {
   fs.rmSync(work, { recursive: true, force: true });
