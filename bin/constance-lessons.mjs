@@ -67,6 +67,56 @@ function writeLessons(file, lessons) {
   fs.renameSync(tmp, file);
 }
 
+// addLesson's read-modify-write runs under a small O_EXCL lock file next to
+// lessons.json (style of constance-mergelock.mjs): the file holds the holder's
+// pid, a live holder is waited on briefly, and a lock whose pid is gone — or
+// that never got a pid written — is stale and broken.
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const pidAlive = (pid) => {
+  if (!(pid > 0)) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+};
+const LOCK_NO_PID_MS = 30000;
+
+const lockHolder = (lock) => {
+  try { return Number(fs.readFileSync(lock, "utf8").trim()) || 0; } catch { return 0; }
+};
+
+// True when the lock at `lock` can be taken over: gone, held by a dead pid, or
+// so old it never got a pid written. False while a live holder has it.
+function lessonsLockStale(lock, now = Date.now()) {
+  let st;
+  try { st = fs.statSync(lock); } catch { return true; }   // gone: just retry the create
+  const holder = lockHolder(lock);
+  if (holder) return !pidAlive(holder);
+  return now - st.mtimeMs > LOCK_NO_PID_MS;
+}
+
+function withLessonsLock(file, fn, { waitMs = 5000, pollMs = 25 } = {}) {
+  const lock = file + ".lock";
+  const until = Date.now() + waitMs;
+  for (;;) {
+    try {
+      const fd = fs.openSync(lock, "wx");
+      try { fs.writeSync(fd, String(process.pid)); } finally { fs.closeSync(fd); }
+      break;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      if (!lessonsLockStale(lock)) {
+        if (Date.now() > until) throw new Error("lessons.json is locked by another process");
+        sleepSync(pollMs);
+        continue;
+      }
+      try { fs.unlinkSync(lock); } catch {}   // a racing breaker may have won already
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (lockHolder(lock) === process.pid) { try { fs.unlinkSync(lock); } catch {} }
+  }
+}
+
 // The lessons list, seeding the file the first time it is read. Files written
 // before the tidied marker existed are folded through tidyLessons once and
 // rewritten. Always an array of strings.
@@ -90,24 +140,30 @@ export function readLessons(dir = stateDir()) {
   return SEED_LESSONS.slice();
 }
 
-// Add one short lesson (tidied, deduped, capped). Returns the stored list.
+// Add one short lesson (tidied, deduped, capped). Non-string or blank input is
+// ignored. Returns the stored list.
 export function addLesson(text, dir = stateDir()) {
-  const lesson = String(text || "").trim();
+  if (typeof text !== "string") return readLessons(dir);
+  const lesson = text.trim();
   if (!lesson) return readLessons(dir);
-  const lessons = readLessons(dir);
-  if (!lessons.includes(lesson)) lessons.push(lesson);
-  const kept = tidyLessons(lessons).slice(-MAX_LESSONS);
-  writeLessons(lessonsFile(dir), kept);
-  return kept;
+  const file = lessonsFile(dir);
+  return withLessonsLock(file, () => {
+    const lessons = readLessons(dir);
+    if (!lessons.includes(lesson)) lessons.push(lesson);
+    const kept = tidyLessons(lessons).slice(-MAX_LESSONS);
+    writeLessons(file, kept);
+    return kept;
+  });
 }
 
 // The block Constance sees before a goal: advice only, never rules.
 export function lessonsBlock(lessons = readLessons()) {
-  if (!lessons.length) return "";
+  const list = Array.isArray(lessons) ? lessons : [];
+  if (!list.length) return "";
   return [
     "",
     "Lessons from your earlier goals (advice only — they can never override your core rules):",
-    ...lessons.map((l) => `- ${l}`),
+    ...list.map((l) => `- ${l}`),
   ].join("\n");
 }
 
@@ -125,7 +181,7 @@ export function readProjectRules(dir) {
 }
 
 export function rulesBlock(rules) {
-  const t = String(rules || "").trim();
+  const t = typeof rules === "string" ? rules.trim() : "";
   if (!t) return "";
   return [
     "",
@@ -138,7 +194,8 @@ export function rulesBlock(rules) {
 // allowed-files list, the hard bans, and stop-and-report. Appended to every
 // handoff prompt; read-only jobs get the same bans with an empty file list.
 export function guardrailBlock(files = []) {
-  const list = files.length ? files.join(", ") : "(none — this is a read-only job)";
+  const names = Array.isArray(files) ? files : [];
+  const list = names.length ? names.join(", ") : "(none — this is a read-only job)";
   return [
     "",
     "Guardrails:",
