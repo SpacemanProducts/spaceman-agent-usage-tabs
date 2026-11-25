@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { judge, judgeAll, launchCommand, accountEnv, LAUNCH, DEVIN_FREE_UNTIL, FRESH_MS, RED } from "./constance-agents.mjs";
+import { judge, judgeAll, launchCommand, accountEnv, preferOrder, kiloPaidVerdict, reviewText, LAUNCH, DEVIN_FREE_UNTIL, FRESH_MS, RED } from "./constance-agents.mjs";
 
 const now = Date.UTC(2026, 10, 25, 12);
 const at = { now, generatedAt: now - 60e3 };
@@ -346,5 +346,160 @@ const ag = (id, extra = {}) => ({ id, name: id, installed: true, signedIn: true,
 // OBSERVATION (not asserted as bug): missing `signedIn`/`installed` flags are
 // treated as signed-in/installed (strict === false checks). If collectors ever
 // omit the flag for "unknown", judge() would offer the agent on no evidence.
+
+// ============================================================================
+// DEEPER EDGE COVERAGE — preferOrder, kiloPaidVerdict, reviewText, and the
+// remaining judge/accountEnv corners the blocks above don't reach.
+// ============================================================================
+
+// ---- judge: inputs that aren't plain agent records, and clock coercion.
+{
+  // Non-object records are normalized to {} -> "no headless launch known".
+  for (const bad of [undefined, 5, "grok", true, () => {}]) {
+    const v = judge(bad, at);
+    assert.equal(v.available, false);
+    assert.equal(v.reason, "no headless launch known", `judge(${String(bad)})`);
+  }
+  // An array record has no .id -> same path, no crash.
+  assert.equal(judge(["grok"], at).reason, "no headless launch known");
+  // judge's own now/generatedAt are NOT Number()-coerced (unlike judgeAll's
+  // generatedAt): numeric strings subtract fine, garbage makes age NaN -> stale.
+  assert.equal(judge(ag("grok"), { now: "100", generatedAt: "50" }).available, true, "numeric-string clocks subtract to a fresh age");
+  assert.equal(judge(ag("grok"), { now: "soon", generatedAt: "later" }).reason, "usage reading is out of date", "NaN age is stale, not fresh");
+  assert.equal(judge(ag("grok"), { now: NaN, generatedAt: NaN }).reason, "usage reading is out of date");
+  // With no opts at all both clocks default to Date.now(): age 0 -> fresh.
+  // (grok has no date gate, so this stays true whenever the suite runs.)
+  assert.equal(judge(ag("grok")).available, true, "default clocks read as brand new");
+  assert.equal(judgeAll({ generatedAt: Date.now(), agents: [ag("grok")] })[0].available, true);
+  // judge() doesn't mutate the agent record it was given.
+  const rec = ag("grok", { accounts: [{ id: "a", limits: [{ percent: 0.1 }] }] });
+  const before = JSON.stringify(rec);
+  judge(rec, at);
+  assert.equal(JSON.stringify(rec), before, "judge leaves its input untouched");
+  // percent edges pctOf accepts that the blocks above don't pin.
+  assert.equal(judge(ag("grok", { limits: [{ percent: " 0.4 " }] }), at).available, true, "whitespace-padded numeric string counts");
+  assert.equal(judge(ag("grok", { limits: [{ percent: "1e2" }] }), at).reason, "at 10000% of a limit", "exponent string coerces to a huge percent");
+  assert.equal(judge(ag("grok", { limits: [{ percent: [] }] }), at).reason, "reports no limits", "array percent is not a reading");
+  assert.equal(judge(ag("grok", { limits: [{ percent: {} }] }), at).reason, "reports no limits", "object percent is not a reading");
+  assert.equal(judge(ag("grok", { limits: [{ percent: Infinity }] }), at).reason, "reports no limits", "Infinity is not finite");
+  // A negative percent is finite, so it counts as a (weird) reading under the line.
+  const neg = judge(ag("grok", { limits: [{ percent: -0.5 }] }), at);
+  assert.equal(neg.available, true); assert.equal(neg.worst, -0.5);
+  // A string agent id that isn't in LAUNCH still gets the launch reason.
+  assert.equal(judge(ag(" Devin "), at).reason, "no headless launch known", "ids match exactly, whitespace included");
+  // sandbox returning a non-string truthy is stringified into the reason.
+  assert.equal(judge(ag("grok"), { ...at, sandbox: () => true }).reason, "can't run sandboxed: true");
+}
+
+// ---- judgeAll: agent entries of the wrong type, and per-call clock isolation.
+{
+  const r = judgeAll({ generatedAt: now - 60e3, agents: ["grok", 5, null, ag("grok")] }, now);
+  assert.equal(r.length, 1, "only object records are judged");
+  assert.equal(r[0].available, true);
+  // Two calls with different clocks don't share state.
+  const fresh = judgeAll({ generatedAt: now - 60e3, agents: [ag("grok")] }, now);
+  const stale = judgeAll({ generatedAt: now - 60e3, agents: [ag("grok")] }, now + 20 * 60e3);
+  assert.equal(fresh[0].available, true);
+  assert.equal(stale[0].reason, "usage reading is out of date", "each call judges against its own `now`");
+  // generatedAt variants judgeAll coerces via Number().
+  assert.equal(judgeAll({ generatedAt: true, agents: [ag("grok")] }, now)[0].reason, "usage reading is out of date", "generatedAt true -> 1 -> ancient");
+  assert.equal(judgeAll({ generatedAt: -60e3, agents: [ag("grok")] }, now)[0].reason, "usage reading is out of date", "negative generatedAt -> future relative? no: age huge -> stale");
+}
+
+// ---- preferOrder: contract subtleties not pinned above.
+{
+  assert.deepEqual(preferOrder(), []);
+  assert.deepEqual(preferOrder({}), []);
+  assert.deepEqual(preferOrder("devin"), [], "a bare string isn't a row list");
+  // `available !== false` is the openness test: 0/null/undefined all count as open.
+  assert.deepEqual(preferOrder([{ id: "devin", available: 0 }, { id: "grok" }]).map((r) => r.id), ["devin", "grok"], "available: 0 still ranks devin first");
+  assert.deepEqual(preferOrder([{ id: "devin", available: null }, { id: "grok" }]).map((r) => r.id), ["devin", "grok"], "available: null counts as open too");
+  // An unavailable devin drops to rank 2; an available kilo still leads.
+  assert.deepEqual(preferOrder([{ id: "devin", available: false }, { id: "kilo" }, { id: "grok" }]).map((r) => r.id), ["kilo", "devin", "grok"]);
+  // Case-sensitive ids: "Devin" is not devin.
+  assert.deepEqual(preferOrder(["Devin", "kilo", "grok"]).map(String), ["kilo", "Devin", "grok"], "capital-D Devin isn't the pinned agent but stable order keeps it before grok");
+  // Junk rows don't crash and sort to rank 2 in input order.
+  assert.deepEqual(preferOrder([5, null, { id: "devin" }, "x"]).map((r) => (typeof r === "object" && r ? r.id : r)), ["devin", 5, null, "x"]);
+  // Stability among equal ranks: devin jumps first, the two kilOS keep input order.
+  assert.deepEqual(preferOrder([{ id: "kilo", tag: 1 }, { id: "devin" }, { id: "kilo", tag: 2 }]).map((r) => r.tag ?? r.id), ["devin", 1, 2]);
+}
+
+// ---- kiloPaidVerdict: input shapes and costCheck edges reached through it.
+{
+  for (const bad of [null, undefined, 0, {}, [], "no json"]) {
+    assert.equal(kiloPaidVerdict(bad), null, `kiloPaidVerdict(${JSON.stringify(bad) ?? typeof bad})`);
+  }
+  // A JSON array line is scanned event by event.
+  assert.equal(kiloPaidVerdict('[{"cost":0.5}]\n').fail, true, "array-wrapped events are checked");
+  // Free model id with a positive cost still fails on the cost.
+  const c = kiloPaidVerdict('{"type":"step_finish","part":{"providerID":"kilo","modelID":"kilo-auto/free","cost":0.01}}\n');
+  assert.equal(c.fail, true); assert.match(c.note, /cost 0\.01 reported/);
+  // Negative and string costs are not `typeof number` positives: ignored.
+  assert.equal(kiloPaidVerdict('{"cost":-1}\n'), null);
+  assert.equal(kiloPaidVerdict('{"cost":"0.5"}\n'), null, "string costs are not checked (kilo-free.mjs contract)");
+  // A cost buried deeper than records()' depth cap is invisible.
+  let deep = { cost: 0.5 };
+  for (let i = 0; i < 12; i++) deep = { wrap: deep };
+  assert.equal(kiloPaidVerdict(JSON.stringify(deep) + "\n"), null, "records() stops at depth 8");
+  // BUG (in bin/kilo-free.mjs costCheck, surfaced via kiloPaidVerdict): the
+  // comment promises tolerance of "a single pretty-printed doc", but output is
+  // split on "\n" first and each line parsed alone, so a pretty-printed event
+  // never parses and its cost/model is silently missed:
+  //   assert.equal(kiloPaidVerdict('{\n  "cost": 0.5\n}\n').fail, true);
+  // Real `kilo run --format json` emits one event per line, so this only bites
+  // if the stream format ever changes — noted, not fixed here.
+}
+
+// ---- reviewText: passthrough contract for non-freebuff agents.
+{
+  const dirty = "line one\nSponsored: an ad\nline three";
+  assert.equal(reviewText("freebuff", dirty), "line one\nline three", "freebuff text is ad-stripped");
+  assert.equal(reviewText("Freebuff", dirty), dirty, "agent match is exact-case: 'Freebuff' passes through");
+  assert.equal(reviewText(" freebuff", dirty), dirty);
+  assert.strictEqual(reviewText("grok", dirty), dirty, "other agents get the identical string back");
+  assert.strictEqual(reviewText("kilo", null), null, "non-freebuff null passes through as null");
+  assert.equal(reviewText("freebuff", null), "", "freebuff null becomes empty string via stripAds");
+  assert.equal(reviewText("freebuff", 42), "42", "non-string freebuff text is String()-coerced");
+  assert.equal(reviewText("freebuff", "Sponsored: only an ad"), "", "an all-ad report strips to empty");
+}
+
+// ---- accountEnv: claude/codex homes, falsy login, no caching, HOME unset.
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acctenv-deep2-"));
+  const xdg = path.join(dir, "xdg");
+  const regDir = path.join(xdg, "omarchy", "agents", "accounts");
+  fs.mkdirSync(regDir, { recursive: true });
+  const env = { HOME: "/h", XDG_STATE_HOME: xdg };
+
+  // claude pins CLAUDE_CONFIG_DIR and detects its own seated .claude home.
+  fs.writeFileSync(path.join(regDir, "claude.json"), JSON.stringify({ accounts: [
+    { id: "main", home: "/h/.claude" }, { id: "alt", home: "/state/claude/alt" }] }));
+  assert.deepEqual(accountEnv("claude", "alt", env), { CLAUDE_CONFIG_DIR: "/state/claude/alt" });
+  assert.deepEqual(accountEnv("claude", "main", env), {}, "seated .claude needs no pin");
+
+  // codex pins CODEX_HOME against .codex.
+  fs.writeFileSync(path.join(regDir, "codex.json"), JSON.stringify({ accounts: [{ id: "c", home: "/h/.codex" }] }));
+  assert.deepEqual(accountEnv("codex", "c", env), {}, "seated .codex needs no pin");
+  fs.writeFileSync(path.join(regDir, "codex.json"), JSON.stringify({ accounts: [{ id: "c", home: "/cx" }] }));
+  assert.deepEqual(accountEnv("codex", "c", env), { CODEX_HOME: "/cx" });
+
+  // An account with neither login nor home pins nothing; login:"" falls back to home.
+  const gf = path.join(regDir, "grok.json");
+  fs.writeFileSync(gf, JSON.stringify({ accounts: [{ id: "w" }, { id: "v", login: "", home: "/vh" }] }));
+  assert.deepEqual(accountEnv("grok", "w", env), {}, "account entry with no paths -> {}");
+  assert.deepEqual(accountEnv("grok", "v", env), { GROK_HOME: "/vh" }, "empty login falls through to home");
+  // An account whose home IS $HOME is not the seated agent home -> it pins.
+  fs.writeFileSync(gf, JSON.stringify({ accounts: [{ id: "w", home: "/h" }] }));
+  assert.deepEqual(accountEnv("grok", "w", env), { GROK_HOME: "/h" }, "home-as-account-home still pins (seated is home/.grok)");
+  // HOME unset: ~ expands via os.homedir() while XDG still finds the registry.
+  fs.writeFileSync(gf, JSON.stringify({ accounts: [{ id: "w", home: "~/alt" }] }));
+  assert.deepEqual(accountEnv("grok", "w", { XDG_STATE_HOME: xdg }), { GROK_HOME: path.join(os.homedir(), "alt") });
+  // No caching: rewriting the registry is seen by the very next call.
+  fs.writeFileSync(gf, JSON.stringify({ accounts: [{ id: "w", home: "/first" }] }));
+  assert.deepEqual(accountEnv("grok", "w", env), { GROK_HOME: "/first" });
+  fs.writeFileSync(gf, JSON.stringify({ accounts: [{ id: "w", home: "/second" }] }));
+  assert.deepEqual(accountEnv("grok", "w", env), { GROK_HOME: "/second" }, "registry re-read on every call");
+  fs.rmSync(dir, { recursive: true, force: true });
+}
 
 console.log("constance-agents.deep: tests passed");
