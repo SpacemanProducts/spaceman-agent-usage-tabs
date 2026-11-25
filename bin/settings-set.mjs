@@ -4,6 +4,7 @@
 // Usage: settings-set.mjs <key> <true|false>   |   settings-set.mjs hidden <agentId> <true|false>
 //        |   settings-set.mjs volume <0-100>   |   settings-set.mjs order <id,id,...|reset>
 //        |   settings-set.mjs maxCopies <1-10>   |   settings-set.mjs constanceMilk <0-100>
+//        |   settings-set.mjs constanceBrain <claude|antigravity>   (alias: brain)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -38,6 +39,14 @@ export function applyMilk(current, value) {
   if (!/^-?\d{1,3}$/.test(String(value)) || !Number.isInteger(n)) throw new Error(`constanceMilk must be an integer 0-100: ${value}`);
   const base = current && typeof current === "object" && !Array.isArray(current) ? current : {};
   return { ...base, constanceMilk: Math.min(100, Math.max(0, n)) };
+}
+
+// Constance's brain backend: only "claude" or "antigravity", trimmed and lower-cased.
+export function applyBrain(base, value) {
+  const chosen = String(value).trim().toLowerCase();
+  if (chosen !== "claude" && chosen !== "antigravity") throw new Error(`constanceBrain must be claude or antigravity: ${value}`);
+  const current = base && typeof base === "object" && !Array.isArray(base) ? base : {};
+  return { ...current, constanceBrain: chosen };
 }
 
 // A tab the user hides stays hidden (by agent id) until they unhide it, even
@@ -80,6 +89,7 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
       : process.argv[2] === "volume" ? applyVolume(current, process.argv[3])
       : process.argv[2] === "maxCopies" ? applyMaxCopies(current, process.argv[3])
       : process.argv[2] === "constanceMilk" || process.argv[2] === "milk" ? applyMilk(current, process.argv[3])
+      : process.argv[2] === "constanceBrain" || process.argv[2] === "brain" ? applyBrain(current, process.argv[3])
       : applySetting(current, process.argv[2], process.argv[3]);
     fs.mkdirSync(dir, { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;

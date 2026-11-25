@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs"; import os from "node:os"; import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { applySetting, applyHidden, applyVolume, applyOrder, applyMaxCopies, DEFAULT_ORDER } from "./settings-set.mjs";
+import { applySetting, applyHidden, applyVolume, applyOrder, applyMaxCopies, applyBrain, DEFAULT_ORDER } from "./settings-set.mjs";
 
 assert.deepEqual(applySetting({}, "hideUninstalledAgents", "false"), { hideUninstalledAgents: false });
 assert.deepEqual(applySetting({ showUnusedModels: true }, "hideUninstalledAgents", "true"), { showUnusedModels: true, hideUninstalledAgents: true }, "other keys kept");
@@ -44,6 +44,9 @@ assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).hiddenAgents, ["amp"]
 assert.equal(run("hidden", "amp", "false").status, 0);
 assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).hiddenAgents, []);
 assert.equal(run("volume", "35").status, 0); assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).resetVolume, 35);
+assert.equal(run("constanceBrain", "antigravity").status, 0);
+assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).constanceBrain, "antigravity");
+assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).resetVolume, 35);
 assert.notEqual(run("volume", "999").status, 0);
 assert.notEqual(run("bogus", "true").status, 0);
 assert.notEqual(run("hidden", "ghost", "true").status, 0);
@@ -65,3 +68,11 @@ assert.equal(DEFAULT_ORDER.indexOf("claude"), 0); assert.ok(DEFAULT_ORDER.indexO
 console.log("settings-set: catalog ids ok");
 assert.deepEqual(applySetting({}, "angryRobot", "false"), { angryRobot: false }, "angry robot switch");
 assert.deepEqual(applySetting({}, "constancePractice", "false"), { constancePractice: false }, "Constance practice switch");
+
+// Constance's brain backend: claude or antigravity only.
+assert.deepEqual(applyBrain({}, "claude"), { constanceBrain: "claude" });
+assert.deepEqual(applyBrain({ resetSound: true }, "antigravity"), { resetSound: true, constanceBrain: "antigravity" }, "other keys kept");
+assert.deepEqual(applyBrain({}, "  CLAUDE "), { constanceBrain: "claude" }, "trim and lower-case");
+assert.deepEqual(applyBrain({}, " Antigravity"), { constanceBrain: "antigravity" }, "trim and mixed case");
+assert.throws(() => applyBrain({}, "grok"), /constanceBrain must be claude or antigravity: grok/);
+console.log("settings-set: brain tests passed");
