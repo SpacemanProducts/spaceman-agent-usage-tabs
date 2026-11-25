@@ -74,6 +74,21 @@ assert.equal(costCheck(nested).paid, true);
 // Junk lines and empty output are ignored.
 assert.equal(costCheck(""), null);
 assert.equal(costCheck("not json\n{broken\n  \n"), null);
+
+// Pretty-printed multi-line JSON docs are scanned too (comment contract).
+const prettyPaid = '{\n  "type": "step_finish",\n  "part": {\n    "modelID": "free",\n    "providerID": "kilo-auto",\n    "cost": 0.5\n  }\n}\n';
+assert.deepEqual(costCheck(prettyPaid), { paid: true, reason: "cost 0.5 reported" },
+  "pretty-printed doc with cost > 0 is caught");
+const prettyModel = '{\n  "part": {\n    "providerID": "anthropic",\n    "modelID": "claude-sonnet-4.6",\n    "cost": 0\n  }\n}\n';
+assert.equal(costCheck(prettyModel).paid, true, "pretty-printed doc with non-free model is caught");
+const prettyClean = '{\n  "part": {\n    "providerID": "kilo-auto",\n    "modelID": "free",\n    "cost": 0\n  }\n}\n';
+assert.equal(costCheck(prettyClean), null, "pretty-printed clean doc passes");
+// A pretty doc mixed with one-event-per-line output.
+assert.equal(costCheck(JSON.stringify({ type: "x", cost: 0 }) + "\n" + prettyPaid).paid, true,
+  "mixed line and pretty docs are both scanned");
+// A malformed open doc doesn't swallow the next well-formed event.
+assert.equal(costCheck('{broken\n{"cost":0.5}\n').paid, true,
+  "malformed fragment followed by a real event still flags the event");
 assert.equal(costCheck(JSON.stringify({ type: "step_finish", part: { cost: 0, tokens: {} } })), null,
   "cost 0 without a model is fine");
 
