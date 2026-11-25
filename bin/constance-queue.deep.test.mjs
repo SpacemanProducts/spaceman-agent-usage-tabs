@@ -7,14 +7,12 @@
 //     shape, handed tasks surviving removeTask's project-key cleanup.
 //   - corrupt or missing queue.json: garbage bytes, wrong-typed fields,
 //     a queue.json that is a directory.
-//   - concurrent-ish writes: several processes adding at once must never
-//     leave a torn queue.json or a stray .tmp file (rename is atomic, but
-//     read-modify-write has no lock, so a lost update is possible — see the
-//     commented-out test at the bottom).
+//   - concurrent writes: several processes adding at once must never lose an
+//     update (addTask/removeTask serialize on a lock file) or leave a torn
+//     queue.json or a stray .tmp file.
 //
 // Everything runs against mkdtemp dirs; no HOME, network or agent CLI is
-// touched. Tests that pin down SUSPECTED BUGS assert the current (buggy)
-// behaviour and say so; they are reported, not fixed (this job is test-only).
+// touched.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -167,10 +165,8 @@ const ids = (list) => list.map((t) => t.id);
 // ============================================================ concurrent-ish writes
 {
   // Four processes each add five tasks to the same project at once. The
-  // atomic rename means queue.json is never torn and no .tmp file survives,
-  // but read-modify-write is unlocked: two writers that both read before
-  // either writes lose one update (last rename wins). We only assert file
-  // integrity here; the lost-update case is the commented-out test below.
+  // queue.json lock serializes the read-modify-write, so all 20 updates
+  // must land; rename keeps the file itself atomic and no .tmp survives.
   const dir = tmp(), p = proj("race");
   const child = `
     import { addTask } from ${JSON.stringify(new URL("./constance-queue.mjs", import.meta.url).href)};
@@ -186,32 +182,49 @@ const ids = (list) => list.map((t) => t.id);
 
   const raw = JSON.parse(fs.readFileSync(queueFile(dir), "utf8"));
   const stored = raw.projects[p] || [];
-  assert.ok(stored.length >= 1 && stored.length <= 20, `stored ${stored.length} tasks (some updates may be lost)`);
+  assert.equal(stored.length, 20, `all 20 racing adds survived, got ${stored.length}`);
   const storedIds = new Set(stored.map((t) => t.id));
   assert.equal(storedIds.size, stored.length, "no duplicate ids in the surviving file");
   assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith(".tmp")), [], "no stray tmp files");
 }
 
-// ============================================================ suspected bugs (reported, not fixed)
-//
-// BUG: a queue.json that parses but stores a non-array under projects[dir]
-// (hand edit, older version, partial write by another tool) crashes every
-// queue function — pendingTasks/readyTasks call .filter on a string,
-// addTask calls .push. readAll only guards `projects` being an object, not
-// each project's value being a list.
-//
-//   const dir = tmp(), p = proj("typed");
-//   fs.writeFileSync(queueFile(dir), JSON.stringify({ next: 1, projects: { [p]: "oops" } }));
-//   assert.deepEqual(pendingTasks(p, dir), []);        // currently throws
-//   assert.deepEqual(readyTasks(p, {}, dir), []);      // currently throws
-//   addTask(p, { task: "x" }, dir);                    // currently throws
-//
-// BUG (possible, timing-dependent): concurrent addTask calls from separate
-// processes can lose updates — each does read-modify-write with no lock and
-// rename only makes the final file atomic, not the merge. Not asserted above
-// because it is nondeterministic; observed when 4x5 racing adds stored fewer
-// than 20 tasks. If Constance ever runs queue writes from parallel workers,
-// queue.json needs the same lock jobs.json uses (openStore in
-// constance-jobs.mjs).
+// ============================================================ formerly-suspected bugs (fixed)
+{
+  // A queue.json that parses but stores a non-array under projects[dir]
+  // (hand edit, older version, partial write by another tool) must read as
+  // an empty list, not crash every queue function.
+  const dir = tmp(), p = proj("typed");
+  fs.writeFileSync(queueFile(dir), JSON.stringify({ next: 1, projects: { [p]: "oops" } }));
+  assert.deepEqual(pendingTasks(p, dir), [], "non-array project reads as empty");
+  assert.deepEqual(readyTasks(p, {}, dir), [], "readyTasks survives it too");
+  assert.equal(peekNext(p, dir), null);
+  assert.equal(removeTask(p, 1, dir), false, "removeTask on a non-array is a no-op");
+  const t = addTask(p, { task: "x" }, dir);
+  assert.equal(t.task, "x", "addTask replaces the non-array with a real list");
+  assert.deepEqual(pendingTasks(p, dir).map((x) => x.id), [t.id]);
+}
+{
+  // Concurrent addTask calls from separate processes must not lose updates:
+  // the lock file serializes read-modify-write. Four writers x five tasks
+  // must all land with unique ids.
+  const dir = tmp(), p = proj("race-strict");
+  const child = `
+    import { addTask } from ${JSON.stringify(new URL("./constance-queue.mjs", import.meta.url).href)};
+    for (let i = 0; i < 5; i++) addTask(${JSON.stringify(p)}, { task: "strict " + process.pid + " " + i }, ${JSON.stringify(dir)});
+  `;
+  const kids = Array.from({ length: 4 }, () =>
+    new Promise((res, rej) => {
+      const c = spawn(process.execPath, ["--input-type=module", "-e", child], { stdio: "ignore" });
+      c.on("exit", (code) => (code === 0 ? res() : rej(new Error(`child exited ${code}`))));
+      c.on("error", rej);
+    }));
+  await Promise.all(kids);
+
+  const raw = JSON.parse(fs.readFileSync(queueFile(dir), "utf8"));
+  const stored = raw.projects[p] || [];
+  assert.equal(stored.length, 20, `no lost updates: expected 20 tasks, got ${stored.length}`);
+  assert.equal(new Set(stored.map((t) => t.id)).size, 20, "every racing add got a unique id");
+  assert.deepEqual(fs.readdirSync(dir).filter((f) => f.includes(".lock")), [], "no stray lock file");
+}
 
 console.log("constance-queue.deep: tests passed");
