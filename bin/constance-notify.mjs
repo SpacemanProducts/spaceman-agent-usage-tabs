@@ -26,6 +26,12 @@ export const KNOWN = [
 KNOWN.find((k) => k.id === "cursor")?.names.push("cursor agent", "cursor-agent");
 KNOWN.find((k) => k.id === "antigravity")?.names.push("antigravity", "agy");
 KNOWN.find((k) => k.id === "codex")?.names.push("codex cli");
+// Freeze the table before anyone can get a live handle on it: agentInText and
+// agentApp hand out these entries, and `names` doubles as the privacy
+// allowlist for allowedSender — a caller mutating it would widen which
+// senders are heard while the precompiled NAME_RES regexes stay frozen.
+for (const k of KNOWN) { Object.freeze(k.names); Object.freeze(k); }
+Object.freeze(KNOWN);
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const NAME_RES = KNOWN.map((k) => ({ k, re: new RegExp(`\\b(?:${k.names.map(esc).join("|")})\\b`, "i") }));
