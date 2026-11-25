@@ -29,7 +29,17 @@ import { withLock, staleReason, STALE_NO_OWNER_MS } from "./constance-mergelock.
 const MOD = new URL("./constance-mergelock.mjs", import.meta.url).pathname;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-lock-deep-"));
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "constance-lock-home-"));
-const childEnv = { ...process.env, HOME: fakeHome };
+const xdgState = path.join(fakeHome, "xdg-state");
+const xdgConfig = path.join(fakeHome, "xdg-config");
+const xdgCache = path.join(fakeHome, "xdg-cache");
+for (const d of [xdgState, xdgConfig, xdgCache]) fs.mkdirSync(d, { recursive: true });
+const childEnv = {
+  ...process.env,
+  HOME: fakeHome,
+  XDG_STATE_HOME: xdgState,
+  XDG_CONFIG_HOME: xdgConfig,
+  XDG_CACHE_HOME: xdgCache,
+};
 const hourAgo = new Date(Date.now() - 3600000);
 
 // Every lock path this file creates, so the final sweep can prove none is
@@ -349,9 +359,182 @@ withLock(${JSON.stringify(lock)}, () => {
 // stale lock is renamed aside atomically and re-verified before deletion, so
 // two contenders can never both hold `lock`.
 
+// ============================================================ more staleReason edges
+{
+  // A non-path `lock` argument makes statSync throw a TypeError, which the
+  // catch-all turns into "" — same as a missing path, never a throw.
+  assert.equal(staleReason(undefined), "");
+  assert.equal(staleReason(12345), "");
+}
+{
+  // Owner "0" (and anything coercing to 0) reads as NO owner: the falsy pid
+  // falls through to the no-owner age rule, so a fresh lock is held only
+  // because it is fresh, and an old one is stale with "no holder recorded".
+  const fresh = L("owner-zero-fresh");
+  fs.mkdirSync(fresh);
+  fs.writeFileSync(path.join(fresh, "owner"), "0");
+  assert.equal(staleReason(fresh), "", "owner 0 is treated as no owner recorded");
+  const old = fakeLock("owner-zero-old", { owner: "0" });
+  assert.equal(staleReason(old), "no holder recorded");
+  fs.rmSync(old, { recursive: true, force: true });
+  locks.splice(locks.indexOf(old), 1);
+}
+{
+  // Exotic-but-numeric owner contents, all naming a dead pid. "Infinity"
+  // is truthy so it counts as a recorded holder even though no such pid
+  // can exist; "<dead>e0" and "<dead>.5" parse to non-integer pids that
+  // kill() can never report alive. Whichever way kill() rejects them, the
+  // lock reads stale at once.
+  const d = deadPid();
+  for (const [i, content] of ["Infinity", `${d}e0`, `${d}.5`, `  ${d}  `].entries()) {
+    const lock = fakeLock(`exotic-owner-${i}`, { owner: content });
+    assert.match(staleReason(lock), /is gone/, `owner ${JSON.stringify(content)} is a dead holder`);
+    fs.rmSync(lock, { recursive: true, force: true });
+    locks.splice(locks.indexOf(lock), 1);
+  }
+}
+{
+  // Clock edge: the no-owner staleness check is a strict `>`, so a lock is
+  // held AT exactly STALE_NO_OWNER_MS and stale one ms past it.
+  const lock = L("mtime-edge");
+  fs.mkdirSync(lock);
+  // Pin the mtime to a whole-millisecond date so the injected `now` math is
+  // exact: mtimeMs reads back as an integer and `now - mtime` lands exactly
+  // on STALE_NO_OWNER_MS, never a hair above it.
+  const pin = new Date(1700000000000);
+  fs.utimesSync(lock, pin, pin);
+  const mt = fs.statSync(lock).mtimeMs;
+  assert.ok(Number.isInteger(mt), `pinned mtime is integral, got ${mt}`);
+  assert.equal(staleReason(lock, { now: mt + STALE_NO_OWNER_MS }), "",
+    "exactly at the boundary the lock is still held");
+  assert.equal(staleReason(lock, { now: mt + STALE_NO_OWNER_MS + 1 }), "no holder recorded",
+    "one ms past the boundary it is stale");
+  // The `alive` hook is only consulted when an owner pid was recorded: an
+  // ownerless lock ignores it entirely, even one that would throw.
+  const old = fakeLock("alive-ignored", { ageMs: STALE_NO_OWNER_MS + 1000 });
+  assert.equal(staleReason(old, { alive: () => { throw new Error("must not be called"); } }),
+    "no holder recorded");
+  fs.rmSync(old, { recursive: true, force: true });
+  locks.splice(locks.indexOf(old), 1);
+}
+{
+  // A dangling symlink at the lock path: statSync follows it, gets ENOENT,
+  // and staleReason reports "" forever — the lock reads as held no matter
+  // how old the link is, so withLock can only ever time out. Bounded by
+  // waitMs, and the symlink itself is never deleted.
+  const target = path.join(root, "symlink-target-missing");
+  const link = L("dangling-link");
+  fs.symlinkSync(target, link);
+  assert.equal(staleReason(link), "", "a dangling symlink always reads as held");
+  assert.throws(() => withLock(link, () => 1, { waitMs: 80, pollMs: 10 }), /still running/);
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), "the symlink is left alone");
+}
+
+// ============================================================ more withLock edges
+{
+  // waitMs only bounds the WAIT for a held lock: a negative waitMs still
+  // acquires a free lock (the deadline is never consulted), but on a held
+  // lock it gives up on the first poll.
+  const free = L("neg-wait-free");
+  assert.equal(withLock(free, () => "acquired", { waitMs: -1000 }), "acquired");
+  assert.equal(fs.existsSync(free), false);
+  const held = L("neg-wait-held");
+  fs.mkdirSync(held);
+  assert.throws(() => withLock(held, () => 1, { waitMs: -1, pollMs: 10 }), /still running/);
+  fs.rmSync(held, { recursive: true, force: true });
+  locks.splice(locks.indexOf(held), 1);
+}
+{
+  // pollMs: 0 turns the wait into a busy spin — Atomics.wait times out
+  // immediately — but the deadline is still honored and fn never runs.
+  const lock = L("poll-zero");
+  fs.mkdirSync(lock);
+  const t0 = Date.now();
+  assert.throws(() => withLock(lock, () => 1, { waitMs: 100, pollMs: 0 }), /still running/);
+  assert.ok(Date.now() - t0 >= 80, "the deadline still applied under a zero poll");
+  fs.rmSync(lock, { recursive: true, force: true });
+  locks.splice(locks.indexOf(lock), 1);
+}
+{
+  // The promise check reads `out.then`: an object whose `then` getter throws
+  // propagates that error (not the "returned a promise" one) and still
+  // releases the lock. A non-function `then` is not a thenable, so the
+  // value is returned untouched.
+  const lock = L("thenable-getter");
+  assert.throws(() => withLock(lock, () => ({ get then() { throw new Error("then getter blew up"); } })),
+    /then getter blew up/);
+  assert.equal(fs.existsSync(lock), false, "released even when reading .then threw");
+  const plain = { then: "not a function" };
+  const lock2 = L("non-thenable");
+  assert.equal(withLock(lock2, () => plain), plain, "a non-callable then is just data");
+  assert.equal(fs.existsSync(lock2), false);
+}
+{
+  // A path whose PARENT is a regular file fails with ENOTDIR, not EEXIST —
+  // it propagates like any other mkdir error.
+  const blocker = path.join(root, "blocker-file");
+  fs.writeFileSync(blocker, "i am a file, not a directory");
+  assert.throws(() => withLock(path.join(blocker, "lock"), () => 1),
+    (e) => e.code === "ENOTDIR");
+}
+{
+  // A throwing `alive` probe propagates out of withLock (it is not wrapped
+  // in the contention path) and leaves the held lock untouched.
+  const lock = fakeLock("alive-throws", { owner: deadPid() });
+  assert.throws(() => withLock(lock, () => 1, { waitMs: 0, alive: () => { throw new Error("probe failed"); } }),
+    /probe failed/);
+  assert.ok(fs.existsSync(lock), "the lock was never touched");
+  fs.rmSync(lock, { recursive: true, force: true });
+  locks.splice(locks.indexOf(lock), 1);
+}
+{
+  // `pid` values that are not positive integers are rejected up front;
+  // 0 and negatives pass Number() but fail the integer/>0 check.
+  for (const [i, bad] of [0, -3, 1.5, "0", NaN].entries()) {
+    const lock = L(`pid-bad-${i}`);
+    assert.throws(() => withLock(lock, () => 1, { pid: bad }), /pid/, `pid ${String(bad)} rejected`);
+    assert.equal(fs.existsSync(lock), false, `pid ${String(bad)} never created the lock`);
+  }
+}
+{
+  // A lock path that is not a string at all fails inside mkdirSync with a
+  // TypeError — again not EEXIST, so it propagates immediately.
+  assert.throws(() => withLock(undefined, () => 1), TypeError);
+  assert.throws(() => withLock(12345, () => 1), TypeError);
+}
+
+// ============================================================ race: a holder that throws
+{
+  // If the holder's fn throws, withLock still releases and a waiting
+  // contender proceeds — a failed merge must not wedge the lock.
+  const lock = L("race-thrower");
+  const counter = path.join(root, "counter-thrower");
+  fs.writeFileSync(counter, "0");
+  const prelude = `import fs from "node:fs"; import { withLock } from ${JSON.stringify(MOD)};`;
+  const thrower = `${prelude}
+withLock(${JSON.stringify(lock)}, () => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60);
+  throw new Error("holder blew up mid-merge");
+}, { waitMs: 30000, pollMs: 10 });`;
+  const waiter = `${prelude}
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+withLock(${JSON.stringify(lock)}, () => {
+  const n = Number(fs.readFileSync(${JSON.stringify(counter)}, "utf8"));
+  fs.writeFileSync(${JSON.stringify(counter)}, String(n + 1));
+}, { waitMs: 30000, pollMs: 10 });`;
+  const [codeThrower, codeWaiter] = await Promise.all([runChild(thrower), runChild(waiter)]);
+  assert.equal(codeThrower, 1, "the throwing holder exits non-zero");
+  assert.equal(codeWaiter, 0, "the contender still acquired the released lock");
+  assert.equal(fs.readFileSync(counter, "utf8"), "1", "the waiter's update landed");
+  assert.equal(fs.existsSync(lock), false);
+}
+
 // ============================================================ cleanup sweep
 for (const l of locks) fs.rmSync(l, { recursive: true, force: true });
 for (const l of locks) assert.equal(fs.existsSync(l), false, `stray lock left at ${l}`);
+// Takeovers rename stale locks aside as `<lock>.gone-*`; none may litter root.
+const corpses = fs.readdirSync(root).filter((f) => f.includes(".gone-"));
+assert.deepEqual(corpses, [], `stale-lock corpses left behind: ${corpses}`);
 fs.rmSync(root, { recursive: true, force: true });
 fs.rmSync(fakeHome, { recursive: true, force: true });
 console.log("constance-mergelock.deep: tests passed");
