@@ -1,0 +1,251 @@
+// Deeper edge-case pass for bin/constance-pace.mjs, on top of
+// constance-pace.test.mjs (which covers the headline stop/delegate/normal
+// cases, Keep going, wall.json and the first canResume checks).
+//
+// Everything here is pure or dir-injected: windowPace() and canResume() do
+// no I/O, and pace() gets a mkdtemp state dir, so no real claude/devin, no
+// network and no real home are touched. `now` is fixed so every
+// elapsed/burn/nearReset number is exact.
+//
+// Sections: windowPace burn math -> pace() boundaries (burn = 1, the 70/90/97%
+// lines, missing windows, nearReset edges, a window at 100%) -> Keep going
+// edges -> unsure/out-of-date readings -> wall.json edges.
+//
+// KNOWN BUGS FOUND (commented out at the bottom, NOT fixed per the task):
+// pace()/windowPace() crash on a null limits entry or a truthy non-array
+// `limits`; the driver calls pace() unguarded.
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pace, canResume, windowPace, keepGoingFile, WINDOWS, STOP_AT, NEAR_END_AT, NEAR_RESET_SHARE, LEAN_AT, HARD_AT, SAME_RESET_MS } from "./constance-pace.mjs";
+import { writeWall, wallFile } from "./constance-wall.mjs";
+
+const now = Date.UTC(2026, 10, 25, 12);
+const H = 3600e3, D = 86400e3;
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-pace-deep-"));
+const P = (c, t = now) => pace(c, t, dir);
+const W = (l, t = now) => windowPace(l, t);
+const iso = (ms) => new Date(ms).toISOString();
+const lim = (title, percent, leftMs) => ({ title, percent, resetsAt: leftMs === null ? "" : iso(now + leftMs) });
+const claude = (...ls) => ({ limits: ls });
+// A benign weekly reading reused by the two-window cases: 30% used with ~4 of
+// 7 days left is under every line (used < 70%, burn < 1, reset not close).
+const WKL = lim("Weekly", 0.3, 4 * D);
+
+// ------------------------------------------------- windowPace: the burn math
+// burn = used / elapsed share, with elapsed floored at 0.05 so a window that
+// just opened can't report an infinite burn.
+{
+  const w = W(lim("Session", 0.5, 2.5 * H)); // half the 5 h window gone, half used
+  assert.equal(w.elapsed, 0.5);
+  assert.equal(w.burn, 1, "used matching the elapsed share exactly is burn 1");
+  assert.equal(W(lim("Weekly", 0.5, 3.5 * D)).burn, 1, "same on the weekly window");
+}
+{
+  const fresh = W(lim("Session", 0.1, WINDOWS.Session)); // the whole length still ahead
+  assert.equal(fresh.elapsed, 0);
+  assert.equal(fresh.burn, 2, "10% of a brand-new window reads as burn 2 via the floor");
+  assert.equal(W(lim("Session", 0.1, 10 * H)).burn, fresh.burn, "a reset past the window's end clamps the same way");
+  assert.ok(Number.isFinite(W(lim("Session", 1, WINDOWS.Session)).burn), "the floor keeps burn finite even at 100%");
+}
+{
+  const w = W(lim("Session", 0.4, -H)); // reset time already past: the window is over
+  assert.equal(w.elapsed, 1);
+  assert.equal(w.burn, 0.4);
+  assert.equal(w.nearReset, true, "nothing left means 'close' by definition");
+}
+{
+  const w = W(lim("Session", 0.95, null)); // no usable reset time
+  assert.equal(w.elapsed, null); assert.equal(w.burn, null);
+  assert.equal(w.nearReset, false, "no reset time can't prove the reset is close");
+  assert.equal(w.resetsAt, null);
+  assert.equal(W({ title: "Session", percent: 0.4, resetsAt: "soon" }).burn, null, "unparseable resetsAt is the same as none");
+}
+assert.equal(W({ title: "Monthly", percent: 0.5, resetsAt: iso(now + H) }), null, "a title outside WINDOWS isn't a pace window");
+assert.equal(W({ title: "Session", percent: "abc", resetsAt: iso(now + H) }), null, "NaN percent");
+assert.equal(W({ title: "Session", resetsAt: iso(now + H) }), null, "missing percent");
+assert.equal(W(lim("Session", "0.5", H)).used, 0.5, "a numeric-string percent is still a number");
+
+// nearReset = the last NEAR_RESET_SHARE of the window, inclusive. The share is
+// fractional in floating point (the session's is ~3600000.0000000005 ms), so
+// the +1 ms case is the first provably outside it.
+assert.equal(W(lim("Session", 0.4, H)).nearReset, true, "exactly one hour of a 5 h window left is 'close'");
+assert.equal(W(lim("Session", 0.4, H + 1)).nearReset, false);
+assert.equal(W(lim("Weekly", 0.4, Math.round(WINDOWS.Weekly * NEAR_RESET_SHARE))).nearReset, true);
+assert.equal(W(lim("Weekly", 0.4, Math.round(WINDOWS.Weekly * NEAR_RESET_SHARE) + 1)).nearReset, false);
+assert.equal(W(lim("Session", 0.4, null)).nearReset, false);
+
+// ------------------------------------------------------- pace(): the mode lines
+// burn exactly 1 is NOT "too fast" — the fast line is strictly burn > 1.
+{
+  const p = P(claude(lim("Session", 0.5, 2.5 * H), WKL));
+  assert.equal(p.mode, "normal", "burn exactly 1 with 50% used stays normal");
+  assert.equal(p.windows[0].burn, 1);
+}
+// A hair over burn 1 with real usage delegates — the reason says it's pace.
+{
+  const p = P(claude(lim("Session", 0.5, 3 * H), WKL)); // elapsed ~0.4, burn ~1.25
+  assert.equal(p.mode, "delegate");
+  assert.match(p.reason, /of the window gone/);
+}
+// ...but the burn line only counts once 20% of the window is used: a fresh
+// window burning fast on a sliver of use doesn't trip it.
+{
+  const p = P(claude(lim("Session", 0.1, WINDOWS.Session), WKL)); // burn 2 via the floor
+  assert.equal(p.windows[0].burn, 2);
+  assert.equal(p.mode, "normal", "under 20% used the burn rate alone can't delegate");
+}
+// The 70% line (LEAN_AT): exactly at it she delegates even on an easy burn;
+// a hair under with the same burn stays normal. (1.2 h left of 5 h is elapsed
+// 0.76, so burn is ~0.92 for both — the level alone decides.)
+{
+  const timing = 1.2 * H;
+  const at = P(claude(lim("Session", LEAN_AT, timing), WKL));
+  assert.equal(at.mode, "delegate");
+  assert.match(at.reason, /at 70%/);
+  assert.equal(P(claude(lim("Session", 0.69, timing), WKL)).mode, "normal", "69% on the same pace is still normal work");
+}
+// The 90% line (STOP_AT) far from the reset: exactly at it she stops; a hair
+// under she delegates (the level alone already leans her on the free agents).
+{
+  const far = 3 * H;
+  const stop = P(claude(lim("Session", STOP_AT, far), WKL));
+  assert.equal(stop.mode, "stop");
+  assert.equal(stop.until, now + far);
+  assert.equal(P(claude(lim("Session", 0.8999, far), WKL)).mode, "delegate", "just under 90% far from reset delegates, not stops");
+}
+// Near the reset the stop line moves to NEAR_END_AT (97%): between the two
+// she rides it out on delegate pace; exactly at it she still stops.
+{
+  const near = 0.5 * H;
+  const held = P(claude(lim("Session", 0.9699, near), WKL));
+  assert.equal(held.mode, "delegate", "96.99% with the reset close keeps delegate pace");
+  assert.match(held.reason, /reset is close/);
+  const stop = P(claude(lim("Session", NEAR_END_AT, near), WKL));
+  assert.equal(stop.mode, "stop");
+  assert.equal(stop.until, now + near);
+}
+// The same near-reset rule on the weekly window, at its own ~33.6 h share:
+// inside it a 92% week delegates, outside it the plain 90% stop applies.
+{
+  const share = Math.round(WINDOWS.Weekly * NEAR_RESET_SHARE);
+  const s = lim("Session", 0.3, 3 * H); // benign: elapsed 0.4, burn 0.75
+  assert.equal(P(claude(s, lim("Weekly", 0.92, share))).mode, "delegate");
+  assert.equal(P(claude(s, lim("Weekly", 0.92, share + H))).mode, "stop");
+}
+
+// ------------------------------------------- missing or unreadable windows
+// No usable window at all: delegate, she plays it safe.
+assert.equal(P({ limits: [] }).mode, "delegate");
+assert.equal(P({}).mode, "delegate", "no limits key at all");
+assert.equal(P(claude(lim("Fable", 0.9, H), { title: "Session", percent: "abc", resetsAt: iso(now + H) })).mode, "delegate",
+  "unknown titles and NaN percents are filtered until nothing is left");
+// One window is enough: pace judges whatever it can read.
+assert.equal(P(claude(lim("Session", 0.5, 2.5 * H))).mode, "normal", "a lone session window still paces");
+// A window with no reset time is judged on level alone: no elapsed share, no
+// burn, no 'close' — so 95% stops at the plain 90% line while 50% is normal.
+{
+  const noReset = { title: "Session", percent: 0.95, resetsAt: "" };
+  const p = P(claude(noReset, WKL));
+  assert.equal(p.mode, "stop");
+  assert.equal(p.until, null, "nothing to wait for but the reading itself");
+  assert.equal(P(claude({ ...noReset, percent: 0.5 }, WKL)).mode, "normal");
+}
+
+// ----------------------------------------------------- a window at 100%
+// HARD_AT: the real limit is hit — a hard stop until that window's reset,
+// whichever window it is, and however far past 100 the reading goes.
+{
+  const s = P(claude(lim("Session", HARD_AT, 3 * H), WKL));
+  assert.equal(s.mode, "stop"); assert.equal(s.hard, true);
+  assert.equal(s.until, now + 3 * H); assert.equal(s.title, "Session");
+  const w = P(claude(lim("Session", 0.3, 3 * H), lim("Weekly", 1, 4 * D)));
+  assert.equal(w.mode, "stop"); assert.equal(w.hard, true); assert.equal(w.title, "Weekly");
+  assert.equal(P(claude(lim("Session", 1.4, 3 * H), WKL)).hard, true, "over 100% is still the wall");
+  const under = P(claude(lim("Session", 0.999, 3 * H), WKL));
+  assert.equal(under.mode, "stop"); assert.equal(under.hard, undefined, "99.9% is a normal stop, not the wall");
+}
+
+// ------------------------------------------------------- Keep going, deeper
+// The reset-time match is inclusive at SAME_RESET_MS and exclusive 1 ms past.
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: now + 3 * H + SAME_RESET_MS, at: now }));
+assert.equal(P(claude(lim("Session", 0.95, 3 * H), WKL)).mode, "delegate", "jitter up to 5 min still matches");
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: now + 3 * H + SAME_RESET_MS + 1, at: now }));
+assert.equal(P(claude(lim("Session", 0.95, 3 * H), WKL)).mode, "stop", "5 min + 1 ms is a different window");
+// A keep-going file that names a reset can't cover a window that can't:
+// sameReset(null, number) is no match, so the plain 90% stop stands.
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: now + 3 * H, at: now }));
+assert.equal(P(claude({ title: "Session", percent: 0.95, resetsAt: "" }, WKL)).mode, "stop");
+// The no-reset-time keep-going lasts one window length from `at` — and `at`
+// is trusted as written, so a future `at` (clock skew) stretches it.
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: null, at: now + 2 * H }));
+const noRes = { title: "Session", percent: 0.95, resetsAt: "" };
+assert.equal(P(claude(noRes, WKL)).mode, "delegate", "a future `at` still counts: validity runs from `at`");
+assert.equal(P(claude(noRes, WKL), now + WINDOWS.Session + 3 * H).mode, "stop", "past at + one window length it expires");
+// A corrupt keep-going file is simply no keep-going.
+fs.writeFileSync(keepGoingFile(dir), "{not json");
+assert.equal(P(claude(lim("Session", 0.95, 3 * H), WKL)).mode, "stop");
+fs.rmSync(keepGoingFile(dir));
+
+// ------------------------------------------- unsure and out-of-date readings
+// pace() judges the numbers it is given — it does not look at `unsure`; the
+// resume gate (canResume) is what refuses a stale reading.
+{
+  const good = claude(lim("Session", 0.3, 3 * H), WKL);
+  const p = P(good);
+  assert.equal(p.mode, "normal");
+  assert.equal(canResume(p, { ...good, unsure: "Last reading from 4:02 PM; couldn't refresh." }), false,
+    "a normal pace can't resume her on a reading the collector couldn't refresh");
+  // Same for a delegate pace that isn't Keep going.
+  const del = { ...claude(lim("Session", 0.5, 3 * H), WKL), unsure: "old" }; // burn ~1.25 -> delegate
+  assert.equal(P(del).mode, "delegate", "pace itself ignores the unsure flag");
+  assert.equal(canResume(P(del), del), false, "delegate on a stale reading still can't resume");
+  // Keep going is the owner's call: it resumes even on a stale flag.
+  fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: now + 3 * H, at: now }));
+  const kept = { ...claude(lim("Session", 0.95, 3 * H), WKL), unsure: "old" };
+  const kp = P(kept);
+  assert.match(kp.reason, /Keep going/);
+  assert.equal(canResume(kp, kept), true);
+  fs.rmSync(keepGoingFile(dir));
+  // canResume's other refusals: no pace, a stop, no reading, no limits.
+  assert.equal(canResume(null, good), false);
+  assert.equal(canResume(P(claude(lim("Session", HARD_AT, 3 * H), WKL)), good), false, "a hard stop never resumes");
+  assert.equal(canResume(p, null), false);
+  assert.equal(canResume(p, { limits: [] }), false, "an empty limits array is no reading");
+  assert.equal(canResume(p, {}), false);
+}
+
+// ------------------------------------------------------------- wall.json edges
+// The wall falls exactly at its stated time; a broken file is no wall.
+{
+  const good = claude(lim("Session", 0.3, 3 * H), WKL);
+  writeWall(dir, { until: now, stated: true, text: "x" }, now);
+  assert.equal(P(good).mode, "normal", "a wall whose time is exactly now has fallen");
+  writeWall(dir, { until: now + 1, stated: true, text: "x" }, now);
+  assert.equal(P(good).mode, "stop", "one ms before the stated time it still stands");
+  fs.writeFileSync(wallFile(dir), "{broken");
+  assert.equal(P(good).mode, "normal", "a corrupt wall.json can't hold her");
+  fs.rmSync(wallFile(dir));
+}
+// Claude's own wall outranks the owner's Keep going: the file can't resume her
+// into a limit Claude itself reported.
+fs.writeFileSync(keepGoingFile(dir), JSON.stringify({ title: "Session", resetsAt: now + 3 * H, at: now }));
+writeWall(dir, { until: now + H, stated: true, text: "hit your limit" }, now);
+const walled = P(claude(lim("Session", 0.95, 3 * H), WKL));
+assert.equal(walled.mode, "stop"); assert.equal(walled.hard, true);
+assert.equal(walled.until, now + H, "the wall's own time, not the meter's");
+fs.rmSync(keepGoingFile(dir)); fs.rmSync(wallFile(dir));
+
+// ------------------------------------------- known bugs (NOT fixed per task)
+// pace() assumes claude.limits is an array of limit objects. A truthy
+// non-array (`limits: "junk"`) throws ".map is not a function", and a null
+// entry throws inside windowPace reading 'title' — pace() is called
+// unguarded by the driver loop and by `C pace`, so one malformed agent record
+// in data.json would kill it. windowPace(null) throws the same way. Latent
+// today only because collect.mjs always emits an array; nothing enforces it.
+//   assert.throws(() => pace({ limits: "junk" }, now, dir));
+//   assert.throws(() => pace({ limits: [null] }, now, dir));
+//   assert.throws(() => windowPace(null));
+//   assert.throws(() => windowPace(undefined));
+console.log("constance-pace.deep: tests passed");
