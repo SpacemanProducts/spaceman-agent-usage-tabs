@@ -29,14 +29,16 @@ const familyTokens = (title) => String(title || "").toLowerCase().split(/[^a-z0-
 // classifier's list; `plan` is the agent's plan label (e.g. "Free").
 export function corroborate(resets, details, detectedAt, plan = "") {
   const planKey = String(plan || "").toLowerCase();
-  const early = (details || []).filter((d) => d && d.surprise);
-  if (!early.length) return null;
+  const early = (Array.isArray(details) ? details : []).filter((d) => d && d.surprise);
+  if (!early.length || !Number.isFinite(detectedAt)) return null;
   const tokens = new Set(early.flatMap((d) => familyTokens(d.title)));
   for (const r of Array.isArray(resets) ? resets : []) {
     const at = Date.parse(r?.announced_at || "");
     if (!Number.isFinite(at) || at < detectedAt - WINDOW_BEFORE_MS || at > detectedAt + WINDOW_AFTER_MS) continue;
+    if (r.plans != null && !Array.isArray(r.plans)) continue;
     const plans = (r.plans || []).map((p) => String(p).toLowerCase());
     if (plans.length && !plans.includes("all") && !(planKey && plans.includes(planKey))) continue;
+    if (r.models != null && !Array.isArray(r.models)) continue;
     const models = (r.models || []).map((m) => String(m).toLowerCase());
     if (!models.length || models.includes("all") || models.some((m) => tokens.has(m))) return r;
   }
