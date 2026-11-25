@@ -6,8 +6,10 @@
 // without a known 'kind:' prefix is kind 'task' with the whole text. Other
 // lines (headings, blanks, prose) are kept untouched when the file is
 // rewritten. User text and file names are stored with '\', '(' and ')'
-// backslash-escaped so they can never be mistaken for those tags, and
-// '\r\n' line endings are tolerated.
+// backslash-escaped so they can never be mistaken for those tags, commas
+// inside file names are escaped so they survive the '(files: ...)' split,
+// item text has its newlines folded to spaces, and '\r\n' line endings are
+// tolerated.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -23,6 +25,25 @@ const ITEM_RE = /^- \[([ xX])\] (.*)\r?$/;
 // in it stays text; parseBacklog unescapes after stripping real tags.
 const esc = (s) => s.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 const unesc = (s) => s.replace(/\\([\\()])/g, "$1");
+// File names also escape ',' so the '(files: ...)' split leaves them alone;
+// unescFile undoes that extra escape after the shared unesc pass.
+const escFile = (s) => esc(s).replace(/,/g, "\\,");
+const unescFile = (s) => unesc(s).replace(/\\,/g, ",");
+
+// Split a '(files: ...)' body on commas, keeping backslash-escaped pairs
+// (\\, \( etc.) together so an escaped comma does not split.
+function splitFiles(s) {
+  const parts = [];
+  let cur = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === "\\" && i + 1 < s.length) { cur += ch + s[i + 1]; i++; continue; }
+    if (ch === ",") { parts.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
 
 // Split an item body into kind/text plus any trailing ' (files: ...)' and
 // ' (job N)' groups, in whichever order they appear.
@@ -35,14 +56,14 @@ function splitBody(body) {
     if (jm) { if (job === null) job = Number(jm[2]); rest = jm[1]; continue; }
     const fm = rest.match(/^(.*) \(files: (.+)\)$/);
     if (fm) {
-      files.unshift(...fm[2].split(",").map((s) => s.trim()).filter(Boolean));
+      files.unshift(...splitFiles(fm[2]).map((s) => s.trim()).filter(Boolean));
       rest = fm[1];
       continue;
     }
     break;
   }
   const km = rest.match(/^([a-z]+):\s+(.+)$/);
-  const unescapedFiles = files.map(unesc);
+  const unescapedFiles = files.map(unescFile);
   if (km && KINDS.includes(km[1])) return { kind: km[1], text: unesc(km[2]), files: unescapedFiles, job };
   return { kind: "task", text: unesc(rest), files: unescapedFiles, job };
 }
@@ -90,7 +111,7 @@ function editItem(dir, id, fn) {
 // doesn't exist. Refuses empty text or an unknown kind. Returns the existing
 // item instead of adding a duplicate of an open item with the same kind/text.
 export function addItem(dir, { kind = "task", text, files = [] } = {}) {
-  const body = String(text ?? "").trim();
+  const body = String(text ?? "").replace(/[\r\n]+/g, " ").trim();
   if (!body) throw new Error("backlog item needs text");
   if (!KINDS.includes(kind)) throw new Error(`unknown backlog kind: ${kind}`);
   let content = "";
@@ -98,10 +119,10 @@ export function addItem(dir, { kind = "task", text, files = [] } = {}) {
   const items = parseBacklog(content);
   const dup = items.find((x) => !x.done && x.kind === kind && x.text === body);
   if (dup) return dup;
-  const fileList = (files || []).map(String).filter(Boolean);
+  const fileList = (files || []).map((f) => String(f).replace(/[\r\n]+/g, " ")).filter(Boolean);
   const eol = content.includes("\r\n") ? "\r\n" : "\n";
   let line = `- [ ] ${kind}: ${esc(body)}`;
-  if (fileList.length) line += ` (files: ${fileList.map(esc).join(", ")})`;
+  if (fileList.length) line += ` (files: ${fileList.map(escFile).join(", ")})`;
   if (!content) content = "# Backlog\n";
   if (!content.endsWith("\n")) content += eol;
   const lineIndex = content.split("\n").length - 1;
@@ -110,12 +131,13 @@ export function addItem(dir, { kind = "task", text, files = [] } = {}) {
 }
 
 // Tag an item as handed to a job, replacing an earlier job tag. jobId must
-// be a non-negative integer (a numeric string is accepted); anything else
-// would write a '(job ...)' tag parseBacklog can never read, so it is
-// refused with false and the file is left untouched.
+// be a non-negative safe integer (a numeric string is accepted); anything
+// else would write a '(job ...)' tag parseBacklog can never read — e.g.
+// 1e21 stringifies as '1e+21' — so it is refused with false and the file is
+// left untouched.
 export function markTaken(dir, id, jobId) {
   const n = typeof jobId === "string" && jobId.trim() !== "" ? Number(jobId) : jobId;
-  if (typeof n !== "number" || !Number.isInteger(n) || n < 0) return false;
+  if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) return false;
   return editItem(dir, id, (lines, item) => {
     const eol = lines[item.line].endsWith("\r") ? "\r" : "";
     const line = eol ? lines[item.line].slice(0, -1) : lines[item.line];
