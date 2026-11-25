@@ -11,9 +11,8 @@
 // lines, missing windows, nearReset edges, a window at 100%) -> Keep going
 // edges -> unsure/out-of-date readings -> wall.json edges.
 //
-// KNOWN BUGS FOUND (commented out at the bottom, NOT fixed per the task):
-// pace()/windowPace() crash on a null limits entry or a truthy non-array
-// `limits`; the driver calls pace() unguarded.
+// The bottom section covers malformed limits: null entries are ignored and
+// a non-array `limits` value reads as no windows.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -237,15 +236,16 @@ assert.equal(walled.mode, "stop"); assert.equal(walled.hard, true);
 assert.equal(walled.until, now + H, "the wall's own time, not the meter's");
 fs.rmSync(keepGoingFile(dir)); fs.rmSync(wallFile(dir));
 
-// ------------------------------------------- known bugs (NOT fixed per task)
-// pace() assumes claude.limits is an array of limit objects. A truthy
-// non-array (`limits: "junk"`) throws ".map is not a function", and a null
-// entry throws inside windowPace reading 'title' — pace() is called
-// unguarded by the driver loop and by `C pace`, so one malformed agent record
-// in data.json would kill it. windowPace(null) throws the same way. Latent
-// today only because collect.mjs always emits an array; nothing enforces it.
-//   assert.throws(() => pace({ limits: "junk" }, now, dir));
-//   assert.throws(() => pace({ limits: [null] }, now, dir));
-//   assert.throws(() => windowPace(null));
-//   assert.throws(() => windowPace(undefined));
+// ------------------------------------------- malformed limits (fixed)
+// pace() assumes claude.limits is an array of limit objects. It used to throw
+// ".map is not a function" on a truthy non-array and inside windowPace on a
+// null entry, and the driver calls pace() unguarded, so one malformed agent
+// record in data.json would kill it. Now a non-array `limits` reads as no
+// windows and null entries are ignored.
+assert.equal(windowPace(null), null);
+assert.equal(windowPace(undefined), null);
+assert.equal(P({ limits: "junk" }).mode, "delegate", "a non-array limits value is no windows");
+assert.equal(P({ limits: "junk" }).reason, P({}).reason);
+assert.equal(P({ limits: [null] }).mode, "delegate", "null entries are ignored until nothing is left");
+assert.equal(P(claude(null, lim("Session", 0.5, 2.5 * H), WKL)).mode, "normal", "a null entry among real windows changes nothing");
 console.log("constance-pace.deep: tests passed");

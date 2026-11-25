@@ -28,6 +28,7 @@ export const HARD_AT = 1;
 export const SAME_RESET_MS = 5 * 60e3;
 
 export function windowPace(limit, now = Date.now()) {
+  if (!limit || typeof limit !== "object") return null;
   const len = WINDOWS[limit.title];
   const used = Number(limit.percent);
   const resetsAt = new Date(String(limit.resetsAt || "")).getTime();
@@ -59,7 +60,7 @@ const keepGoingFor = (w, kg, now) =>
   (kg.resetsAt !== null ? now < kg.resetsAt : now - kg.at < (WINDOWS[w.title] || 0));
 
 export function pace(claude, now = Date.now(), dir = stateDir()) {
-  const ws = (claude?.limits || []).map((l) => windowPace(l, now)).filter(Boolean);
+  const ws = (Array.isArray(claude?.limits) ? claude.limits : []).map((l) => windowPace(l, now)).filter(Boolean);
   // Claude itself said the limit is hit (constance-wall.mjs): that beats any reading.
   const wall = readWall(dir, now);
   if (wall) return { mode: "stop", hard: true, windows: ws, until: wall.until, title: "Claude's limit",
