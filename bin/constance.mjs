@@ -87,6 +87,14 @@ function arg(name, fallback = "") { const i = process.argv.indexOf(name); return
 function out(x) { process.stdout.write(typeof x === "string" ? x + "\n" : JSON.stringify(x, null, 2) + "\n"); }
 function fail(msg) { process.stderr.write(msg + "\n"); process.exit(1); }
 
+// Small state files are rewritten through a temp file in the same folder + rename, so a
+// concurrent reader never sees a torn file; the temp is removed if the rename fails.
+export function writeAtomic(file, data) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, data);
+  try { fs.renameSync(tmp, file); } catch (e) { try { fs.unlinkSync(tmp); } catch {} throw e; }
+}
+
 // A pid is ours only if it is alive and its command line still names what we started.
 export function alive(pid, needle = "") {
   if (!(pid > 0)) return false;
@@ -544,7 +552,7 @@ function fillSlots() {
 const refillsFile = () => path.join(store.dir, "refills.json");
 const REFILL_LOW = 3;
 function readRefills() { try { return JSON.parse(fs.readFileSync(refillsFile(), "utf8")) || {}; } catch { return {}; } }
-function writeRefills(d) { try { fs.writeFileSync(refillsFile(), JSON.stringify(d, null, 2) + "\n"); } catch {} }
+function writeRefills(d) { try { writeAtomic(refillsFile(), JSON.stringify(d, null, 2) + "\n"); } catch {} }
 function rememberRefill(dir, taskId, backlogId) {
   const d = readRefills(); (d[dir] ||= {})[taskId] = backlogId; writeRefills(d);
 }
@@ -1266,7 +1274,7 @@ function startSpareGoal(g) {
   const text = [`Use it or lose it: ${plan.reason} Work only on these items from this project's backlog (.constance/backlog.md). If one turns out not to be worth doing, skip it and say why: never make work just to use the room. When an item is finished run \`C backlog done N\` with its backlog number.`, ...lines].join("\n");
   const res = beginGoal(text, g.dir, { fromSpare: true, driverPid: process.pid });
   if (res.busy) return false;
-  fs.writeFileSync(spareFile(), JSON.stringify({ used: [...seen, ...picks.map(key)].slice(-200) }) + "\n");
+  writeAtomic(spareFile(), JSON.stringify({ used: [...seen, ...picks.map(key)].slice(-200) }) + "\n");
   store.log({ kind: "note", text: `Use it or lose it: started a backlog goal (${picks.map((p) => `${names[p.agent] || p.agent} ${p.window.title}`).join(", ")}).` });
   spawnWatcher();
   return true;
@@ -1399,7 +1407,7 @@ function spawnWatcher() {
 async function watch() {
   const pidFile = path.join(store.dir, "watcher.pid");
   try { const p = Number(fs.readFileSync(pidFile, "utf8")); if (isWatcher(p)) process.exit(0); } catch {}
-  fs.writeFileSync(pidFile, String(process.pid));
+  writeAtomic(pidFile, String(process.pid));
   const bus = spawn("busctl", ["--user", "monitor"], { stdio: ["ignore", "pipe", "ignore"] });
   bus.on("error", () => { store.log({ kind: "note", text: "Notification watcher could not start (busctl missing?)." }); process.exit(0); });
   const parser = new NotifyParser();
@@ -1786,7 +1794,7 @@ function sampleCopiesRunning() {
   const f = ratioSamplesFile();
   fs.appendFileSync(f, JSON.stringify({ at: Date.now(), copiesRunning }) + "\n");
   const lines = fs.readFileSync(f, "utf8").split("\n").filter(Boolean);
-  if (lines.length > 4000) fs.writeFileSync(f, lines.slice(-4000).join("\n") + "\n");
+  if (lines.length > 4000) writeAtomic(f, lines.slice(-4000).join("\n") + "\n");
 }
 
 // Her Session window's used share right now, in percent (null when unreadable).
@@ -1850,6 +1858,8 @@ function status() { out(statusPayload()); }
 
 const cmd = process.argv[2];
 if (process.argv[1] === SELF) {
+  // A closed pipe (e.g. `status | head -1`) must end quietly, not with an 'write EPIPE' stack trace.
+  for (const s of [process.stdout, process.stderr]) s.on("error", (e) => { if (e?.code === "EPIPE") process.exit(0); throw e; });
   if (cmd === "start") startGoal();
   else if (cmd === "drive") await drive();
   else if (cmd === "status") status();
