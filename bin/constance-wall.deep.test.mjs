@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -217,5 +218,153 @@ assert.deepEqual(readWall(bad, now).extra, { a: 1 }, "unknown fields pass throug
 assert.equal(typeof clock(now), "string");
 assert.ok(clock(now).length > 0);
 assert.equal(clock("not a date"), "Invalid Date", "invalid input formats as 'Invalid Date', does not throw");
+assert.equal(clock(NaN), "Invalid Date");
+assert.equal(clock(Infinity), "Invalid Date");
+assert.equal(typeof clock(0), "string", "epoch is a valid clock input");
+
+// ---------- isLimitHit: non-string and falsy input ----------
+
+assert.ok(!isLimitHit(0), "0 is falsy -> empty string -> no match");
+assert.ok(!isLimitHit(NaN), "NaN is falsy -> empty string -> no match");
+assert.ok(!isLimitHit({}), "an object stringifies to '[object Object]'");
+assert.ok(!isLimitHit(true), "true stringifies to 'true'");
+// The pattern is a literal single space: doubled whitespace does not match.
+// Claude's real message uses one space; pinned as current behavior.
+assert.ok(!isLimitHit("hit  your limit"), "two spaces between 'hit' and 'your' does not match");
+assert.ok(!isLimitHit("hit\tyour limit"), "a tab between 'hit' and 'your' does not match");
+assert.ok(isLimitHit("hit your limit\r"), "a trailing carriage return is harmless");
+
+// ---------- statedReset: separators and word boundaries ----------
+
+assert.equal(statedReset("resets\t5pm (UTC)", now), Date.UTC(2026, 10, 25, 17), "tab separator works (\\s+)");
+// \s matches newlines too, so on raw multi-line text the time may sit on the
+// next line. limitWall never sees this (it splits lines first); statedReset
+// called directly does.
+assert.equal(statedReset("resets\n5pm (UTC)", now), Date.UTC(2026, 10, 25, 17), "\\s+ even crosses a newline");
+assert.equal(statedReset("resets", now), null, "bare 'resets' with nothing after");
+assert.equal(statedReset("resets   ", now), null, "'resets' followed only by whitespace");
+assert.equal(statedReset("reset 5pm (UTC)", now), null, "singular 'reset' does not match 'resets'");
+assert.equal(statedReset("presets 5pm (UTC)", now), null, "'presets' has no word boundary before 'resets'");
+assert.equal(statedReset("resets at 5pm (UTC)", now), null, "'resets at <time>' is not a supported form (only 'Mon D at')");
+
+// ---------- statedReset: which 'resets' wins ----------
+
+assert.equal(statedReset("resets garbage and resets 5pm (UTC)", now), Date.UTC(2026, 10, 25, 17), "a failed first 'resets' does not block a later valid one on the same text");
+assert.equal(statedReset("resets 9pm (UTC) resets 5pm (UTC)", now), Date.UTC(2026, 10, 25, 21), "two valid resets: the leftmost match wins");
+
+// ---------- statedReset: month-name quirk ----------
+
+// The capture group is only [a-z]{3}; the rest of the word is consumed but not
+// captured, so ANY word starting with a month abbreviation parses as that month.
+assert.equal(statedReset("resets novvy 24, 11pm (UTC)", now), Date.UTC(2026, 10, 24, 23), "'novvy' parses as November (quirk)");
+assert.equal(statedReset("resets november 24, 11pm (UTC)", now), Date.UTC(2026, 10, 24, 23), "full month name gives the same instant");
+// Impossible days roll over via Date.UTC, like the Nov 31 case above.
+assert.equal(statedReset("resets Nov 32, 5pm (UTC)", now), Date.UTC(2026, 11, 2, 17), "Nov 32 rolls into Dec 2, still inside MAX_WAIT");
+assert.equal(statedReset("resets Feb 29, 5pm (UTC)", now), null, "Feb 29 in a non-leap year rolls to Mar 1, then a year out -> null");
+
+// ---------- statedReset: zone names ----------
+
+assert.equal(statedReset("resets 5pm (utc)", now), Date.UTC(2026, 10, 25, 17), "zone names are case-insensitive");
+assert.equal(statedReset("resets 5pm (GMT)", now), Date.UTC(2026, 10, 25, 17), "GMT is a valid zone");
+assert.equal(statedReset("resets 5pm (Etc/UTC)", now), Date.UTC(2026, 10, 25, 17), "Etc/UTC is a valid zone");
+assert.equal(statedReset("resets 5pm (UTC) trailing text", now), Date.UTC(2026, 10, 25, 17), "text after the zone paren is ignored");
+
+// ---------- statedReset: DST edges ----------
+
+// 2027-03-14 is the US spring-forward day: 2:30am New York does not exist.
+// zoned()'s two passes map the wall time to 1:30am EST, which is already past,
+// so the clock-only rule rolls to the next day's 2:30am (which exists, EDT).
+assert.equal(
+  statedReset("resets 2:30am (America/New_York)", Date.UTC(2027, 2, 14, 12)),
+  Date.UTC(2027, 2, 15, 6, 30),
+  "a nonexistent spring-forward time rolls to the next day's same wall time",
+);
+// 2026-11-01 is the US fall-back day: 1:30am New York happens twice. zoned()
+// converges on the first occurrence (EDT, UTC-4).
+assert.equal(
+  statedReset("resets 1:30am (America/New_York)", Date.UTC(2026, 10, 1, 5, 0)),
+  Date.UTC(2026, 10, 1, 5, 30),
+  "an ambiguous fall-back time picks the first occurrence",
+);
+
+// ---------- statedReset: default clock ----------
+
+// With no `now` argument the function reads Date.now() itself; the result must
+// stay inside the same bounds as an injected clock.
+{
+  const lo = Date.now();
+  const r = statedReset("resets 5pm");
+  const hi = Date.now();
+  assert.ok(r === null || (r > lo - 60e3 && r <= hi + 8 * 86400e3), "default clock stays within the stated-reset bounds");
+}
+
+// ---------- limitWall: more line-level edge cases ----------
+
+assert.equal(limitWall(null, now), null, "null output is not a wall");
+assert.equal(limitWall(123, now), null, "numeric output is not a wall");
+assert.equal(limitWall("hit your limit\r\nresets 5pm (UTC)", now).until, Date.UTC(2026, 10, 25, 17), "CRLF line endings still parse");
+
+// An unparseable 'resets' on the hit line does not stop the scan of later lines.
+const invalidThenValid = limitWall("You've hit your limit · resets garbage\nwindow resets 6pm (UTC)", now);
+assert.equal(invalidThenValid.stated, true);
+assert.equal(invalidThenValid.until, Date.UTC(2026, 10, 25, 18), "falls through to the next line's valid reset");
+// A valid reset on the hit line wins over any reset stated on later lines.
+const ownWins = limitWall("You've hit your limit · resets 9pm (UTC)\nwindow resets 5pm (UTC)", now);
+assert.equal(ownWins.until, Date.UTC(2026, 10, 25, 21), "the hit line's own reset beats a later line's");
+// Two 'resets' on the hit line itself: statedReset's leftmost match wins.
+const twoOnLine = limitWall("You've hit your limit · resets 9pm (UTC) resets 5pm (UTC)", now);
+assert.equal(twoOnLine.until, Date.UTC(2026, 10, 25, 21), "first 'resets' on the hit line wins");
+
+// ---------- writeWall / readWall: error paths ----------
+
+// writeWall on a null wall throws before writing anything.
+assert.throws(() => writeWall(d1, null, now), TypeError, "writeWall(null wall) throws TypeError");
+assert.ok(!fs.existsSync(`${wallFile(d1)}.${process.pid}.tmp`), "no .tmp left behind by the failed write");
+// A path blocked by a plain file cannot be mkdir'd.
+const blocker = wallDir("blocker");
+fs.writeFileSync(blocker, "i am a file");
+assert.throws(() => writeWall(blocker, { until: now + 1 }, now), "writeWall into a file path throws");
+
+// until values that are not finite at write time serialize to null.
+writeWall(d2, { until: NaN, stated: true, text: "nan" }, now);
+assert.equal(readWall(d2, now), null, "NaN until is stored as null -> no wall");
+writeWall(d2, { until: now - 5, stated: true, text: "past" }, now);
+assert.equal(readWall(d2, now), null, "a wall already past is written but reads as no wall");
+assert.equal(JSON.parse(fs.readFileSync(wallFile(d2), "utf8")).until, now - 5, "writeWall does not clamp a past until");
+
+// More malformed wall.json payloads.
+fs.writeFileSync(wallFile(bad), "");
+assert.equal(readWall(bad, now), null, "empty wall.json");
+fs.writeFileSync(wallFile(bad), "\uFEFF" + JSON.stringify({ until: now + 10 }));
+assert.equal(readWall(bad, now), null, "a UTF-8 BOM breaks JSON.parse -> no wall");
+fs.writeFileSync(wallFile(bad), JSON.stringify({ until: String(now + 10) }));
+assert.equal(readWall(bad, now), null, "until as a numeric string is rejected");
+fs.writeFileSync(wallFile(bad), JSON.stringify({ until: now + 0.5 }));
+assert.equal(readWall(bad, now).until, now + 0.5, "a fractional until is finite and still walls");
+
+// A successful writeWall leaves no tmp file behind.
+assert.ok(!fs.existsSync(`${wallFile(d2)}.${process.pid}.tmp`), "no .tmp left after a successful rename");
+
+// ---------- writeWall: concurrent writers ----------
+
+// writeWall writes to `<wall>.json.<pid>.tmp` then renames, so parallel
+// processes can never leave a torn wall.json: the final content is always one
+// complete write. Spawn real children to exercise the race.
+{
+  const raceDir = wallDir("race");
+  const moduleUrl = new URL("./constance-wall.mjs", import.meta.url).href;
+  const untils = [1001, 1002, 1003, 1004].map((d) => now + d);
+  const run = (until, tag) => new Promise((resolve, reject) => {
+    const script = `import(${JSON.stringify(moduleUrl)}).then(m=>m.writeWall(${JSON.stringify(raceDir)},{until:${until},stated:true,text:${JSON.stringify(tag)}},${now}))`;
+    const p = spawn(process.execPath, ["--input-type=module", "-e", script]);
+    let err = "";
+    p.stderr.on("data", (d) => { err += d; });
+    p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`child ${tag} exited ${code}: ${err}`))));
+  });
+  await Promise.all(untils.map((u, i) => run(u, `r${i}`)));
+  const raced = JSON.parse(fs.readFileSync(wallFile(raceDir), "utf8"));
+  assert.ok(untils.includes(raced.until), "concurrent writes leave one whole wall.json, never a torn one");
+  assert.equal(readWall(raceDir, now).until, raced.until, "the surviving wall is readable");
+}
 
 console.log("constance-wall.deep: tests passed");
