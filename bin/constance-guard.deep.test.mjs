@@ -336,8 +336,8 @@ function setup({ exclude = true } = {}) {
 
 // ---- newCommits treats a baseHead that is not an ancestor of HEAD as "cannot
 // verify": after the history is rewritten, base..HEAD would span ALL of HEAD's
-// history, so the answer is [] — nothing is diff-checked or reverted as the
-// run's own.
+// history, so the answer is [] — and checkRun says so as a violation instead of
+// passing silently. Nothing is diff-checked or reverted as the run's own.
 {
   const s = setup();
   const b = s.before();
@@ -346,6 +346,27 @@ function setup({ exclude = true } = {}) {
   assert.deepEqual(newCommits(s.repo, b.head), [], "a non-ancestor base lists nothing");
   const res = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env });
   assert.deepEqual(res.ownCommits, [], "the rewritten history is never the run's");
+  assert.equal(res.ok, false, "an unverifiable run is not a clean run");
+  assert.ok(res.violations.some((v) => v.includes("history rewritten during the run; its commits cannot be verified")),
+    res.violations.join("; "));
+  const did = restoreRun({ dir: s.repo, commit: res.ownCommit, commits: res.badCommits, badPaths: res.badPaths });
+  assert.deepEqual(did, [], "no verified commit means nothing is reverted");
+  s.done();
+}
+
+// ---- the same rewritten base WITH a reported commit: the report is also not
+// trusted (it cannot be the run's), and the history violation is still there.
+{
+  const s = setup();
+  const b = s.before();
+  s.git("checkout", "-q", "--orphan", "rewritten");
+  s.git("commit", "-qm", "fresh root, unrelated to the snapshot");
+  const foreign = s.head();
+  const res = checkRun({ dir: s.repo, files: [], commit: foreign, before: b, env: s.env });
+  assert.equal(res.ok, false);
+  assert.ok(res.violations.some((v) => v.includes("not a new commit")), res.violations.join("; "));
+  assert.ok(res.violations.some((v) => v.includes("history rewritten during the run")), res.violations.join("; "));
+  assert.equal(res.ownCommit, "", "no commit of the rewritten history is adopted");
   s.done();
 }
 
