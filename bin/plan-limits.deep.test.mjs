@@ -44,9 +44,9 @@ try {
   for (const t of ["OVERAGE", "oVeRaGe UsAgE", "Spend Cap", "TOP-UP", "Auto-ReLoad", "PAY AS YOU GO"]) {
     assert.equal(isPlanLimit({ title: t }), false, `${t} filtered case-insensitively`);
   }
-  // 'on- demand' is 'on' + '-' + ' demand': two separators, so on[- ]?demand
-  // (at most one) cannot match it.
-  assert.equal(isPlanLimit({ title: "on- demand usage" }), true, "'on- demand' does not match on[- ]?demand");
+  // Word gaps accept any run of separators, so 'on- demand' (hyphen + space)
+  // is caught too.
+  assert.equal(isPlanLimit({ title: "on- demand usage" }), false, "'on- demand' matches on[-\\s]*demand");
 
   // ---- isPlanLimit: separator variants ----
   for (const t of ["on-demand", "on demand", "ondemand", "top-up", "top up", "topup", "auto-reload", "auto reload", "autoreload", "pay-as-you-go", "pay as you go", "pay as-you-go"]) {
@@ -56,10 +56,10 @@ try {
   assert.equal(isPlanLimit({ title: "pay as-you go" }), false, "each gap may be a hyphen OR a space, mixed is fine");
   assert.equal(isPlanLimit({ title: "extra usage" }), false);
   assert.equal(isPlanLimit({ title: "EXTRA USAGE" }), false);
-  // 'extra usage' is a literal single space in the regex — no hyphen/optional variant.
-  assert.equal(isPlanLimit({ title: "extra-usage" }), true, "'extra-usage' does not match the literal 'extra usage' (documents current behavior)");
+  // 'extra usage' accepts any run of separators (space or hyphen) in the gap.
+  assert.equal(isPlanLimit({ title: "extra-usage" }), false, "'extra-usage' matches extra[-\\s]+usage");
   assert.equal(isPlanLimit({ title: "extrausage" }), true);
-  assert.equal(isPlanLimit({ title: "extra  usage" }), true, "doubled space does not match the literal 'extra usage'");
+  assert.equal(isPlanLimit({ title: "extra  usage" }), false, "doubled space matches extra[-\\s]+usage");
 
   // ---- isPlanLimit: word-boundary and substring edges ----
   assert.equal(isPlanLimit({ title: "Credits bought" }), false, "credits bought phrase filtered");
@@ -70,20 +70,16 @@ try {
   assert.equal(isPlanLimit({ title: "bought credits" }), true, "reversed word order is not the credits-bought phrase");
   assert.equal(isPlanLimit({ title: "Credits bought extra" }), false, "trailing words fine, \\b after bought/purchased holds");
   assert.equal(isPlanLimit({ title: "Credits boughtton" }), true, "\\b blocks 'boughtton'");
-  // BUG: every word gap in the regex is at most one [- ] char (literal space
-  // for 'extra usage' / 'credits bought', required single [- ] for the pay
-  // chain), so doubled whitespace or a tab lets money text through as a plan
-  // limit: "On  demand", "top  up",
-  // "auto  reload", "pay  as  you  go", "pay\tas you go", "extra  usage",
-  // "Credits  bought", "Credits\tbought" are all kept.
-  // assert.equal(isPlanLimit({ title: "On  demand usage" }), false);
-  // assert.equal(isPlanLimit({ title: "Credits\tbought" }), false);
-  // BUG: unanchored substrings cause false positives — 'spend' matches inside
-  // 'suspend', 'balance' inside 'imbalance'/'unbalanced', so a legit plan meter
-  // like "Suspended weekly" or "Imbalance check" would be silently dropped,
-  // against the "every installed agent keeps its tab / honest data" rules.
-  // assert.equal(isPlanLimit({ title: "Suspended" }), true);
-  // assert.equal(isPlanLimit({ title: "Imbalance" }), true);
+  // Word gaps accept any run of whitespace/separators, so doubled spaces,
+  // tabs and mixed runs of money text are all filtered.
+  for (const t of ["On  demand usage", "top  up", "auto  reload", "pay  as  you  go", "pay\tas you go", "extra  usage", "Credits  bought", "Credits\tbought", "on- demand usage"]) {
+    assert.equal(isPlanLimit({ title: t }), false, `${JSON.stringify(t)} filtered`);
+  }
+  // 'spend' and 'balance' are word-boundaried so they can't match inside
+  // other words and silently drop a legit plan meter.
+  assert.equal(isPlanLimit({ title: "Suspended" }), true);
+  assert.equal(isPlanLimit({ title: "Imbalance" }), true);
+  assert.equal(isPlanLimit({ title: "unbalanced weekly" }), true);
 
   // ---- isPlanLimit: title AND detail both checked ----
   assert.equal(isPlanLimit({ title: "Overage", detail: "clean" }), false, "title alone decides");
