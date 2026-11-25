@@ -488,28 +488,20 @@ function setup({ exclude = true } = {}) {
   s.done();
 }
 
-// BUG: a merge commit's changed files are invisible to commitFiles(). `git
-// show --name-status --format= -M <merge>` prints NOTHING for a clean merge
-// (verified: merging a branch that adds bad.txt yields empty output), so a
-// run that merges a branch carrying outside files produces a merge commit
-// that contributes no paths to checkRun — ownCommits lists it, badCommits
-// stays empty, and with a clean worktree afterwards dirtyPaths sees nothing:
-// the run passes ok. The scenario below shows it; it is left commented out
-// because it documents current (broken) behaviour rather than desired
-// behaviour. If commitFiles ever needs to see merge diffs it has to diff
-// against the first parent (e.g. `git diff-tree -m --first-parent` or
-// `git show --first-parent`).
-// {
-//   const s = setup();
-//   const b = s.before();
-//   s.git("checkout", "-qb", "side");
-//   s.write("bad-merge.txt"); s.git("add", "-A"); s.git("commit", "-qm", "bad on side");
-//   s.git("checkout", "-q", "-");
-//   s.git("merge", "-q", "--no-ff", "side", "-m", "merge side");
-//   const res = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env });
-//   assert.equal(res.ok, false, "a merge that brings in outside files must not pass: " + JSON.stringify(res.violations));
-//   assert.ok(res.badPaths.includes("bad-merge.txt"));
-//   s.done();
-// }
+// A merge commit's changed files are checked too: commitFiles diffs a merge
+// against its first parent, so a run that merges in a branch carrying files
+// outside its list is caught here.
+{
+  const s = setup();
+  const b = s.before();
+  s.git("checkout", "-qb", "side");
+  s.write("bad-merge.txt"); s.git("add", "-A"); s.git("commit", "-qm", "bad on side");
+  s.git("checkout", "-q", "-");
+  s.git("merge", "-q", "--no-ff", "side", "-m", "merge side");
+  const res = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env });
+  assert.equal(res.ok, false, "a merge that brings in outside files must not pass: " + JSON.stringify(res.violations));
+  assert.ok(res.badPaths.includes("bad-merge.txt"));
+  s.done();
+}
 
 console.log("constance-guard.deep: tests passed");
