@@ -1,12 +1,16 @@
 // Freebuff (Codebuff-based) usage, read from its own local run state —
 // read-only, no network, no credentials. Freebuff keeps one directory per
-// chat under ~/.config/manicode/projects/<project>/chats/<timestamp>/ with
-// run-state.json holding the counters it actually reports (verified on the
-// host 2026-11-25: creditsUsed, contextTokenCount) and chat-meta.json for
-// chat-level metadata. Anything the files do not carry is not shown: plan
-// rate limits and reset windows are cloud-only, so `limits` stays [] and the
-// note says so unless a file happens to hold them. Nothing here writes,
-// refreshes or prints a credential.
+// chat under ~/.config/manicode/chats/<timestamp>/ and may also keep the
+// same chats under ~/.config/manicode/projects/<project>/chats/<timestamp>/
+// (deduped by the timestamp folder name). run-state.json holds the counters
+// it actually reports, nested at sessionState.mainAgentState
+// (creditsUsed, directCreditsUsed, contextTokenCount, lastActivityAt —
+// verified on the host 2026-11-25); the older top-level fields are kept as a
+// fallback. chat-meta.json carries chat-level metadata. Anything the files
+// do not carry is not shown: plan rate limits and reset windows are
+// cloud-only, so `limits` stays [] and the note says so unless a file
+// happens to hold them. Nothing here writes, refreshes or prints a
+// credential.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +18,14 @@ import path from "node:path";
 const DAY = 24 * 60 * 60 * 1000;
 
 // Fields the run state reports usage in; only ones actually present are used.
+// Nested shape first: sessionState.mainAgentState.{creditsUsed,
+// directCreditsUsed, contextTokenCount, lastActivityAt}. creditsUsed and
+// directCreditsUsed are incremented together upstream, so creditsUsed is the
+// total and directCreditsUsed is only a fallback when creditsUsed is absent
+// (summing them would double-count). CREDIT_KEYS/TOKEN_KEYS/TIME_KEYS are the
+// older top-level fallback.
+const NESTED_CREDIT_KEYS = ["creditsUsed", "directCreditsUsed"];
+const NESTED_TOKEN_KEYS = ["contextTokenCount"];
 const CREDIT_KEYS = ["creditsUsed", "credits", "creditsSpent"];
 const TOKEN_KEYS = ["contextTokenCount", "tokensUsed", "totalTokens"];
 // Plausible timestamp fields, most-trustworthy first. Chat-meta may also
@@ -79,55 +91,84 @@ function mtimeMs(file) {
   }
 }
 
-// Every chat directory under <manicode>/projects/*/chats/*/ that holds a
-// parseable run-state.json. Returns [{run, meta, runFile, metaFile}] where
-// run/meta are the parsed objects (null when absent/corrupt).
+// Every chat directory holding a parseable run-state.json, from both known
+// layouts: <manicode>/chats/<timestamp>/ first, then
+// <manicode>/projects/<project>/chats/<timestamp>/. Chats are deduped by the
+// timestamp folder name (the same chat can appear under both layouts); the
+// direct chats/ copy wins when both parse. Returns
+// [{run, meta, runFile, metaFile}] where run/meta are the parsed objects
+// (meta null when absent/corrupt).
 function chatDirs(manicode) {
+  const chats = [];
+  const seen = new Set();
+  const addFrom = (chatsDir) => {
+    let chatNames;
+    try {
+      chatNames = fs.readdirSync(chatsDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const chat of chatNames) {
+      if (!chat.isDirectory() || seen.has(chat.name)) continue;
+      const dir = path.join(chatsDir, chat.name);
+      const runFile = path.join(dir, "run-state.json");
+      const run = readJson(runFile);
+      if (!run) continue; // no run state, no usage to report
+      seen.add(chat.name);
+      const metaFile = path.join(dir, "chat-meta.json");
+      chats.push({ run, meta: readJson(metaFile), runFile, metaFile });
+    }
+  };
+  addFrom(path.join(manicode, "chats"));
   const projects = path.join(manicode, "projects");
   let projectNames;
   try {
     projectNames = fs.readdirSync(projects, { withFileTypes: true });
   } catch {
-    return [];
+    projectNames = [];
   }
-  const chats = [];
   for (const project of projectNames) {
     if (!project.isDirectory()) continue;
-    const chatsDir = path.join(projects, project.name, "chats");
-    let chatNames;
-    try {
-      chatNames = fs.readdirSync(chatsDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const chat of chatNames) {
-      if (!chat.isDirectory()) continue;
-      const dir = path.join(chatsDir, chat.name);
-      const runFile = path.join(dir, "run-state.json");
-      const run = readJson(runFile);
-      if (!run) continue; // no run state, no usage to report
-      const metaFile = path.join(dir, "chat-meta.json");
-      chats.push({ run, meta: readJson(metaFile), runFile, metaFile });
-    }
+    addFrom(path.join(projects, project.name, "chats"));
   }
   return chats;
 }
 
+// sessionState.mainAgentState when the run state carries it, else null.
+function mainAgentState(run) {
+  const session = obj(run.sessionState);
+  return session ? obj(session.mainAgentState) : null;
+}
+
+// The first numeric field present in `record` among `keys`.
+function pickNum(record, keys) {
+  if (!record) return null;
+  for (const key of keys) {
+    const v = num(record[key]);
+    if (v != null) return v;
+  }
+  return null;
+}
+
 // The usage one chat's run state reports: {credits?, tokens?, ms} — each
-// metric only when its field is actually present, the time from the best
-// available source (run-state field, then run-state mtime, then chat-meta
-// field/mtime). ms may be null: an undated chat still counts toward total.
+// metric only when its field is actually present (nested
+// sessionState.mainAgentState first, top-level fields as fallback), the time
+// from the best available source (nested lastActivityAt, then run-state
+// field, then run-state mtime, then chat-meta field/mtime). ms may be null:
+// an undated chat still counts toward total.
 function chatUsage(chat) {
   const out = { ms: null };
-  for (const key of CREDIT_KEYS) {
-    const v = num(chat.run[key]);
-    if (v != null) { out.credits = v; break; }
-  }
-  for (const key of TOKEN_KEYS) {
-    const v = num(chat.run[key]);
-    if (v != null) { out.tokens = v; break; }
-  }
-  out.ms = jsonTime(chat.run) ?? mtimeMs(chat.runFile) ?? jsonTime(chat.meta || {}) ?? mtimeMs(chat.metaFile);
+  const agent = mainAgentState(chat.run);
+  const credits = pickNum(agent, NESTED_CREDIT_KEYS) ?? pickNum(chat.run, CREDIT_KEYS);
+  if (credits != null) out.credits = credits;
+  const tokens = pickNum(agent, NESTED_TOKEN_KEYS) ?? pickNum(chat.run, TOKEN_KEYS);
+  if (tokens != null) out.tokens = tokens;
+  out.ms =
+    (agent ? timeMs(agent.lastActivityAt) : null) ??
+    jsonTime(chat.run) ??
+    mtimeMs(chat.runFile) ??
+    jsonTime(chat.meta || {}) ??
+    mtimeMs(chat.metaFile);
   return out;
 }
 
@@ -164,7 +205,7 @@ export function readFreebuffUsage({ home = os.homedir(), now = Date.now() } = {}
         if (usage.tokens != null) bucket.tokens = (bucket.tokens || 0) + usage.tokens;
       }
     }
-    for (const source of [chat.run, chat.meta]) {
+    for (const source of [mainAgentState(chat.run), chat.run, chat.meta]) {
       if (!source) continue;
       for (const key of LIMIT_KEYS) {
         const v = source[key];
