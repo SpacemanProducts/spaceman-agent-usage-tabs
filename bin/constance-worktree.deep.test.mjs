@@ -293,22 +293,21 @@ function newRepo(name) {
   }
   clean(repo);
 
-  // BUG: createWorktree is not idempotent for the same job id. It removes a
-  // stale worktree folder at the same path but leaves the old branch behind,
-  // so `git worktree add -b` then fails with "branch already exists". A retry
-  // of the same job (the very case the stale-folder cleanup exists for) dies.
-  // {
-  //   const repo2 = newRepo("create-twice");
-  //   const first = createWorktree(repo2, 922);
-  //   const second = createWorktree(repo2, 922);   // should reuse/replace cleanly
-  //   assert.equal(second.worktree, first.worktree);
-  //   assert.equal(second.branch, first.branch);
-  //   assert.ok(fs.existsSync(second.worktree), "the recreated worktree exists");
-  //   assert.equal(git(repo2, "worktree", "list", "--porcelain").split("worktree ").length - 1, 2,
-  //     "exactly the repo plus one worktree");
-  //   dropWorktree(repo2, second.worktree, second.branch, { deleteBranch: true });
-  //   clean(repo2);
-  // }
+  // Regression: createWorktree is idempotent for the same job id. It removes a
+  // stale worktree folder at the same path and reuses the leftover branch
+  // instead of dying on `git worktree add -b` ("branch already exists").
+  {
+    const repo2 = newRepo("create-twice");
+    const first = createWorktree(repo2, 922);
+    const second = createWorktree(repo2, 922);   // should reuse/replace cleanly
+    assert.equal(second.worktree, first.worktree);
+    assert.equal(second.branch, first.branch);
+    assert.ok(fs.existsSync(second.worktree), "the recreated worktree exists");
+    assert.equal(git(repo2, "worktree", "list", "--porcelain").split("worktree ").length - 1, 2,
+      "exactly the repo plus one worktree");
+    dropWorktree(repo2, second.worktree, second.branch, { deleteBranch: true });
+    clean(repo2);
+  }
 }
 
 // ============================================================ mergeBranch: self, empty, detached, truncation, dirty-conflict
@@ -412,26 +411,31 @@ function newRepo(name) {
   assert.ok(d3.some((s) => s.includes("worktree removed")), "a plain file path is reported removed: " + d3.join("; "));
   assert.equal(fs.existsSync(f), false, "the file is gone");
 
-  // BUG: dropWorktree reports "worktree removed" and deletes the branch even
-  // when BOTH `git worktree remove` and the rmSync fallback fail — e.g. the
-  // folder's permissions were tightened (chmod 000) after creation. The
-  // folder is still there afterwards, so the report lies and the branch is
-  // deleted while its worktree remains on disk.
-  // {
-  //   const repo2 = newRepo("drop-unremovable");
-  //   const w = createWorktree(repo2, 935);
-  //   fs.chmodSync(w.worktree, 0o000);
-  //   const d = dropWorktree(repo2, w.worktree, w.branch, { deleteBranch: true });
-  //   fs.chmodSync(w.worktree, 0o700);   // restore so cleanup can run
-  //   assert.equal(fs.existsSync(w.worktree), false,
-  //     "desired: the folder is actually gone (today it survives while 'worktree removed' is reported)");
-  //   assert.ok(!d.some((s) => s.includes("worktree removed")) || !fs.existsSync(w.worktree),
-  //     "desired: 'worktree removed' is only reported when it really was");
-  //   fs.rmSync(w.worktree, { recursive: true, force: true });
-  //   git(repo2, "worktree", "prune");
-  //   git(repo2, "branch", "-D", w.branch);
-  //   clean(repo2);
-  // }
+  // Regression: dropWorktree must not report "worktree removed" or delete the
+  // branch when BOTH `git worktree remove` and the rmSync fallback fail — e.g.
+  // the folder's permissions were tightened (chmod 000) after creation. The
+  // folder is still there afterwards, so the report must say the removal
+  // failed and the branch must be kept.
+  {
+    const repo2 = newRepo("drop-unremovable");
+    const w = createWorktree(repo2, 935);
+    fs.chmodSync(w.worktree, 0o000);
+    const d = dropWorktree(repo2, w.worktree, w.branch, { deleteBranch: true });
+    fs.chmodSync(w.worktree, 0o700);   // restore so cleanup can run
+    assert.equal(fs.existsSync(w.worktree), true,
+      "an unremovable folder survives and is reported as such");
+    assert.ok(d.some((s) => s.includes("removal failed")),
+      "the failed removal is reported: " + d.join("; "));
+    assert.ok(!d.some((s) => s.includes("worktree removed")),
+      "'worktree removed' is never claimed for a folder that is still there: " + d.join("; "));
+    assert.ok(d.some((s) => s.includes("kept")),
+      "the branch is kept while its worktree remains: " + d.join("; "));
+    assert.notEqual(git(repo2, "branch", "--list", w.branch).trim(), "", "the branch still exists");
+    fs.rmSync(w.worktree, { recursive: true, force: true });
+    git(repo2, "worktree", "prune");
+    git(repo2, "branch", "-D", w.branch);
+    clean(repo2);
+  }
 
   clean(repo);
 }
