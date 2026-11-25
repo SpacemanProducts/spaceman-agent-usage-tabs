@@ -14,6 +14,10 @@ import { KINDS, backlogFile, parseBacklog, readBacklog, addItem, markTaken, mark
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "constance-backlog-deep-"));
 process.env.HOME = path.join(tmp, "home");
 fs.mkdirSync(process.env.HOME, { recursive: true });
+for (const v of ["XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"]) {
+  process.env[v] = path.join(tmp, v.toLowerCase());
+  fs.mkdirSync(process.env[v], { recursive: true });
+}
 const dir = path.join(tmp, "project");
 
 // ---------- parseBacklog: malformed and empty inputs ----------
@@ -291,6 +295,133 @@ assert.equal(formatItem({ kind: "docs", text: "readme" }), "docs: readme");
 // files undefined is tolerated; a job tag is never shown.
 assert.equal(formatItem({ kind: "task", text: "x", files: undefined, job: 9 }), "task: x");
 assert.equal(formatItem({ kind: "task", text: "x", job: 9 }), "task: x", "job is not part of the format");
+
+// ---------- parseBacklog: encoding and line-separator edges ----------
+
+// A BOM before the first item hides it: the '^-' anchor no longer matches.
+assert.deepEqual(parseBacklog("\uFEFF- [ ] task: hidden\n"), [], "BOM breaks the item anchor");
+const bomThenItem = parseBacklog("\uFEFF# Backlog\n- [ ] task: visible\n");
+assert.equal(bomThenItem.length, 1, "only the BOM'd line is affected");
+// Lone '\r' (old Mac) endings are never split on, and '.' cannot match '\r'
+// inside a body, so such a "file" yields no items at all.
+assert.deepEqual(parseBacklog("- [ ] task: a\r- [ ] task: b\r"), []);
+// Unicode line separators are outside '.' too.
+assert.deepEqual(parseBacklog("- [ ] task: a\u2028b\n"), []);
+// '-  [ ]' (two spaces) and '+ [ ]' are not items.
+assert.deepEqual(parseBacklog("-  [ ] task: two spaces\n+ [ ] task: plus\n"), []);
+// Hand-edited trailing whitespace inside the body is preserved verbatim.
+assert.equal(parseBacklog("- [ ] task: keep  \n")[0].text, "keep  ");
+
+// ---------- .constance / backlog.md shaped wrong on disk ----------
+
+// '.constance' as a regular file: reads report empty/false, writes throw.
+const dcfile = path.join(tmp, "dcfile");
+fs.mkdirSync(dcfile, { recursive: true });
+fs.writeFileSync(path.join(dcfile, ".constance"), "i am a file");
+assert.deepEqual(readBacklog(dcfile), [], "backlog under a file .constance reads empty");
+assert.deepEqual(openItems(dcfile), []);
+assert.equal(markDone(dcfile, 1), false);
+assert.equal(markTaken(dcfile, 1, 2), false);
+assert.equal(removeItem(dcfile, 1), false);
+assert.throws(() => addItem(dcfile, { text: "x" }), /already exists/, "cannot mkdir .constance over a file");
+// backlog.md itself as a directory: every line edit reports false.
+const dirBacklog = path.join(tmp, "dirbacklog");
+fs.mkdirSync(backlogFile(dirBacklog), { recursive: true });
+assert.equal(markDone(dirBacklog, 1), false);
+assert.equal(markTaken(dirBacklog, 1, 1), false);
+assert.equal(removeItem(dirBacklog, 1), false);
+
+// ---------- addItem: round-trip and file-state edges ----------
+
+// Backslashes and parens together in a file name round-trip through esc/unesc.
+const bsFile = addItem(dir, { text: "backslash file", files: ["a\\b(m).mjs"] });
+assert.deepEqual(readBacklog(dir).find((x) => x.id === bsFile.id).files, ["a\\b(m).mjs"]);
+// Unicode and emoji text round-trips untouched.
+const uni = addItem(dir, { text: "emoji 🚀 and ünïcode" });
+assert.equal(readBacklog(dir).find((x) => x.id === uni.id).text, "emoji 🚀 and ünïcode");
+// A heading-only file without a trailing newline still gets the item on line 2.
+const headOnly = path.join(tmp, "headonly");
+fs.mkdirSync(path.join(headOnly, ".constance"), { recursive: true });
+fs.writeFileSync(backlogFile(headOnly), "# Backlog");
+const ho = addItem(headOnly, { text: "first" });
+assert.equal(ho.line, 1);
+assert.equal(fs.readFileSync(backlogFile(headOnly), "utf8"), "# Backlog\n- [ ] task: first\n");
+// One CRLF anywhere in the file switches the appended item's EOL to CRLF,
+// even when the other lines are LF.
+const mixed = path.join(tmp, "mixed");
+fs.mkdirSync(path.join(mixed, ".constance"), { recursive: true });
+fs.writeFileSync(backlogFile(mixed), "- [ ] task: unix\n- [ ] task: dos\r\n");
+addItem(mixed, { text: "third" });
+assert.ok(fs.readFileSync(backlogFile(mixed), "utf8").endsWith("- [ ] task: third\r\n"), "any CRLF in the file picks CRLF for the append");
+// A stale '<file>.<pid>.tmp' from a crashed write is simply overwritten.
+const stale = path.join(tmp, "stale");
+fs.mkdirSync(path.join(stale, ".constance"), { recursive: true });
+fs.writeFileSync(backlogFile(stale), "");
+fs.writeFileSync(backlogFile(stale) + "." + process.pid + ".tmp", "garbage");
+addItem(stale, { text: "after crash" });
+assert.equal(fs.readFileSync(backlogFile(stale), "utf8"), "# Backlog\n- [ ] task: after crash\n");
+
+// ---------- markTaken: id and jobId type edges ----------
+
+// A string id never matches the numeric item ids.
+assert.equal(markTaken(dir, "1", 5), false, "string id is not an item id");
+// jobId 0 is accepted and the item stops being open.
+const j0 = addItem(dir, { text: "job zero" });
+assert.equal(markTaken(dir, j0.id, 0), true);
+assert.equal(readBacklog(dir).find((x) => x.text === "job zero").job, 0);
+assert.ok(!openItems(dir).some((x) => x.text === "job zero"), "job 0 counts as taken");
+// Numeric strings normalise: surrounding whitespace and exponents included.
+const jstr = addItem(dir, { text: "job string" });
+assert.equal(markTaken(dir, jstr.id, " 12 "), true);
+assert.equal(readBacklog(dir).find((x) => x.text === "job string").job, 12);
+assert.equal(markTaken(dir, jstr.id, "1e2"), true);
+assert.equal(readBacklog(dir).find((x) => x.text === "job string").job, 100);
+
+// ---------- stale-state: every edit re-reads the file ----------
+
+// An external rewrite between calls is honoured; nothing is cached.
+const freshState = path.join(tmp, "freshstate");
+fs.mkdirSync(path.join(freshState, ".constance"), { recursive: true });
+fs.writeFileSync(backlogFile(freshState), "- [ ] task: alpha\n- [ ] task: beta\n");
+markDone(freshState, 1);
+fs.writeFileSync(backlogFile(freshState), "- [ ] task: gamma\n- [ ] task: delta\n");
+assert.equal(removeItem(freshState, 2), true, "edit sees the rewritten file, not cached state");
+assert.deepEqual(readBacklog(freshState).map((x) => x.text), ["gamma"]);
+
+// ---------- formatItem: wrong types ----------
+
+assert.throws(() => formatItem({ kind: "task", text: "x", files: "a.mjs" }), TypeError, "files must be an array");
+assert.throws(() => formatItem({ kind: "task", text: "x", files: { length: 1 } }), TypeError);
+
+// ---------- known bugs (kept as commented-out tests) ----------
+
+// BUG: addItem accepts item text containing '\n' or '\r' and writes it raw.
+// With '\n' the item splits across two physical lines — the tail becomes
+// prose, the stored item parses back truncated, and dedupe/edit-by-id break.
+// With '\r' ITEM_RE can never match the line, so the item is invisible to
+// readBacklog/openItems. Verified 2026-11-25: addItem(d,{text:"a\nb"}) writes
+// '- [ ] task: a\nb\n' and readBacklog sees text "a" only; text "a\rb" yields
+// no item at all. addItem should refuse or escape control characters.
+// assert.throws(() => addItem(dir, { text: "multi\nline" }));
+// const bugCr = addItem(dir, { text: "carriage\rreturn" });
+// assert.equal(readBacklog(dir).find((x) => x.id === bugCr.id)?.text, "carriage\rreturn");
+
+// BUG: files entries containing ',' do not round-trip. esc() leaves commas
+// alone but parseBacklog splits '(files: ...)' on ',', so addItem(dir,
+// {files:["a,b.mjs"]}) stores '(files: a,b.mjs)' which parses back as two
+// files ["a","b.mjs"]. Verified 2026-11-25. Either refuse commas in file
+// names or escape the separator.
+// const bugComma = addItem(dir, { text: "comma", files: ["a,b.mjs"] });
+// assert.deepEqual(readBacklog(dir).find((x) => x.id === bugComma.id).files, ["a,b.mjs"]);
+
+// BUG: markTaken accepts jobId 1e21 — Number.isInteger(1e21) is true for the
+// integral double — but String(1e21) is "1e+21", so the written '(job 1e+21)'
+// tag fails parseBacklog's /\(job (\d+)\)/ and is silently lost: the item
+// stays open with the tag glued into its text. Verified 2026-11-25. The
+// guard should also require the stringified id to match /^\d+$/.
+// const bugBig = addItem(dir, { text: "big job" });
+// assert.equal(markTaken(dir, bugBig.id, 1e21), false);
+// assert.equal(readBacklog(dir).find((x) => x.text === "big job").job, null);
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("constance-backlog.deep: tests passed");
