@@ -1035,6 +1035,50 @@ Panel {
   readonly property var constanceScorecard: constanceBoard.scorecard || ({ rows: [], spareOn: true, spare: "" })
   readonly property bool constanceSpareOn: userSettings.constanceUseItOrLoseIt !== undefined
     ? userSettings.constanceUseItOrLoseIt !== false : root.setting("constanceUseItOrLoseIt", true) !== false
+  // ---- The header tiles and the Milk Opus slider (top of her screen). Every field is read
+  // with a fallback: an older status payload simply shows "—" or the setting's own value.
+  readonly property int constanceChecklistDone: Number(constanceBoard.checklist && constanceBoard.checklist.done) || 0
+  readonly property int constanceChecklistTotal: Number(constanceBoard.checklist && constanceBoard.checklist.total) || 0
+  readonly property int constanceRunningCount: {
+    var n = 0, js = constance.jobs || []
+    for (var i = 0; i < js.length; i++) if (js[i] && js[i].status === "running") n++
+    return n
+  }
+  // Her Claude "Session" window used, as a 0..1 fraction; -1 when pace reports none.
+  readonly property real constanceSessionUsed: {
+    var ws = (constance.pace && constance.pace.windows) || []
+    for (var i = 0; i < ws.length; i++) {
+      var w = ws[i]
+      if (w && w.title === "Session" && isFinite(Number(w.used))) return Number(w.used)
+    }
+    return -1
+  }
+  // Free-worker tokens per 1% of her session (status.leverage, bin/constance-leverage.mjs):
+  // null until enough of her session is spent to measure.
+  readonly property var constanceLeverage: constance.leverage || null
+  readonly property string constancePerPctText: {
+    var l = root.constanceLeverage, p = l ? Number(l.perPct) : NaN
+    return isFinite(p) ? root.fmtTokens(p) : "—"
+  }
+  readonly property color constancePerPctColor: {
+    var l = root.constanceLeverage
+    if (!l || !isFinite(Number(l.perPct))) return root.dim
+    return Number(l.vsTarget) >= 1 ? root.green : root.amber
+  }
+  // The Milk Opus slider (settings.json constanceMilk, 0..100 step 5; bin/constance-milk.mjs):
+  // status.milk wins when the payload carries it, else the saved setting, else the default 25.
+  readonly property int constanceMilk: {
+    var m = constance.milk
+    var v = m && isFinite(Number(m.value)) ? Number(m.value)
+      : (userSettings.constanceMilk !== undefined ? Number(userSettings.constanceMilk) : Number(root.setting("constanceMilk", 25)))
+    return isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 25
+  }
+  readonly property string constanceMilkBand: {
+    var b = constance.milk && constance.milk.band ? String(constance.milk.band) : ""
+    if (b !== "") return b
+    var v = root.constanceMilk
+    return v <= 33 ? "milk" : (v <= 66 ? "balanced" : "quality")
+  }
   // Live clock for running cards' elapsed time (ticks only while her screen is open).
   property real constanceNow: Date.now()
   Timer { interval: 1000; running: root.constanceOpen && root.opened; repeat: true; triggeredOnStart: true; onTriggered: root.constanceNow = Date.now() }
@@ -2560,6 +2604,179 @@ Panel {
             width: parent.width
             spacing: Style.space(14)
 
+            // The header: four big-number tiles — checklist items done, copies running,
+            // her Session % used, and her leverage (free-worker tokens per 1% of session).
+            Row {
+              id: constanceHead
+              width: parent.width
+              spacing: Style.space(8)
+              readonly property real tileW: (width - spacing * 3) / 4
+              Repeater {
+                model: [
+                  { label: "done", text: root.constanceChecklistTotal > 0 ? root.constanceChecklistDone + "/" + root.constanceChecklistTotal : "—",
+                    color: root.constanceChecklistTotal > 0 && root.constanceChecklistDone === root.constanceChecklistTotal ? root.green : root.foreground },
+                  { label: "copies", text: String(root.constanceRunningCount), color: root.foreground },
+                  { label: "session", text: root.constanceSessionUsed >= 0 ? Math.round(root.constanceSessionUsed * 100) + "%" : "—",
+                    color: root.constanceSessionUsed >= 0 ? root.meterColor(root.constanceSessionUsed) : root.dim },
+                  { label: "per 1%", text: root.constancePerPctText, color: root.constancePerPctColor }
+                ]
+                delegate: Rectangle {
+                  required property var modelData
+                  width: constanceHead.tileW
+                  height: tileNum.implicitHeight + tileLabel.implicitHeight + Style.space(12)
+                  radius: Style.cornerRadius
+                  color: root.soft(root.foreground, 0.04)
+                  border.width: 1
+                  border.color: root.soft(root.foreground, 0.12)
+                  Text {
+                    id: tileNum
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(7)
+                    horizontalAlignment: Text.AlignLeft
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    text: modelData.text
+                    color: modelData.color
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body * 1.8
+                    font.bold: true
+                  }
+                  Text {
+                    id: tileLabel
+                    anchors.left: tileNum.left
+                    anchors.right: tileNum.right
+                    anchors.top: tileNum.bottom
+                    anchors.topMargin: Style.space(2)
+                    textFormat: Text.PlainText
+                    text: modelData.label
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+            }
+
+            // Milk Opus: how much of the work she keeps for herself on the paid plan versus
+            // hands to the free agents. Moving it saves constanceMilk; sandbox and guardrails
+            // stay on at every setting.
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+              Item {
+                width: parent.width
+                height: Math.max(milkTitle.implicitHeight, milkValue.implicitHeight)
+                Text {
+                  id: milkTitle
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: "Milk Opus"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+                Text {
+                  id: milkValue
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: String(root.constanceMilk)
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+              Item {
+                id: milkSlide
+                width: parent.width
+                height: Style.space(16)
+                readonly property real handleW: Style.space(14)
+                readonly property real pad: handleW / 2 + Style.space(2)
+                // The rail is inset by half a handle so the knob can reach both ends.
+                Rectangle {
+                  id: milkRail
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.leftMargin: milkSlide.pad
+                  anchors.rightMargin: milkSlide.pad
+                  anchors.verticalCenter: parent.verticalCenter
+                  height: Style.space(6)
+                  radius: height / 2
+                  color: root.track
+                  Rectangle {
+                    width: parent.width * root.constanceMilk / 100
+                    height: parent.height
+                    radius: height / 2
+                    color: Color.accent
+                  }
+                }
+                Rectangle {
+                  id: milkHandle
+                  width: milkSlide.handleW
+                  height: width
+                  radius: width / 2
+                  anchors.verticalCenter: milkRail.verticalCenter
+                  x: milkRail.x + milkRail.width * (milkArea.pending >= 0 ? milkArea.pending : root.constanceMilk) / 100 - width / 2
+                  color: root.foreground
+                  border.width: 1
+                  border.color: root.soft(root.foreground, 0.4)
+                }
+                MouseArea {
+                  id: milkArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  preventStealing: true
+                  // Dragging only moves the knob; the setting is saved once, on release.
+                  property int pending: -1
+                  function setFromX(x) {
+                    var f = Math.max(0, Math.min(1, (x - milkRail.x) / milkRail.width))
+                    pending = Math.round(f * 20) * 5
+                  }
+                  onPressed: function(m) { setFromX(m.x) }
+                  onPositionChanged: function(m) { if (pressed) setFromX(m.x) }
+                  onReleased: {
+                    if (pending >= 0 && pending !== root.constanceMilk) root.writeSetting(["constanceMilk", String(pending)])
+                    pending = -1
+                  }
+                  onCanceled: pending = -1
+                }
+                PanelToolTip { visible: milkArea.containsMouse; text: "Milk Opus " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
+              }
+              Item {
+                width: parent.width
+                height: milkLess.implicitHeight
+                Text {
+                  id: milkLess
+                  anchors.left: parent.left
+                  textFormat: Text.PlainText
+                  text: "less Opus"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  anchors.right: parent.right
+                  textFormat: Text.PlainText
+                  text: "more quality · " + root.constanceMilkBand
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+              Text {
+                textFormat: Text.PlainText
+                text: "Sandbox and guardrails always on."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
             Column {
               visible: !root.constanceActive || root.constanceAddingGoal || root.constanceEditId !== ""
               width: parent.width
@@ -2804,16 +3021,6 @@ Panel {
                 width: parent.width
                 height: checkHeader.implicitHeight
                 PanelSectionHeader { id: checkHeader; anchors.left: parent.left; text: "CHECKLIST" }
-                Text {
-                  anchors.right: parent.right
-                  anchors.verticalCenter: checkHeader.verticalCenter
-                  textFormat: Text.PlainText
-                  text: root.constanceBoard.checklist.line || ""
-                  color: root.constanceBoard.checklist.done === root.constanceBoard.checklist.total ? root.green : root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                }
               }
               Rectangle {
                 width: parent.width
@@ -3256,6 +3463,7 @@ Panel {
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
                     text: root.constanceHistoryLine(modelData) + (modelData.dir ? " · " + root.shortPath(modelData.dir) : "")
+                      + (modelData.leverage && modelData.leverage.label ? " · " + modelData.leverage.label : "")
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
