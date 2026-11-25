@@ -7,7 +7,8 @@
 const SENT_BACK = "sent back";
 
 function fileSet(files) {
-  return new Set((files || []).map((f) => String(f).trim()).filter(Boolean));
+  if (!Array.isArray(files)) return new Set();
+  return new Set(files.filter((f) => f != null && f !== false).map((f) => String(f).trim()).filter(Boolean));
 }
 
 // True when both lists are non-empty and hold the same set of paths
@@ -24,7 +25,8 @@ export function sameFiles(a, b) {
 // jobs of any status, loops guarded), and every 'sent back' job on the same
 // file set. Only 'sent back' jobs are returned.
 export function chain(jobs, { files = [], againOf = null } = {}) {
-  const byId = new Map(jobs.map((j) => [j.id, j]));
+  const list = jobs.filter((j) => j != null);
+  const byId = new Map(list.map((j) => [j.id, j]));
   const found = new Set();
   const seen = new Set();
   let cur = byId.get(againOf);
@@ -33,7 +35,7 @@ export function chain(jobs, { files = [], againOf = null } = {}) {
     found.add(cur.id);
     cur = byId.get(cur.againOf ?? null);
   }
-  for (const j of jobs) {
+  for (const j of list) {
     if (j.status === SENT_BACK && sameFiles(j.files, files)) found.add(j.id);
   }
   return [...found].filter((id) => byId.get(id)?.status === SENT_BACK).sort((a, b) => a - b);
