@@ -1,10 +1,12 @@
 // Kilo (opencode-based) free-model guard for Constance worker runs.
 // Kilo bills per token for paid models; a Constance copy must only ever run a
 // model we KNOW is free, and must fail the job if the run reports otherwise.
-// Rules (unknown is never free):
-//  - id "kilo-auto/free", or ending ":free" / "/free"  -> free
+// Rules (unknown is never free; anything that might cost money is not free):
+//  - id "kilo-auto/free", or ending ":free" / "/free"  -> free, UNLESS the
+//    models-cache entry reports a real (positive) cost, which vetoes the id
 //  - a models-cache entry (~/.cache/kilo/models.json shape) whose cost.input
-//    and cost.output are both 0 AND which is explicitly tagged free -> free
+//    and cost.output are both reported 0 AND which is explicitly tagged free
+//    -> free; null/false/"" cost fields are unknown, never zero
 //  - anything else -> not free
 // kiloArgs() builds the headless `kilo run` argv (verified against
 // `kilo run --help` on kilo 7.8.32: -m/--model provider/model,
@@ -25,16 +27,38 @@ function tagFree(entry) {
   return false;
 }
 
+// A cost field the source actually reported as a number (a numeric string
+// counts as the number it spells). null/false/""/objects are unknown, never 0.
+function costNum(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+// The cache entry reports a real (positive) cost anywhere under cost.* —
+// that vetoes even a ":free"-looking id.
+function reportsCost(entry) {
+  const c = entry?.cost;
+  if (!c || typeof c !== "object") return false;
+  return Object.values(c).some((v) => {
+    const n = costNum(v);
+    return n !== null && n > 0;
+  });
+}
+
 function zeroCost(entry) {
   const c = entry?.cost;
   if (!c || typeof c !== "object") return false;
-  return Number(c.input) === 0 && Number(c.output) === 0 &&
-    Number.isFinite(Number(c.input)) && Number.isFinite(Number(c.output));
+  return costNum(c.input) === 0 && costNum(c.output) === 0;
 }
 
 // id: "provider/model" string. entry: optional models-cache model object.
 export function isFreeModel(id, entry) {
   if (typeof id !== "string" || !id.trim()) return false;
+  if (entry && typeof entry === "object" && reportsCost(entry)) return false;
   const norm = id.trim().toLowerCase();
   if (norm === "kilo-auto/free" || FREE_ID.test(norm)) return true;
   return zeroCost(entry) && tagFree(entry);
@@ -60,8 +84,8 @@ export function pickFreeModel(list) {
   }).filter(Boolean);
   // Real `kilo models` ids carry the provider prefix: prefer kilo/kilo-auto/free,
   // but a bare kilo-auto/free in a list still counts as the same auto router.
-  const auto = items.find((i) => i.id.toLowerCase() === "kilo/kilo-auto/free")
-    || items.find((i) => i.id.toLowerCase() === "kilo-auto/free");
+  const auto = items.find((i) => i.id.toLowerCase() === "kilo/kilo-auto/free" && isFreeModel(i.id, i.entry))
+    || items.find((i) => i.id.toLowerCase() === "kilo-auto/free" && isFreeModel(i.id, i.entry));
   if (auto) return auto.id;
   const free = items.find((i) => isFreeModel(i.id, i.entry));
   return free ? free.id : null;
@@ -70,15 +94,22 @@ export function pickFreeModel(list) {
 // Headless args for `kilo run`. Throws on anything not provably free.
 export function kiloArgs(prompt, model) {
   const id = typeof model === "string" ? model : itemId(model);
-  const entry = model && typeof model === "object" ? model.entry : undefined;
+  const entry = model && typeof model === "object" ? (model.entry ?? (model.cost ? model : undefined)) : undefined;
   if (!isFreeModel(id, entry)) throw new Error(`kilo model "${id ?? model}" is not a known free model`);
   return ["run", "--format", "json", "--auto", "-m", id, String(prompt)];
 }
 
-function* records(obj, depth = 0) {
-  if (!obj || typeof obj !== "object" || depth > 8) return;
-  yield obj;
-  for (const v of Object.values(obj)) if (v && typeof v === "object") yield* records(v, depth + 1);
+// Iterative pre-order walk: every object in the parsed event, no depth cap —
+// a paid signal nested past any fixed limit must still be seen.
+function* records(obj) {
+  const stack = [obj];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur || typeof cur !== "object") continue;
+    yield cur;
+    const kids = Object.values(cur).filter((v) => v && typeof v === "object");
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+  }
 }
 
 // Depth of a JSON fragment's open {/[ brackets, ignoring string contents.
@@ -109,8 +140,13 @@ export function costCheck(outputText) {
           const id = r.providerID ? `${r.providerID}/${r.modelID}` : r.modelID;
           if (!isFreeModel(id)) return { paid: true, reason: `non-free model ${id}` };
         }
-        if (typeof r.cost === "number" && Number.isFinite(r.cost) && r.cost > 0)
-          return { paid: true, reason: `cost ${r.cost} reported` };
+        // cost may be a scalar or a {input, output, ...} object; every
+        // reported numeric field is checked like the number it spells.
+        const costFields = r.cost && typeof r.cost === "object" ? Object.values(r.cost) : [r.cost];
+        for (const v of costFields) {
+          const n = costNum(v);
+          if (n !== null && n > 0) return { paid: true, reason: `cost ${n} reported` };
+        }
       }
     }
     return null;
