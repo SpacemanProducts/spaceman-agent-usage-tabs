@@ -72,7 +72,9 @@ export function limitWall(text, now = Date.now()) {
 export function wallFile(dir) { return path.join(dir, "wall.json"); }
 export function writeWall(dir, wall, now = Date.now()) {
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(wallFile(dir), JSON.stringify({ until: wall.until, stated: !!wall.stated, text: wall.text || "", at: now }) + "\n");
+  const file = wallFile(dir), tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ until: wall.until, stated: !!wall.stated, text: wall.text || "", at: now }) + "\n");
+  try { fs.renameSync(tmp, file); } catch (e) { try { fs.unlinkSync(tmp); } catch {} throw e; }
 }
 // The wall still standing at `now`, or null.
 export function readWall(dir, now = Date.now()) {
