@@ -7,7 +7,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-home-"));
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-home-"));
+process.env.HOME = tmpRoot;
+process.env.XDG_STATE_HOME = path.join(tmpRoot, "state");
+process.env.XDG_CONFIG_HOME = path.join(tmpRoot, "config");
+process.env.XDG_CACHE_HOME = path.join(tmpRoot, "cache");
 
 const { scorecardFile, readScorecard, recordReview, scoreRows, sizeHint, rankAgents, scoreLine } =
   await import("./constance-scorecard.mjs");
@@ -278,6 +282,200 @@ assert.doesNotThrow(() => scoreRows({ agents: { a: {} } }));
   assert.ok(!line.endsWith(", avg "), "scoreLine should not end with a dangling avg");
 }
 
+// ---- readScorecard: more corrupt/missing input ----
+{
+  const missing = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-")), "nope");
+  assert.deepEqual(readScorecard(missing), { agents: {}, seen: [] }, "state dir does not exist -> empty card");
+}
+for (const [label, buf] of [
+  ["invalid utf-8", Buffer.from([0xff, 0xfe, 0x7b, 0x22, 0x61, 0x22])],
+  ["utf-8 BOM", Buffer.from("﻿{\"agents\":{}}", "utf8")],
+  ["trailing garbage", Buffer.from("{\"agents\":{}} trailing", "utf8")],
+  ["empty file", Buffer.from("", "utf8")],
+]) {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+  fs.writeFileSync(scorecardFile(d), buf);
+  assert.deepEqual(readScorecard(d), { agents: {}, seen: [] }, label);
+}
+// A stray tmp file from a crashed write is ignored; the real file still reads.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+  recordReview(d, job(1, "devin"), "accept", 1);
+  fs.writeFileSync(scorecardFile(d) + ".12345.tmp", "{garbage", "utf8");
+  fs.writeFileSync(scorecardFile(d) + ".99999.tmp", JSON.stringify({ agents: { ghost: { jobs: 9 } }, seen: ["x"] }), "utf8");
+  const card = readScorecard(d);
+  assert.equal(card.agents.devin.jobs, 1);
+  assert.ok(!card.agents.ghost, "tmp files are not read");
+  // And a new review still writes cleanly over them.
+  recordReview(d, job(2, "devin"), "accept", 2);
+  assert.equal(readScorecard(d).agents.devin.jobs, 2);
+}
+// Unknown fields stored on an agent entry survive a recordReview round-trip
+// (readScorecard spreads the stored object over the zeroed template).
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+  fs.writeFileSync(scorecardFile(d), JSON.stringify({
+    agents: { devin: { jobs: 5, accepted: 4, sentBack: 1, note: "keep me", recent: [] } },
+    seen: ["g0:old"],
+  }), "utf8");
+  const card = recordReview(d, job(9, "devin"), "accept", 1);
+  assert.equal(card.agents.devin.note, "keep me", "custom field preserved");
+  assert.equal(readScorecard(d).agents.devin.note, "keep me", "custom field persisted");
+}
+// Stored counters of the wrong type flow into scoreRows without throwing;
+// the derived rate is NaN rather than a crash.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+  fs.writeFileSync(scorecardFile(d), JSON.stringify({
+    agents: { weird: { jobs: "lots", accepted: "yes", sentBack: 1, tokensSum: "x", tokensN: "y", msSum: "z", msN: "w", recent: "not-array" } },
+    seen: ["g:1"],
+  }), "utf8");
+  const rows = scoreRows(readScorecard(d));
+  assert.equal(rows.length, 3, "weird agent plus the two seeded zero rows");
+  const weird = rows.find((r) => r.agent === "weird");
+  assert.ok(Number.isNaN(weird.acceptRate), "string counters -> NaN rate, no throw");
+}
+
+// ---- recordReview: more validation edges ----
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+  // Non-finite startedAt values are all ignored.
+  for (const s of [Infinity, -Infinity, NaN]) {
+    assert.deepEqual(recordReview(d, job(1, "devin", { startedAt: s }), "accept", 1), { agents: {}, seen: [] }, `startedAt ${s}`);
+  }
+  assert.ok(!fs.existsSync(scorecardFile(d)));
+  // finishedAt === startedAt is a real 0ms sample, not skipped.
+  const card = recordReview(d, job(1, "devin", { startedAt: 5000, finishedAt: 5000, tokens: { n: 7 } }), "accept", 1);
+  assert.equal(card.agents.devin.msSum, 0);
+  assert.equal(card.agents.devin.msN, 1, "zero-length job still counts as a timing sample");
+  assert.equal(card.agents.devin.recent[0].ms, 0);
+}
+// summary of any non-string type is stringified, never crashes; only the
+// "(practice run" prefix skips.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+  recordReview(d, job(1, "devin", { summary: 42 }), "accept", 1);
+  recordReview(d, job(2, "devin", { summary: { text: "x" } }), "accept", 2);
+  recordReview(d, job(3, "devin", { summary: null }), "accept", 3);
+  assert.equal(readScorecard(d).agents.devin.jobs, 3, "non-string summaries all count");
+}
+// `now` is stored verbatim in recent[].at — the module does no clock
+// validation; callers are trusted to pass a timestamp.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+  recordReview(d, job(1, "devin"), "accept", "not-a-time");
+  assert.equal(readScorecard(d).agents.devin.recent[0].at, "not-a-time");
+}
+// Falsy-but-present ids still get dedup keys.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+  recordReview(d, job(false, "devin"), "accept", 1);
+  recordReview(d, job(false, "devin"), "send-back", 2);
+  const card = readScorecard(d);
+  assert.equal(card.agents.devin.jobs, 1, "id false dedups like any other key");
+  assert.deepEqual(card.seen, ["g1:false"]);
+}
+// recordReview re-reads the file every call: mutating a returned card does
+// not leak into the next review, and edits made by "another writer" between
+// calls are honoured (seen keys dedup, agent rows merge).
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+  const c1 = recordReview(d, job(1, "devin"), "accept", 1);
+  c1.agents.devin.jobs = 999;
+  c1.seen.push("g1:fake");
+  const c2 = recordReview(d, job(2, "devin"), "accept", 2);
+  assert.equal(c2.agents.devin.jobs, 2, "mutated return value did not corrupt state");
+  assert.ok(!c2.seen.includes("g1:fake"));
+  // Simulate a concurrent writer landing a review + a seen key first.
+  fs.writeFileSync(scorecardFile(d), JSON.stringify({
+    agents: { grok: { jobs: 4, accepted: 4, sentBack: 0, tokensSum: 0, tokensN: 0, msSum: 0, msN: 0, recent: [] } },
+    seen: ["g9:77"],
+  }), "utf8");
+  const c3 = recordReview(d, job(3, "devin"), "accept", 3);
+  assert.equal(c3.agents.grok.jobs, 4, "other writer's agent row survives the merge");
+  assert.ok(c3.seen.includes("g9:77"), "other writer's seen keys survive");
+  const c4 = recordReview(d, job(77, "devin", { goal: "g9" }), "accept", 4);
+  assert.equal(c4.seen.filter((k) => k === "g9:77").length, 1, "seen key from another writer still dedups");
+  assert.equal(c4.agents.devin.jobs, 1, "deduped job not counted (devin's row restarted with the overwrite)");
+}
+
+// ---- sizeHint / rankAgents / scoreRows / scoreLine: remaining pure edges ----
+assert.deepEqual(sizeHint({ jobs: NaN, acceptRate: 1, avgMs: null }),
+  { maxFiles: 2, note: "no record yet: start small" }, "NaN jobs is falsy -> no record");
+assert.deepEqual(sizeHint({ jobs: 5, acceptRate: NaN, avgMs: null }),
+  { maxFiles: 4, note: "reliable" }, "NaN acceptRate falls through to reliable");
+assert.deepEqual(sizeHint({}), { maxFiles: 2, note: "no record yet: start small" }, "empty row -> no record");
+assert.deepEqual(sizeHint({ jobs: 5, acceptRate: 1, avgMs: -5 }),
+  { maxFiles: 4, note: "reliable" }, "negative avgMs is not slow");
+// rankAgents tolerates every malformed stored entry shape.
+assert.doesNotThrow(() => rankAgents(["a", "b", "c", "d"], { agents: { a: null, b: 42, c: "x", d: { accepted: "y", sentBack: "z" } } }));
+assert.deepEqual(rankAgents(["a"], { agents: { a: null } }), ["a"], "null entry -> default rate");
+// scoreRows: a hand-built card whose `seen` is not an array seeds no rows.
+assert.deepEqual(scoreRows({ agents: { devin: { jobs: 1, accepted: 1, sentBack: 0, tokensSum: 0, tokensN: 0, msSum: 0, msN: 0, recent: [] } }, seen: "not-array" }).map((r) => r.agent),
+  ["devin"], "non-array seen -> no ALWAYS_ROWED seed");
+// scoreRows calls the name mapper once per row with the agent id.
+{
+  const seenIds = [];
+  scoreRows({ agents: { b: { jobs: 1 }, a: { jobs: 2 } } }, (id) => { seenIds.push(id); return id.toUpperCase(); });
+  assert.deepEqual(new Set(seenIds), new Set(["a", "b"]));
+}
+// scoreLine: empty-string name is not nullish, so it wins over the agent id.
+assert.equal(
+  scoreLine({ agent: "z", name: "", jobs: 1, accepted: 1, sentBack: 0, acceptRate: 1, avgTokens: null, avgMs: null }),
+  ": 1 jobs, 1 accepted, 0 sent back");
+// Negative avgTokens still prints (fmtTokens rounds it like any number).
+assert.equal(
+  scoreLine({ agent: "z", name: "Z", jobs: 1, accepted: 1, sentBack: 0, acceptRate: 1, avgTokens: -50.4, avgMs: null }),
+  "Z: 1 jobs, 1 accepted, 0 sent back, avg -50 tokens");
+// Huge avgTokens rolls up to the next unit without crashing.
+assert.equal(
+  scoreLine({ agent: "z", name: "Z", jobs: 1, accepted: 1, sentBack: 0, acceptRate: 1, avgTokens: 2.5e12, avgMs: null }),
+  "Z: 1 jobs, 1 accepted, 0 sent back, avg 2.5T tokens");
+
+// ---- Real bugs found while probing (left commented; do not "fix" the tests) ----
+//
+// BUG 1 — agent ids "__proto__" and "constructor" crash recordReview AND
+// pollute globals. card.agents is a plain object, so
+// `card.agents[agent] ||= EMPTY_AGENT()` resolves "__proto__" to
+// Object.prototype (truthy) and "constructor" to the Object function; the
+// code then does `a.jobs += 1` (NaN) and `a.recent.push(...)` -> TypeError.
+// Verified: recordReview(dir, {id:1, goal:"g", agent:"__proto__", startedAt:1,
+// finishedAt:2}, "accept") throws "Cannot read properties of undefined
+// (reading 'push')" and leaves Object.prototype.jobs === NaN (and
+// Object.jobs === NaN for "constructor") — prototype pollution in the
+// caller's process. readScorecard has the mirror bug: `agents["__proto__"]
+// = {...}` reassigns the prototype instead of storing an own property, so a
+// stored "__proto__" agent row silently vanishes from scoreRows.
+//   const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+//   assert.throws(() => recordReview(d, job(1, "__proto__"), "accept", 1)); // BUG: should record, not throw/pollute
+//
+// BUG 2 — non-primitive/NaN job ids collide in the dedup key. The key is
+// `job.goal + ":" + job.id`, so id NaN -> "g:NaN" and id {} -> "g:[object
+// Object]": two different jobs with the same goal silently dedup into one.
+// Verified: two recordReview calls with id: NaN leave agents.a.jobs === 1
+// and seen === ["g:NaN"]. Same for goal coercion: goal undefined and goal
+// "undefined" both produce "undefined:<id>".
+//   const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-scorecard-deep-"));
+//   recordReview(d, { id: NaN, goal: "g", agent: "a", startedAt: 1, finishedAt: 2 }, "accept", 1);
+//   recordReview(d, { id: NaN, goal: "g", agent: "a", startedAt: 1, finishedAt: 2 }, "accept", 2);
+//   assert.equal(readScorecard(d).agents.a.jobs, 2); // BUG: currently 1
+//
+// BUG 3 — scoreLine can emit a dangling ", avg " for a negative avgMs:
+// `took()` returns "" for ms < 0 but scoreLine still appends ", avg ".
+// Unreachable via recordReview (negative spans are never stored), but
+// scoreLine is exported and takes any row.
+//   assert.ok(!scoreLine({ agent: "z", name: "Z", jobs: 1, accepted: 1, sentBack: 0, acceptRate: 1, avgTokens: null, avgMs: -5 }).endsWith(", avg ")); // BUG: currently does
+//
+// BUG 4 — recordReview is an unlocked read-modify-write; concurrent writers
+// lose updates. Spawning 4 processes x 80 reviews against one scorecard dir
+// left only 177 of 320 jobs recorded (atomic rename prevents corruption but
+// not lost updates). Probably fine while a single Constance driver is the
+// only writer, but nothing enforces that.
+//   // (verified manually with child processes; too heavy/flaky for this file)
+
 fs.rmSync(dir, { recursive: true, force: true });
 fs.rmSync(process.env.HOME, { recursive: true, force: true });
+fs.rmSync(process.env.XDG_STATE_HOME, { recursive: true, force: true });
+fs.rmSync(process.env.XDG_CONFIG_HOME, { recursive: true, force: true });
+fs.rmSync(process.env.XDG_CACHE_HOME, { recursive: true, force: true });
 console.log("constance-scorecard.deep: tests passed");
