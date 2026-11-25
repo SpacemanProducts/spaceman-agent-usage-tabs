@@ -786,7 +786,7 @@ echo "Report: done."
   assert.ok(await until(() => status().jobs.some((j) => j.status === "running" && j.title === "building q1")), "the tagged job runs");
   {
     const b = status().board;
-    assert.match(b.now, /^Grok is on building q1\. 2 goals queued\.$/, b.now);
+    assert.match(b.now, /^Grok is on building q1\. 2 goals queued\. · Devin /, b.now);
     const card = b.cards.find((c) => c.title === "building q1");
     assert.equal(card.status, "running"); assert.deepEqual(card.files, ["q1.txt"]); assert.deepEqual(card.items, [1]);
     assert.equal(b.checklist.line, "0 of 1 done");
@@ -1186,6 +1186,85 @@ delete env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS;
   assert.match(ga, /Sandbox and guardrails stay on at every setting\./);
   assert.ok(ga.indexOf("Lessons from your earlier goals") < ga.indexOf("Milk Opus is at"), "milk comes after her lessons");
   assert.ok(ga.indexOf("Milk Opus is at") < ga.indexOf("Rules for this project"), "milk comes before the project rules");
+}
+
+// Wiring: the repo brief heads every worker prompt (and is cached in her state
+// dir), status carries the progress line on the Now row and as status.progress,
+// the driver's heartbeat pings it through CONSTANCE_NOTIFY_CMD, needs-owner
+// lands in the ask ledger, `route` reports the model pick, and a goal paused by
+// Claude's own wall resumes by itself after the stated reset plus the grace.
+fs.writeFileSync(path.join(bin, "prog-notify"), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${root}/prog-notify.txt"\n`, { mode: 0o755 });
+fs.rmSync(path.join(tabs, "constance", "progress.json"), { force: true });
+env.CONSTANCE_NOTIFY_CMD = path.join(bin, "prog-notify");
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent grok --files br.txt --task "add br" >> "${root}/wire.out" 2>&1
+touch "${root}/go"
+sleep 40
+$C wait --timeout 30 > "${root}/wire-wait.json"
+id=$(grep -o '"id": [0-9]*' "${root}/wire-wait.json" | head -1 | grep -o '[0-9]*')
+$C review "$id" accept --note "ok" >> "${root}/wire.out" 2>&1
+$C route plan >> "${root}/wire.out" 2>&1
+echo "Wire report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "wire goal").status, 0);
+assert.ok(await until(() => status().jobs.some((j) => j.status === "running" && j.goal === status().goal?.id), 30000), "the wire job runs");
+{
+  const ws = status();
+  assert.match(ws.progress.line, /^Devin can't tell · no session spent yet · 0 copies running · session \d+%$/, "progress line: " + ws.progress.line);
+  assert.ok(ws.board.now.endsWith(" · " + ws.progress.line), "the Now line ends with the progress line: " + ws.board.now);
+  const wj = ws.jobs.find((j) => j.status === "running");
+  const pj = JSON.parse(run("job", String(wj.id)).stdout);
+  assert.ok(pj.prompt.startsWith("Repo brief:\n"), "the brief heads the worker prompt");
+  assert.match(pj.prompt, /Layout: /);
+  assert.equal(run("needs-owner", "probe ask: is the brief helping?").status, 0);
+  assert.ok(await until(() => { try { return fs.readFileSync(path.join(tabs, "constance", "asks.jsonl"), "utf8").includes("probe ask"); } catch { return false; } }), "needs-owner hit the ask ledger");
+}
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the wire goal finishes: " + JSON.stringify(status().goal));
+delete env.CONSTANCE_NOTIFY_CMD;
+{
+  assert.ok(fs.readdirSync(path.join(tabs, "constance", "briefs")).some((f) => f.endsWith(".json")), "the brief is cached in her state dir");
+  assert.ok(await until(() => { try { return /Devin can't tell · no session spent yet · 0 copies running · session \d+%/.test(fs.readFileSync(path.join(root, "prog-notify.txt"), "utf8")); } catch { return false; } }, 30000),
+    "the heartbeat's tick sent the progress line through CONSTANCE_NOTIFY_CMD");
+  assert.match(fs.readFileSync(path.join(root, "prog-notify.txt"), "utf8"), /suppress-sound:true/);
+  const asks = fs.readFileSync(path.join(tabs, "constance", "asks.jsonl"), "utf8");
+  assert.ok(asks.includes("probe ask") && asks.includes("Pick a color for the button"), "every needs-owner is in the ledger");
+  const routes = status().log.filter((l) => l.kind === "route");
+  assert.ok(routes.length >= 1 && routes.every((l) => l.step === "plan" && l.model), "route lines in the log: " + JSON.stringify(routes.slice(0, 3)));
+  assert.ok(fs.existsSync(path.join(tabs, "constance", "routes.jsonl")), "the routes tally file exists");
+  const rp = JSON.parse(run("route", "plan").stdout);
+  assert.equal(rp.model, "opus"); assert.ok(rp.why.length > 0);
+  assert.equal(JSON.parse(run("route", "bogus").stdout).model, "opus", "an unknown step routes to Opus");
+  fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false, constanceMilk: 80 }));
+  assert.equal(JSON.parse(run("route", "fix").stdout).model, "opus", "milk 80 routes fix to Opus");
+  fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
+  assert.match(run("route").stderr, /Usage: route/);
+  assert.equal(status().progress.line, "", "no progress line once no goal is active");
+}
+
+// Claude's own limit wall: the exit writes wall.json, the goal pauses, and the
+// driver resumes her once the stated reset plus the 60 s grace has passed —
+// without asking the owner and without waiting on a fresh reading.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+echo run >> "${root}/wall-resume-runs"
+if [[ "$*" == *"--session-id"* ]]; then
+  echo "You've hit your 5-hour limit · resets $(date -u -d '+20 seconds' '+%-I:%M%p') (UTC)"
+  exit 1
+fi
+node ${CLI} check 1 --note "done after the reset" >> "${root}/wall-resume.out" 2>&1
+echo "Wall report: resumed after the reset."
+exit 0
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "wall resume goal").status, 0);
+assert.ok(await until(() => { const g = status().goal; return g && g.status === "paused" && /hit its limit/.test(g.pauseReason || ""); }, 30000), "the wall exit pauses the goal: " + JSON.stringify(status().goal));
+assert.ok(await until(() => status().goal && status().goal.status === "done", 240000), "the wall-paused goal resumes by itself: " + JSON.stringify(status().goal));
+{
+  assert.equal(fs.readFileSync(path.join(root, "wall-resume-runs"), "utf8").trim().split("\n").length, 2, "one wall exit, one resume — no retries into the wall");
+  const wl = status().log.filter((l) => l.kind === "resumed").pop();
+  assert.ok(wl && /stated reset/.test(wl.text), "the wall resume is logged: " + JSON.stringify(wl));
 }
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance: tests passed");

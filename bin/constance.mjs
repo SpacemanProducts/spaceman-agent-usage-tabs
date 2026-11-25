@@ -25,6 +25,7 @@
 //   note TEXT                   a line in the owner's log
 //   stop                        halt everything at once (her, every job)
 //   recover                     panel load: restart the driver if a goal is active and it isn't running
+//   route STEP                  which model her STEP runs on, as JSON (constance-route.mjs)
 //   drive                       (internal) the background loop that runs her and paces her
 import fs from "node:fs";
 import os from "node:os";
@@ -35,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.mjs";
 import { copyLimit, roomForCopy, readMachine, PUBLISHED_MAX } from "./constance-ramp.mjs";
 import { pace, canResume, keptGoing } from "./constance-pace.mjs";
-import { limitWall, writeWall } from "./constance-wall.mjs";
+import { limitWall, writeWall, wallFile } from "./constance-wall.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps, settling, inHand } from "./constance-jobs.mjs";
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
@@ -56,9 +57,13 @@ import { secondTry, sendBackAdvice } from "./constance-retry.mjs";
 import { planSpare, useItOrLoseItOn } from "./constance-spare.mjs";
 import { readBacklog, addItem as addBacklogItem, markTaken, markDone, removeItem as removeBacklogItem, openItems as openBacklog, formatItem, KINDS as BACKLOG_KINDS } from "./constance-backlog.mjs";
 import { buildReport, writeReport, lastReportAt } from "./constance-morning.mjs";
-import { addSample, readSamples, sessionSpent, leverage, bestReturnLesson } from "./constance-leverage.mjs";
+import { addSample, readSamples, sessionSpent, leverage, bestReturnLesson, TARGET_PER_PCT } from "./constance-leverage.mjs";
 import { readMilk, milkPolicy, milkPrompt } from "./constance-milk.mjs";
 import { writeRemoteStatus } from "./constance-remote.mjs";
+import { briefFor } from "./constance-brief.mjs";
+import { progressLine, tick as progressTick } from "./constance-progress.mjs";
+import { resumePlan, logAsk } from "./constance-resume.mjs";
+import { routeModel, logRoute } from "./constance-route.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -480,6 +485,11 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
   const verdict = judged(freshData()).find((a) => a.id === agent);
   if (!verdict?.available) throw new Error(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
+  // The cached repo brief (layout, test loop, rules, never-touch list) rides at
+  // the top of every worker prompt; briefFor rebuilds it only when the tree
+  // moved a lot or the cache is a week old.
+  let brief = "";
+  try { brief = briefFor(dir, { cacheDir: path.join(store.dir, "briefs") }); } catch {}
   // Guardrail strikes shrink what this agent may touch: after a violation it gets
   // smaller tasks only, enforced here rather than left to her judgment.
   const strikes = Number(store.read().guards?.[agent]?.strikes) || 0;
@@ -530,7 +540,8 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
     const built = asCopy
       ? handoffPrompt({ id, dir, task, files, account, worktree: wt, branch: br, mainDir: dir }, promptExtra)
       : handoffPrompt(j, promptExtra);
-    j.prompt = asCopy ? built : built.split(doneFile(dir, id)).join(doneFile("/tmp", id));
+    const body = asCopy ? built : built.split(doneFile(dir, id)).join(doneFile("/tmp", id));
+    j.prompt = brief ? `Repo brief:\n${brief}\n\n${body}` : body;
     s.jobs.push(j);
     return j;
   });
@@ -1225,13 +1236,25 @@ function openWork(s) {
 
 // The driver's heartbeat (its watch interval and adopt loop): refresh the
 // leverage samples and the phone-safe remote status, each at most once a
-// minute. statusPayload() does the sampling; nothing is sent anywhere.
-let lastBeat = 0;
+// minute. statusPayload() does the sampling; nothing is sent anywhere. It also
+// ticks the progress ping: the line goes out as a silent notify-send at most
+// once per 15 minutes while a goal runs (constance-progress.mjs keeps the
+// stamp in her state dir).
+let lastBeat = 0, lastProgressArgs = null;
+// notify-send for the progress ping, with test overrides: CONSTANCE_NO_NOTIFY=1
+// skips the send, CONSTANCE_NOTIFY_CMD replaces the notify-send binary.
+const progressExec = (cmd, args, opts) => {
+  if (process.env.CONSTANCE_NO_NOTIFY === "1") return { status: 1 };
+  return spawnSync(process.env.CONSTANCE_NOTIFY_CMD || cmd, args, opts);
+};
 function heartbeat() {
   const now = Date.now();
   if (now - lastBeat < SAMPLE_GAP_MS) return;
   lastBeat = now;
   try { writeRemoteStatus(statusPayload(), remoteFile()); } catch {}
+  try {
+    if (lastProgressArgs) progressTick({ ...lastProgressArgs, target: TARGET_PER_PCT, stateFile: path.join(store.dir, "progress.json"), exec: progressExec });
+  } catch {}
 }
 
 async function drive() {
@@ -1240,7 +1263,19 @@ async function drive() {
     const g = store.read().goal;
     if (!g || !["running", "paused"].includes(g.status)) return;
     const p = pace(claudeOf(freshData()));
-    if (p.mode === "stop") {
+    // A goal paused by Claude's own limit wall follows wall.json, not the
+    // readings: resumePlan waits out the stated reset plus a grace, then
+    // resumes her — no owner ask and no fresh reading required. The raw file
+    // is read (not readWall, which expires at `until`) so the grace still
+    // counts in the minute after the reset.
+    const wallPlan = g.status === "paused" ? resumePlan({ wall: wallJson(), now: Date.now(), goalStatus: g }) : null;
+    if (wallPlan?.action === "wait") { await sleep(60e3); continue; }
+    if (wallPlan?.action === "resume") {
+      store.update((s) => { s.goal.status = "running"; delete s.goal.pauseReason; });
+      store.log({ kind: "resumed", text: "The wall's stated reset plus a minute has passed; picking the goal up again." });
+      g.status = "running"; delete g.pauseReason;
+      pausedLogged = false;
+    } else if (p.mode === "stop") {
       store.update((s) => { s.goal.status = "paused"; s.goal.pauseReason = p.reason; });
       if (!pausedLogged) { store.log({ kind: "paused", text: p.reason }); pausedLogged = true; }
       await sleep(60e3); continue;
@@ -1286,6 +1321,13 @@ async function drive() {
     const fd = fs.openSync(reportPath, "w");
     const brain = spawn("claude", args, { cwd: g.dir, env: ENV, detached: true, stdio: ["ignore", fd, fd] });
     store.update((s) => { s.goal.started = true; s.goal.brainPid = brain.pid; });
+    // Every start for planning leaves a route line: the step, the model she
+    // actually runs on, and the router's reason (constance-route.mjs).
+    try {
+      const rm = g.model || "opus";
+      store.log({ kind: "route", step: "plan", model: rm, text: routeModel("plan", { milk: readMilk(readSettings()) }).why });
+      logRoute(path.join(store.dir, "routes.jsonl"), { step: "plan", model: rm, job: g.id });
+    } catch {}
     let pausedByUs = false;
     const watch = setInterval(() => {
       const st = store.read().goal;
@@ -1452,6 +1494,27 @@ function leverageView(s, tokens) {
   return leverage({ tokens: tokens ?? null, spentPct: sessionSpent(readSamples(leverageFile(), s.goal?.startedAt)) });
 }
 
+// wall.json as stored, expiry ignored: resumePlan needs the stated reset time
+// even in the minute after it (readWall returns null there).
+function wallJson() {
+  try { return JSON.parse(fs.readFileSync(wallFile(store.dir), "utf8")); } catch { return null; }
+}
+
+// The progress ping's inputs, shared by status (the Now line) and the driver
+// heartbeat (the throttled notify): Devin's share of the goal's tokens, her
+// Session window now vs at goal start, and how many copies are running.
+// null while no goal is active — there is no pace to report then.
+function progressArgs(s, p, tv) {
+  const g = s.goal;
+  if (!g || !["running", "paused"].includes(g.status)) return null;
+  const sess = (p?.windows || []).find((w) => w.title === "Session");
+  const usedPct = Number.isFinite(sess?.used) ? sess.used * 100 : NaN;
+  const spent = sessionSpent(readSamples(leverageFile(), g.startedAt));
+  const devin = (tv.goal?.byAgent || []).find((a) => a.agent === "devin");
+  return { devinTokens: devin?.tokens ?? null, sessionUsedPct: usedPct, sessionStartPct: usedPct - spent,
+    copiesRunning: s.jobs.filter((j) => j.copy && (j.status === "running" || j.status === "waiting")).length };
+}
+
 function statusPayload() {
   sweep();   // the panel's 3 s poll is what notices done files and starts self-merges
   const records = keepTokens();
@@ -1460,7 +1523,12 @@ function statusPayload() {
   const p = pace(claudeOf(d));
   sampleLeverage(p);
   const tv = tokensView(s, d, records);
-  return { goal: s.goal, board: boardView(s, d, records), tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p,
+  const pargs = progressArgs(s, p, tv);
+  const board = boardView(s, d, records);
+  const pline = pargs ? progressLine({ ...pargs, target: TARGET_PER_PCT }) : "";
+  if (pline) board.now += ` · ${pline}`;
+  lastProgressArgs = pargs;
+  return { goal: s.goal, board, progress: { line: pline }, tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p,
     leverage: leverageView(s, tv.goal?.total ?? null), milk: milkPolicy(readMilk(readSettings())), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
 }
@@ -1517,10 +1585,16 @@ if (process.argv[1] === SELF) {
   else if (cmd === "needs-owner") {
     const text = process.argv.slice(3).join(" ").trim();
     if (!text) fail("Usage: needs-owner TEXT");
+    logAsk(path.join(store.dir, "asks.jsonl"), { reason: text });
     store.update((s) => { if (s.goal) s.goal.needsOwner = text; });
     store.log({ kind: "needs-you", text });
     out("noted: the goal queue waits for the owner after this goal");
   }
+  else if (cmd === "route") {
+    const step = process.argv[3];
+    if (!step) fail("Usage: route STEP");
+    out(routeModel(step, { milk: readMilk(readSettings()) }));
+  }
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|selfmerge|stop|recover");
+  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|selfmerge|route|stop|recover");
 }
