@@ -44,8 +44,8 @@ const ag = (id, extra = {}) => ({ id, name: id, installed: true, signedIn: true,
   assert.equal(judge(fresh, { now, generatedAt: now - FRESH_MS + 1 }).available, true, "1ms inside the window is fresh");
   assert.equal(judge(fresh, { now, generatedAt: now - FRESH_MS }).reason, "usage reading is out of date", "exactly FRESH_MS old is stale");
   assert.equal(judge(fresh, { now, generatedAt: now }).available, true, "generatedAt == now is fresh");
-  // A reading stamped in the future is accepted as fresh — see the commented-out
-  // bug test below; this assert only pins the boundary at exactly `now`.
+  // A reading stamped in the future is stale, not fresh (regression test
+  // below); this assert only pins the boundary at exactly `now`.
 }
 
 // ---- installed / signedIn are strict === false checks: anything else passes.
@@ -92,7 +92,7 @@ const ag = (id, extra = {}) => ({ id, name: id, installed: true, signedIn: true,
   assert.equal(judge(ag("grok", { limits: [{ percent: "0.9" }] }), at).available, false, "numeric string percent counts");
   assert.equal(judge(ag("grok", { limits: [{ percent: "abc" }] }), at).reason, "reports no limits", "non-numeric string percent is unreadable");
   assert.equal(judge(ag("grok", { limits: [{ percent: true }] }), at).reason, "at 100% of a limit", "true coerces to 1");
-  assert.equal(judge(ag("grok", { limits: [{ percent: null }] }), at).available, true, "null coerces to 0 — see note in report");
+  assert.equal(judge(ag("grok", { limits: [{ percent: null }] }), at).reason, "reports no limits", "null percent is no reading at all");
   assert.equal(judge(ag("grok", { limits: [{ percent: 0 }] }), at).available, true, "a real 0% limit is available");
   // A source survives if ANY of its limits is readable; unreadable ones drop out.
   const mixed = judge(ag("grok", { limits: [{ percent: "junk" }, { percent: 0.4 }] }), at);
@@ -290,43 +290,59 @@ const ag = (id, extra = {}) => ({ id, name: id, installed: true, signedIn: true,
 }
 
 // ============================================================================
-// REAL BUGS FOUND — kept as commented-out tests per job rules (do NOT fix here).
+// REGRESSION TESTS — bugs found in review, fixed in constance-agents.mjs.
+// Malformed input must make an agent unavailable, never available, and must
+// never crash the judgeAll -> panel path.
 // ============================================================================
 
-// BUG 1: judge() crashes on malformed agent records instead of skipping them.
-// data.json is plugin-written so this "can't happen" in practice, but a corrupt
-// or hand-edited file takes down the whole judgeAll -> panel path.
-//
-//   assert.doesNotThrow(() => judge(null, at));                    // TypeError: a.id
-//   assert.doesNotThrow(() => judge({ id: "grok", installed: true, signedIn: true, limits: [{ percent: 0.1 }], accounts: {} }, at)); // accounts.map
-//   assert.doesNotThrow(() => judge({ id: "grok", installed: true, signedIn: true, limits: "x" }, at)); // limits.filter
-//
-// BUG 2: judgeAll() crashes when `agents` isn't an array or holds nulls.
-//
-//   assert.deepEqual(judgeAll({ generatedAt: now, agents: {} }, now), []);
-//   assert.deepEqual(judgeAll({ generatedAt: now, agents: [null] }, now), []);
-//
-// BUG 3: accountEnv() crashes when the registry's `accounts` isn't an array —
-// the JSON.parse try/catch doesn't cover the .find() below it.
-//
-//   // with regDir/grok.json = {"accounts": {}} or {"accounts": "x"}
-//   assert.deepEqual(accountEnv("grok", "w", env), {});
-//
-// BUG 4 (questionable, verify intent): a generatedAt in the FUTURE reads as
-// fresh forever — now - generatedAt is negative, which is always < FRESH_MS.
-// A corrupt clock or a bad write makes stale data look brand new.
-//
-//   const future = judge(ag("grok"), { now, generatedAt: now + 365 * 24 * 3600e3 });
-//   assert.equal(future.reason, "usage reading is out of date"); // currently: available at 20%
-//
-// BUG 5 (questionable, verify intent): percent: null coerces to 0 and counts as
-// a readable limit, so a meter with no number can make an agent "available"
-// ("under its limits (fullest 0%)"). Same for percent: "" / false. If the rule
-// is "show a number only if the source reported it", these shouldn't count.
-//
-//   const nul = judge(ag("grok", { limits: [{ title: "Weekly", percent: null }] }), at);
-//   assert.equal(nul.reason, "reports no limits"); // currently: available, worst 0
-//
+// judge() doesn't throw on malformed agent records.
+{
+  assert.doesNotThrow(() => judge(null, at));
+  assert.equal(judge(null, at).available, false, "a null record is unavailable");
+  assert.doesNotThrow(() => judge(ag("grok", { accounts: {} }), at));
+  assert.equal(judge(ag("grok", { accounts: {} }), at).available, true, "a non-array accounts field falls back to the agent's own limits");
+  assert.equal(judge(ag("grok", { limits: "x" }), at).reason, "reports no limits", "non-array limits reads as no limits");
+}
+
+// judgeAll() treats a non-array `agents` as empty and drops null entries.
+{
+  assert.deepEqual(judgeAll({ generatedAt: now, agents: {} }, now), []);
+  assert.deepEqual(judgeAll({ generatedAt: now, agents: [null] }, now), []);
+  assert.equal(judgeAll({ generatedAt: now - 60e3, agents: [null, ag("grok")] }, now).length, 1, "null entries are skipped, real agents still judged");
+}
+
+// accountEnv() doesn't throw when the registry's `accounts` isn't an array.
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acctenv-bug-"));
+  const regDir = path.join(dir, "xdg", "omarchy", "agents", "accounts");
+  fs.mkdirSync(regDir, { recursive: true });
+  const env = { HOME: "/h", XDG_STATE_HOME: path.join(dir, "xdg") };
+  const file = path.join(regDir, "grok.json");
+  for (const bad of [{ accounts: {} }, { accounts: "x" }, { accounts: 5 }]) {
+    fs.writeFileSync(file, JSON.stringify(bad));
+    assert.deepEqual(accountEnv("grok", "w", env), {}, `accounts: ${JSON.stringify(bad.accounts)}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// A generatedAt in the future is a corrupt clock or bad write, not a fresh
+// reading: stale data must not pose as brand new.
+{
+  const future = judge(ag("grok"), { now, generatedAt: now + 365 * 24 * 3600e3 });
+  assert.equal(future.reason, "usage reading is out of date");
+  assert.equal(future.available, false);
+}
+
+// percent values carrying no number (null, "", false) are not readings: they
+// can't make an agent "available" at a phantom 0%.
+{
+  for (const p of [null, "", false]) {
+    const v = judge(ag("grok", { limits: [{ title: "Weekly", percent: p }] }), at);
+    assert.equal(v.reason, "reports no limits", `percent: ${JSON.stringify(p)}`);
+    assert.equal(v.available, false);
+  }
+}
+
 // OBSERVATION (not asserted as bug): missing `signedIn`/`installed` flags are
 // treated as signed-in/installed (strict === false checks). If collectors ever
 // omit the flag for "unknown", judge() would offer the agent on no evidence.

@@ -39,32 +39,45 @@ export function launchCommand(id, prompt) {
 // separate git worktree + branch + sandbox, tracked as its own worker "Devin 1"..)
 // and whether the machine has room for another: see constance-ramp.mjs.
 
+// A limit's percent as a number, or NaN when the source reported no number.
+// Number() alone would read null/""/false/[] as 0 and make a meter with no
+// reading look like a real 0% — malformed input must never make an agent
+// available. `true` still coerces to 1 (pinned by the tests).
+function pctOf(l) {
+  const p = l && l.percent;
+  if (typeof p === "number") return Number.isFinite(p) ? p : NaN;
+  if (typeof p === "string") { const t = p.trim(); return t !== "" && Number.isFinite(Number(t)) ? Number(t) : NaN; }
+  return p === true ? 1 : NaN;
+}
+
 // Each registered account is its own source of capacity: she can use whichever
 // login has the most room, not only the seated one. accounts[] (2+ signed-in
 // accounts) lists every login; without it the agent's own limits are the only
 // source. An account entry with no readable limits is not a source at all.
 function sourcesOf(a) {
-  const accs = (a.accounts || [])
-    .map((x) => ({ id: x.id || "", label: x.label || "", limits: x.limits || [] }))
-    .filter((s) => s.limits.some((l) => l && Number.isFinite(Number(l.percent))));
+  const accs = (Array.isArray(a.accounts) ? a.accounts : [])
+    .filter((x) => x && typeof x === "object")
+    .map((x) => ({ id: x.id || "", label: x.label || "", limits: Array.isArray(x.limits) ? x.limits : [] }))
+    .filter((s) => s.limits.some((l) => Number.isFinite(pctOf(l))));
   if (accs.length) return accs;
-  return [{ id: "", label: "", limits: a.limits || [] }];
+  return [{ id: "", label: "", limits: Array.isArray(a.limits) ? a.limits : [] }];
 }
 
 // One source's meters rolled up: fullest percent, whether it sits at a wall,
 // and the limit to blame when it blocks.
 function statsOf(limits) {
-  const ls = (limits || []).filter((l) => l && Number.isFinite(Number(l.percent)));
+  const ls = (Array.isArray(limits) ? limits : []).filter((l) => Number.isFinite(pctOf(l)));
   if (!ls.length) return null;
-  const hit = ls.find((l) => l.hitAt && Number(l.percent) >= 1) || null;
-  const fullest = ls.reduce((m, l) => (Number(l.percent) > Number(m.percent) ? l : m), ls[0]);
-  return { ls, hit, fullest, worst: Number(fullest.percent) };
+  const hit = ls.find((l) => l.hitAt && pctOf(l) >= 1) || null;
+  const fullest = ls.reduce((m, l) => (pctOf(l) > pctOf(m) ? l : m), ls[0]);
+  return { ls, hit, fullest, worst: pctOf(fullest) };
 }
 
 // { id, name, account, accountId, available, reason, worst, resetsAt, blockTitle } for one agent.
 // `account`/`accountId` name the login she would use ("" / null for a
 // single-account agent, so those look exactly as before).
 export function judge(a, { now = Date.now(), generatedAt = now, sandbox = null } = {}) {
+  a = a && typeof a === "object" ? a : {};
   const base = { id: a.id, name: a.name || a.id, account: "", accountId: null, available: false, worst: null, resetsAt: null, blockTitle: null };
   const no = (reason) => ({ ...base, reason });
   if (a.id === "claude") return no("Constance herself (the paid plan)");
@@ -79,7 +92,10 @@ export function judge(a, { now = Date.now(), generatedAt = now, sandbox = null }
   if (a.signedIn === false) return no("sign-in needed");
   if (a.cantRead) return no("can't read its limits");
   if (a.unsure) return no("reading is unsure");
-  if (!(now - generatedAt < FRESH_MS)) return no("usage reading is out of date");
+  // Fresh means 0 <= age < FRESH_MS: a generatedAt in the future is a corrupt
+  // clock or bad write, and stale data must not pose as brand new.
+  const age = now - generatedAt;
+  if (!(age >= 0 && age < FRESH_MS)) return no("usage reading is out of date");
   const srcs = sourcesOf(a).map((s) => ({ ...s, st: statsOf(s.limits) })).filter((s) => s.st);
   if (!srcs.length) return no("reports no limits");
   // Her pick: a source under the red line with the most room; when every source
@@ -97,7 +113,8 @@ export function judge(a, { now = Date.now(), generatedAt = now, sandbox = null }
 
 export function judgeAll(data, now = Date.now(), { sandbox = null } = {}) {
   const generatedAt = Number(data?.generatedAt) || 0;
-  return (data?.agents || []).map((a) => judge(a, { now, generatedAt, sandbox }));
+  const agents = Array.isArray(data?.agents) ? data.agents : [];
+  return agents.filter((a) => a && typeof a === "object").map((a) => judge(a, { now, generatedAt, sandbox }));
 }
 
 // The env that pins a CLI to a registered account's home, or {} when the job
@@ -111,7 +128,7 @@ export function accountEnv(agentId, accountId, env = process.env) {
   const home = env.HOME || os.homedir();
   const file = path.join(env.XDG_STATE_HOME || path.join(home, ".local/state"), "omarchy", "agents", "accounts", `${agentId}.json`);
   let reg; try { reg = JSON.parse(fs.readFileSync(file, "utf8")); } catch { return {}; }
-  const acc = (reg?.accounts || []).find((x) => x && x.id === accountId);
+  const acc = (Array.isArray(reg?.accounts) ? reg.accounts : []).find((x) => x && x.id === accountId);
   const loginHome = acc && (acc.login || acc.home);
   if (!loginHome) return {};
   const abs = path.resolve(String(loginHome).replace(/^~/, home));
