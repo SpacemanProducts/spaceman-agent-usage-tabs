@@ -393,58 +393,78 @@ const ids = (list) => list.map((t) => t.id);
     "the failed rename leaves its .tmp file behind (documented wart)");
 }
 
-// ============================================================ BUG: non-object entries crash every reader
+// ============================================================ BUG (fixed): non-object entries crash every reader
 // A hand-edited or partially-written queue.json can store null/number/string
-// entries inside projects[dir]. projectList only checks the list is an array;
-// then pendingTasks dereferences t.status, queueView/finishTask/removeTask
-// dereference t.id/t.task, and ALL of them throw TypeError — taking down the
-// panel's queue view and `C queue` for that project until the file is repaired
-// by hand. addTask is the only survivor (it appends blindly).
-// Repro (currently throws "Cannot read properties of null"):
-//   fs.writeFileSync(queueFile(dir), JSON.stringify({next:1,projects:{[p]:[null]}}));
-//   pendingTasks(p, dir);            // TypeError
-//   removeTask(p, 1, dir);           // TypeError
-//   finishTask(p, 1, 1, dir);        // TypeError
-//   queueView(p, dir);               // TypeError
-//   readyTasks(p, {}, dir);          // TypeError
-// Expected: non-object entries are skipped, the same way a non-array project
-// value already reads as empty.
-// assert.deepEqual(pendingTasks(p, dir), []);
-// assert.deepEqual(queueView(p, dir), []);
-// assert.equal(removeTask(p, 1, dir), false);
+// entries inside projects[dir]. Readers must skip them the same way a
+// non-array project value reads as empty, not throw TypeError.
+{
+  const dir = tmp(), p = proj("junkentries");
+  fs.writeFileSync(queueFile(dir), JSON.stringify({ next: 5, projects: { [p]: [null, 42, "oops", { id: 7, status: "pending", task: "real" }] } }));
+  assert.deepEqual(pendingTasks(p, dir).map((t) => t.id), [7], "pendingTasks skips non-object entries");
+  assert.deepEqual(queueView(p, dir).map((t) => t.id), [7], "queueView skips them too");
+  assert.deepEqual(readyTasks(p, {}, dir).map((t) => t.id), [7], "readyTasks skips them too");
+  assert.equal(peekNext(p, dir).id, 7);
+  assert.equal(removeTask(p, 42, dir), false, "a non-object entry never matches an id");
+  assert.equal(removeTask(p, null, dir), false);
+  finishTask(p, 7, "job-1", dir);
+  assert.equal(pendingTasks(p, dir).length, 0, "finishTask finds the real entry past the junk");
+  const raw = JSON.parse(fs.readFileSync(queueFile(dir), "utf8"));
+  assert.equal(raw.projects[p].length, 4, "junk entries are skipped by readers, not deleted");
+  assert.equal(raw.projects[p][3].status, "handed", "the real entry was still updated");
+}
 
-// ============================================================ BUG: bad `next` flows into ids
-// readAll does `Number(d.next) || 1`, which accepts negatives and fractions:
-// a hand-edited {"next": -3} makes the next ids -3, -2, ... and {"next": 1.9}
-// makes them 1.9, 2.9. Ids are compared with === against job fields elsewhere,
-// so fractional/negative ids are a data-integrity wart. Expected: next is
-// coerced to a positive integer (or reset to 1 when it isn't one).
-// Repro:
-//   write queue.json {"next": -3, "projects": {}}
-//   addTask(p, {task:"x"}, dir).id   // currently -3, expected >= 1
-//   write queue.json {"next": 1.9, "projects": {}}
-//   addTask(...).id                  // currently 1.9, expected 1 or 2
+// ============================================================ BUG (fixed): bad `next` flows into ids
+// readAll accepts negatives and fractions via Number(d.next) || 1; ids are
+// compared with === elsewhere, so they must stay positive integers. A bad
+// next is recomputed as max stored id + 1.
+{
+  const dir = tmp(), p = proj("badnext");
+  fs.writeFileSync(queueFile(dir), JSON.stringify({ next: -3, projects: {} }));
+  assert.equal(addTask(p, { task: "x" }, dir).id, 1, "negative next restarts ids at 1");
+  fs.writeFileSync(queueFile(dir), JSON.stringify({ next: 1.9, projects: {} }));
+  assert.equal(addTask(p, { task: "y" }, dir).id, 1, "fractional next never reaches an id");
+  fs.writeFileSync(queueFile(dir), JSON.stringify({ next: -3, projects: { [p]: [{ id: 8, status: "handed", task: "old" }] } }));
+  assert.equal(addTask(p, { task: "z" }, dir).id, 9, "bad next falls back to max stored id + 1");
+  fs.writeFileSync(queueFile(dir), JSON.stringify({ next: 0, projects: { [p]: [{ id: 4, status: "pending", task: "live" }] } }));
+  assert.equal(addTask(p, { task: "w" }, dir).id, 5, "zero next also recomputes from max id");
+}
 
-// ============================================================ BUG: "__proto__" as projectDir loses tasks
-// data.projects["__proto__"] hits the Object.prototype setter: the "list" is
-// stored AS the prototype, list.push works in memory, but JSON.stringify sees
-// no own property — the task is silently dropped from queue.json while `next`
-// still increments. Repro:
-//   addTask("__proto__", {task:"x"}, dir)   // returns {id:1,...} as if stored
-//   JSON.parse(read queue.json).projects    // {} — the task is gone
-// Expected: project keys that collide with Object.prototype members are
-// rejected or stored under a safe key (real project dirs are absolute paths,
-// so this is only reachable via a hand-rolled caller, but the silent loss is
-// the kind of thing that is miserable to debug).
+// ============================================================ BUG (fixed): "__proto__" as projectDir loses tasks
+// data.projects["__proto__"] used to hit the Object.prototype setter: the list
+// was stored AS the prototype and JSON.stringify dropped it — the task was
+// silently lost while `next` still incremented. projects is now a
+// null-prototype object so such keys are ordinary own properties.
+{
+  const dir = tmp();
+  const t = addTask("__proto__", { task: "proto task" }, dir);
+  const raw = JSON.parse(fs.readFileSync(queueFile(dir), "utf8"));
+  assert.equal(raw.projects["__proto__"][0].task, "proto task", "the task survives serialization");
+  assert.deepEqual(pendingTasks("__proto__", dir).map((x) => x.id), [t.id], "it reads back");
+  assert.equal(removeTask("__proto__", t.id, dir), true, "it removes cleanly");
+  assert.deepEqual(pendingTasks("__proto__", dir), []);
+  // Other prototype-colliding keys are safe too.
+  const t2 = addTask("constructor", { task: "ctor task" }, dir);
+  assert.equal(JSON.parse(fs.readFileSync(queueFile(dir), "utf8")).projects.constructor[0].id, t2.id);
+}
 
-// ============================================================ BUG: finishTask is not under the lock
+// ============================================================ BUG (fixed): finishTask is not under the lock
 // addTask/removeTask serialize their read-modify-write on queue.json.lock;
-// finishTask does the same read-modify-write with NO lock. A finishTask racing
-// an addTask (or a removeTask) can lose the other's update: the classic
-// lost-update window between readAll and writeAll. Hard to trigger on demand,
-// but the asymmetry is visible in the source — finishTask at
-// bin/constance-queue.mjs:96-101 has no withLock wrapper. Expected: finishTask
-// takes the same lock (or the whole file moves to a single locked update()).
+// finishTask did the same read-modify-write unlocked — a classic lost-update
+// window against a racing addTask/removeTask. It now takes the same lock.
+{
+  const dir = tmp(), p = proj("finlock");
+  const t = addTask(p, { task: "x" }, dir);
+  finishTask(p, t.id, "job-1", dir);
+  assert.equal(pendingTasks(p, dir).length, 0);
+  assert.equal(JSON.parse(fs.readFileSync(queueFile(dir), "utf8")).projects[p][0].status, "handed");
+  // Proof the lock is really held: a fresh foreign lock makes finishTask wait
+  // out the retry loop and give up, exactly like addTask does.
+  fs.writeFileSync(queueFile(dir) + ".lock", String(process.pid));
+  assert.throws(() => finishTask(p, 999, 1, dir), /queue file is locked/);
+  fs.unlinkSync(queueFile(dir) + ".lock");
+  finishTask(p, 999, 1, dir);
+  assert.ok(!fs.existsSync(queueFile(dir) + ".lock"), "finishTask releases its lock");
+}
 
 for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 console.log("constance-queue.deep: tests passed");
