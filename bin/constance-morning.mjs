@@ -35,14 +35,20 @@ export function buildReport({ records = [], since = 0, now = Date.now(), needs =
   const needsYou = new Set();
   for (const r of done) {
     if (!r.practice) {
-      if (typeof r.tokens === "number") tokens += r.tokens;
+      if (typeof r.tokens === "number") {
+        if (Number.isFinite(r.tokens)) tokens += r.tokens;
+        else cantTell++;
+      }
       cantTell += Number(r.tokensCantTell) || 0;
       merged += Number(r.merged) || 0;
       sentBack += Number(r.sentBack) || 0;
     }
-    if (r.needsOwner) needsYou.add(String(r.needsOwner).trim());
+    if (r.needsOwner) {
+      const n = String(r.needsOwner).trim();
+      if (n) needsYou.add(n);
+    }
   }
-  for (const n of needs) if (String(n || "").trim()) needsYou.add(String(n).trim());
+  for (const n of typeof needs === "string" ? [needs] : needs) if (String(n || "").trim()) needsYou.add(String(n).trim());
 
   const lines = [`# Morning report — ${day(now)}`, "", "## Done"];
   if (!goals) lines.push("No goals finished since the last report.");
@@ -51,7 +57,7 @@ export function buildReport({ records = [], since = 0, now = Date.now(), needs =
     if (Number(r.itemsTotal) > 0) parts.push(`${Number(r.itemsDone) || 0}/${Number(r.itemsTotal)}`);
     parts.push(`${r.merged || 0} merged, ${r.sentBack || 0} sent back`);
     if (r.practice) parts.push("(practice)");
-    lines.push(`- ${clip(firstLine(r.text), 80)} — ${parts.join(" · ")}`);
+    lines.push(`- ${clip(firstLine(r.text) || "(untitled)", 80)} — ${parts.join(" · ")}`);
   }
   if (goals) {
     lines.push("", `Tokens: ${fmtTokens(tokens)}${cantTell ? ` (${cantTell} job${cantTell === 1 ? "" : "s"} can't tell)` : ""}`);
@@ -62,9 +68,8 @@ export function buildReport({ records = [], since = 0, now = Date.now(), needs =
   const text = lines.join("\n") + "\n";
 
   const title = "Constance: morning report";
-  const first = [...needsYou][0] ? [...needsYou][0].replace(/\.+$/, "") : "";
   let body;
-  if (!goals) body = needsYou.size ? `No goals finished. Needs you: ${first}.` : "No goals finished since the last report. Nothing needs you.";
+  if (!goals) body = needsYou.size ? `No goals finished. Needs you: ${[...needsYou].map((n) => n.replace(/\.+$/, "")).join("; ")}.` : "No goals finished since the last report. Nothing needs you.";
   else body = `${plural(goals, "goal")} done, ${plural(merged, "job")} merged, ${fmtTokens(tokens)} tokens.`;
   if (goals && needsYou.size) body += ` Needs you: ${[...needsYou].map((n) => n.replace(/\.+$/, "")).join("; ")}.`;
   else if (goals) body += " Nothing needs you.";
