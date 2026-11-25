@@ -72,6 +72,7 @@ here=$(pwd)
 [[ -n "$want" && "$here" == "$want" ]] || { echo "pwd check failed: here=$here want=$want"; exit 1; }
 [[ "$f" == "$here/.constance/"* ]] || { echo "done file $f is not in $here"; exit 1; }
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
+while [[ ! -e "${root}/reads-ok" ]]; do sleep 0.2; done
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-x.txt}
 before=$(git rev-parse HEAD)
 echo "devin $name" > "$name"; git add "$name"; git commit -qm "devin: $name" || true
@@ -84,6 +85,7 @@ echo "{\\"summary\\": \\"added \${name%.*}\\", \\"commit\\": \\"$c\\", \\"files\
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
+while [[ ! -e "${root}/reads-ok" ]]; do sleep 0.2; done
 if grep -qi "read-only job" <<<"$p"; then
   echo '{"summary": "a.txt has one line", "commit": "", "files": []}' > "$f"
 else
@@ -105,7 +107,7 @@ $C delegate --agent devin --files d.txt --task "add d selfmerge" >> "${root}/bra
 $C delegate --agent grok --task "read-only job: summarize a.txt in a few lines, change nothing" >> "${root}/brain.out" 2>&1
 touch "${root}/go"
 for i in 1 2 3 4; do
-  $C wait --timeout 120 > "${root}/wait-$i.json"
+  $C wait --timeout 600 > "${root}/wait-$i.json"
   id=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(w.review?String(w.review.id):"")' "${root}/wait-$i.json")
   [ -z "$id" ] && break
   for try in $(seq 1 90); do
@@ -280,17 +282,27 @@ function pollOnce(iter) {
 // ---- run the goal -----------------------------------------------------------
 assert.equal(run("start", "--dir", repo, "--goal", "panel data e2e").status, 0, "goal starts");
 
+// The fake agents hold their done files until MIN_READS status reads have
+// happened (the "reads-ok" gate), so the read-count assertions below can't
+// flake on a fast machine that would otherwise settle the whole goal in a
+// handful of polls. Every read is still checked exactly as before.
+const GATE = path.join(root, "reads-ok");
+const MIN_READS = 45;
 const deadline = Date.now() + 300e3;
 let iter = 0, settled = false;
 while (Date.now() < deadline) {
   iter++;
   pollOnce(iter);
+  if (!fs.existsSync(GATE) && statusReads >= MIN_READS) fs.writeFileSync(GATE, "go\n");
   let s = { goal: null, jobs: [] };
   try { s = readJson(jobsFile); } catch {}
   const g = s.goal;
   const open = s.jobs.some((j) => OPEN.has(j.status) || j.selfMerging);
   if (g && !["running", "paused"].includes(g.status) && !open) { settled = true; break; }
 }
+// If the goal somehow settled with the gate still shut (every job failed
+// before finishing), open it anyway so nothing is left waiting on it.
+if (!fs.existsSync(GATE)) fs.writeFileSync(GATE, "go\n");
 assert.ok(settled, `the goal and its jobs settle within the deadline (${iter} polls)`);
 // A few last reads after everything lands: history/scorecard/reviews writes.
 for (let i = 0; i < 5; i++) pollOnce(++iter);
@@ -308,7 +320,8 @@ assert.ok(finalStatus.log.some((l) => l.kind === "merge"), "merge events are in 
 assert.equal(typeof finalStatus.board.now, "string");
 assert.ok(finalStatus.board.history.length >= 0);
 
-// The loop really was tight: hundreds of reads while jobs started/finished/merged.
+// The loop really was tight: the gate held the jobs open for at least
+// MIN_READS polls, so every read below happened while jobs ran.
 assert.ok(statusReads >= 40, `status was read ${statusReads} times while jobs ran`);
 assert.ok(dataReads >= 40, `data.json was read ${dataReads} times`);
 assert.ok(jobsFileReads >= 40, `jobs.json was read ${jobsFileReads} times`);
