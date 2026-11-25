@@ -1,0 +1,434 @@
+// Deeper edge-case tests for bin/constance-tokens.mjs: window boundaries, the
+// shared-folder ambiguity rules, kept-count fallbacks, malformed records on disk,
+// and the refresh throttle. State lives in a mkdtemp dir with a fake HOME; clocks
+// are injected, nothing real is touched.
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { matchJobs, jobTokens, snapshots, tokenMeter, fmtTokens, readRecords, usageFile, refreshInBackground, refreshNow, CANT_TELL } from "./constance-tokens.mjs";
+
+const now = new Date(2026, 10, 24, 15, 0, 0).getTime();
+const min = 60e3;
+const SLACK = 2000;
+const rec = (agent, folder, session, start, amount, unit = "tokens") => ({ agent, folder, session, start, time: start + min, amount, unit });
+const wt = (n) => `/var/tmp/constance-worktrees/job-${n}`;
+const repo = "/home/u/Projects/app";
+const job = (over) => ({ id: 1, agent: "grok", dir: repo, status: "running", startedAt: now - 30 * min, ...over });
+
+// ---------------------------------------------------------------- match windows
+
+// A session's start is inside the job's run when startedAt - 2 s <= start <= end.
+{
+  const j = job({ status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  const at = (start) => matchJobs([j], [rec("grok", repo, "s", start, 100)], now)[1];
+  assert.equal(at(j.startedAt - SLACK).tokens, 100, "exactly 2 s before launch counts");
+  assert.equal(at(j.startedAt - SLACK - 1).tokens, null, "2 s + 1 ms before launch does not");
+  assert.equal(at(j.startedAt).tokens, 100, "at launch counts");
+  assert.equal(at(j.finishedAt).tokens, 100, "exactly at finishedAt counts (inclusive end)");
+  assert.equal(at(j.finishedAt + 1).tokens, null, "1 ms after finishedAt does not");
+  assert.equal(at(j.finishedAt + min).why, "no session of its agent found in its folder yet");
+}
+
+// A running job's window ends at `now`, not at some stored time.
+{
+  const j = job({ status: "running", startedAt: now - 5 * min });
+  const two = matchJobs([j], [rec("grok", repo, "s", now - 60e3, 50), rec("grok", repo, "t", now, 50)], now);
+  // The shared folder needs exactly ONE session: two starts inside the window is ambiguous.
+  assert.equal(two[1].tokens, null);
+  assert.match(two[1].why, /several sessions/);
+  const single = matchJobs([j], [rec("grok", repo, "s", now, 50)], now);
+  assert.equal(single[1].tokens, 50, "a session starting exactly now is inside a running job's window");
+  const late = matchJobs([j], [rec("grok", repo, "s", now + 1, 50)], now);
+  assert.equal(late[1].tokens, null, "a session after now is not");
+}
+
+// endOf: a stopped job ends at stoppedAt, a failed job with no times ends at now.
+{
+  const stopped = job({ status: "stopped", startedAt: now - 30 * min, stoppedAt: now - 20 * min });
+  assert.equal(matchJobs([stopped], [rec("grok", repo, "s", now - 25 * min, 10)], now)[1].tokens, 10);
+  assert.equal(matchJobs([stopped], [rec("grok", repo, "s", now - 15 * min, 10)], now)[1].tokens, null);
+  const failed = job({ status: "failed", startedAt: now - 30 * min });
+  assert.equal(matchJobs([failed], [rec("grok", repo, "s", now - 1, 10)], now)[1].tokens, 10, "no finish time: window runs to now");
+}
+
+// ---------------------------------------------------------------- launched()
+
+// Only jobs that really launched an agent are matched; the rest have no live entry.
+{
+  const never = [
+    job({ id: 1, status: "held", startedAt: now - min, worktree: wt(1) }),
+    job({ id: 2, status: "waiting", startedAt: now - min }),
+    job({ id: 3, status: "running", startedAt: now - min, summary: "(practice run: nothing launched)" }),
+    job({ id: 4, status: "running", startedAt: 0 }),
+    job({ id: 5, status: "running", startedAt: null }),       // no startedAt at all
+  ];
+  const m = matchJobs(never, [rec("grok", repo, "s", now - 30e3, 1), rec("grok", wt(1), "s", now - 30e3, 1)], now);
+  assert.deepEqual(m, {}, "held/waiting/practice/unstarted jobs never match");
+  // stopped/failed/accepted/finished with a startedAt do count as launched.
+  for (const status of ["stopped", "failed", "accepted", "finished", "conflict"]) {
+    const m2 = matchJobs([job({ id: 9, status, startedAt: now - 30 * min, finishedAt: now - 20 * min, worktree: wt(9) })],
+      [rec("grok", wt(9), "s", now - 25 * min, 7)], now);
+    assert.equal(m2[9].tokens, 7, `${status} with a startedAt is a launched job`);
+  }
+}
+
+// ---------------------------------------------------------------- folders
+
+// A copy whose worktree was dropped has no live folder, even though dir is known.
+{
+  const dropped = job({ id: 1, agent: "devin", copy: 2, dir: repo, worktree: "", status: "accepted", startedAt: now - 60 * min, finishedAt: now - 50 * min });
+  const m = matchJobs([dropped], [rec("devin", repo, "s", now - 55 * min, 999)], now);
+  assert.equal(m[1].tokens, null);
+  assert.match(m[1].why, /worktree is gone/);
+}
+
+// A non-copy job with an empty worktree still matches on dir; one with a worktree set
+// uses the worktree and skips the shared-folder ambiguity rules entirely.
+{
+  const shared = job({ id: 1, worktree: "", status: "finished", startedAt: now - 30 * min, finishedAt: now - 20 * min });
+  assert.equal(matchJobs([shared], [rec("grok", repo, "s", now - 25 * min, 10)], now)[1].tokens, 10);
+  const odd = job({ id: 2, copy: undefined, worktree: wt(2), status: "running", startedAt: now - 10 * min });
+  const two = matchJobs([odd], [rec("grok", wt(2), "a", now - 9 * min, 10), rec("grok", wt(2), "b", now - 5 * min, 20)], now);
+  assert.equal(two[2].tokens, 30, "a worktree job sums every session its agent started there");
+}
+
+// ---------------------------------------------------------------- shared-folder ambiguity
+
+// A session that started before a rival job's run began belongs to the earlier job alone.
+{
+  const a = job({ id: 1, status: "finished", startedAt: now - 60 * min, finishedAt: now - 30 * min });
+  const b = job({ id: 2, status: "finished", startedAt: now - 40 * min, finishedAt: now - 10 * min });
+  // Session at -50 min: inside A only (B started at -40).
+  const early = matchJobs([a, b], [rec("grok", repo, "s", now - 50 * min, 100)], now);
+  assert.equal(early[1].tokens, 100, "before the rival started: no ambiguity");
+  assert.equal(early[2].tokens, null);
+  assert.match(early[2].why, /no session/);
+  // Session at -35 min: inside both runs -> both can't tell.
+  const overlap = matchJobs([a, b], [rec("grok", repo, "s", now - 35 * min, 100)], now);
+  assert.equal(overlap[1].tokens, null);
+  assert.equal(overlap[2].tokens, null);
+  assert.match(overlap[1].why, /another job/);
+}
+
+// The 2 s slack applies to the rival's window too: a session 1 s before the rival's
+// launch still counts as the rival's, so the earlier job can't claim it either? No —
+// it is inside the earlier job but the rival check uses the same slack, so it IS rival's.
+{
+  const a = job({ id: 1, status: "finished", startedAt: now - 60 * min, finishedAt: now - 30 * min });
+  const b = job({ id: 2, status: "finished", startedAt: now - 40 * min, finishedAt: now - 10 * min });
+  const s = now - 40 * min - SLACK + 1; // 1 ms inside B's slack window
+  const m = matchJobs([a, b], [rec("grok", repo, "s", s, 100)], now);
+  assert.equal(m[1].tokens, null, "within the rival's 2 s slack the session can't be told apart");
+  assert.match(m[1].why, /another job/);
+}
+
+// A rival that never launched (held/waiting) or runs in its own worktree doesn't conflict.
+{
+  const a = job({ id: 1, status: "finished", startedAt: now - 60 * min, finishedAt: now - 30 * min });
+  const held = job({ id: 2, status: "held", startedAt: now - 40 * min });
+  const copy = job({ id: 3, agent: "grok", copy: 1, dir: repo, worktree: wt(3), status: "running", startedAt: now - 40 * min });
+  const m = matchJobs([a, held, copy], [rec("grok", repo, "s", now - 35 * min, 100)], now);
+  assert.equal(m[1].tokens, 100, "held and worktree jobs are not rivals");
+}
+
+// Unit check runs before the session-count check: one credits record poisons the whole job.
+{
+  const j = job({ status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  const mixed = matchJobs([j], [rec("grok", repo, "a", now - 25 * min, 100), rec("grok", repo, "b", now - 20 * min, 1.5, "AIC")], now);
+  assert.equal(mixed[1].tokens, null);
+  assert.match(mixed[1].why, /credits/);
+  // A record with NO unit field is treated the same as credits.
+  const noUnit = matchJobs([job({ id: 2, status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min })],
+    [{ agent: "grok", folder: repo, session: "s", start: now - 25 * min, amount: 10 }], now);
+  assert.equal(noUnit[2].tokens, null);
+  assert.match(noUnit[2].why, /credits/);
+}
+
+// ---------------------------------------------------------------- amounts & malformed records
+
+// Amounts are coerced with Number(): strings work, junk becomes 0, the session still counts.
+{
+  const j = job({ status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  const m = matchJobs([j], [rec("grok", repo, "a", now - 25 * min, "2500"), rec("grok", repo, "b", now - 20 * min, "junk")], now);
+  // Two sessions in a shared folder -> ambiguous; use a worktree job to see the sum.
+  const w = job({ id: 2, worktree: wt(2), status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  const mw = matchJobs([w], [rec("grok", wt(2), "a", now - 25 * min, "2500"), rec("grok", wt(2), "b", now - 20 * min, "junk")], now);
+  assert.equal(mw[2].tokens, 2500, "string amount coerced, junk amount counts as 0");
+  assert.equal(m[1].tokens, null);
+}
+
+// Malformed starts never match (NaN comparisons are false) -> honest "no session".
+{
+  const j = job({ status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  for (const bad of ["abc", null, {}, NaN]) {
+    const m = matchJobs([j], [{ agent: "grok", folder: repo, session: "s", start: bad, amount: 5, unit: "tokens" }], now);
+    assert.equal(m[1].tokens, null, `start=${JSON.stringify(bad)} cannot match`);
+  }
+  // A non-record (string) is skipped safely.
+  const m2 = matchJobs([j], ["junk", 42], now);
+  assert.equal(m2[1].tokens, null);
+}
+
+// Records for other agents/folders are ignored entirely.
+{
+  const j = job({ status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  const m = matchJobs([j], [
+    rec("devin", repo, "s", now - 25 * min, 100),          // wrong agent
+    rec("grok", "/other/folder", "s", now - 25 * min, 100), // wrong folder
+    rec("grok", repo + "/", "s", now - 25 * min, 100),      // trailing slash is a different folder
+  ], now);
+  assert.equal(m[1].tokens, null);
+  assert.match(m[1].why, /no session/);
+}
+
+/* REAL BUG (not fixed, per job rules): matchJobs crashes on a null/undefined entry in
+   the records array — `r.agent` throws before any filtering. folder-usage.json is read
+   from disk, so one corrupt record would take down `constance status`.
+   Repro:
+     matchJobs([{ id: 1, agent: "grok", dir: "/x", status: "running", startedAt: Date.now() - 60000 }], [null], Date.now())
+   throws "Cannot read properties of null (reading 'agent')".
+*/
+
+/* QUESTIONABLE (not fixed): amount handling is `Number(r.amount) || 0`, so
+   - a record with NO amount field reports 0 tokens and the job shows "0 tokens"
+     (a number the source never reported — "honest data" says can't tell);
+   - a negative amount subtracts, so a job can show a negative total.
+   Repro: matchJobs over a worktree job with rec(..., undefined) -> { tokens: 0 };
+   rec(..., -500) -> { tokens: -500 }.
+*/
+
+// ---------------------------------------------------------------- jobTokens / snapshots
+
+{
+  const live = { 1: { tokens: 0, sessions: ["s"] } };
+  assert.equal(jobTokens({ id: 1, status: "running" }, live), 0, "a real 0 is a count, not can't-tell");
+  assert.equal(jobTokens({ id: 1, status: "finished", tokens: { n: 0, sessions: ["s"], at: now } }, {}), 0,
+    "a kept 0 survives once live records are gone");
+  // Kept count is only used for jobs that are over.
+  assert.equal(jobTokens({ id: 1, status: "running", tokens: { n: 42 } }, {}), null);
+  // Non-finite or non-number kept counts are ignored.
+  for (const bad of [{ n: NaN }, { n: "5000" }, { n: Infinity }, {}, { n: -5 }]) {
+    const j = { id: 1, status: "finished", tokens: bad };
+    const expected = bad && bad.n === -5 ? -5 : null; // -5 is finite: it IS returned (see note below)
+    assert.equal(jobTokens(j, {}), expected, `tokens=${JSON.stringify(bad)}`);
+  }
+}
+
+// snapshots keeps only changed live counts, stamped with `now`; null matches and
+// non-launched jobs are skipped.
+{
+  const jobs = [
+    { id: 1, agent: "grok", dir: repo, worktree: wt(1), status: "running", startedAt: now - min },
+    { id: 2, agent: "grok", dir: repo, worktree: wt(2), status: "finished", startedAt: now - 60 * min, finishedAt: now - 50 * min, tokens: { n: 300, sessions: [], at: now - 49 * min } },
+    { id: 3, agent: "grok", dir: repo, status: "held", startedAt: now - min },
+  ];
+  const live = {
+    1: { tokens: 100, sessions: ["a"] },
+    2: { tokens: 300, sessions: ["b"] },   // same as kept: not rewritten
+    // 3: never launched -> no entry
+  };
+  const keep = snapshots(jobs, live, now);
+  assert.deepEqual(Object.keys(keep), ["1"]);
+  assert.deepEqual(keep[1], { n: 100, sessions: ["a"], at: now });
+  // A job whose live match went back to can't-tell keeps whatever was stored before.
+  const gone = snapshots(jobs, { 1: { tokens: null, why: "x" } }, now);
+  assert.deepEqual(gone, {});
+}
+
+// ---------------------------------------------------------------- fmtTokens boundaries
+
+assert.equal(fmtTokens(0), "0");
+assert.equal(fmtTokens(999), "999");
+assert.equal(fmtTokens(999.4), "999");
+assert.equal(fmtTokens(999.5), "1000", "rounds up at the top of the plain range");
+assert.equal(fmtTokens(1000), "1K");
+assert.equal(fmtTokens(999499), "999K");
+assert.equal(fmtTokens(1000000), "1M");
+assert.equal(fmtTokens(2500000), "2.5M");
+assert.equal(fmtTokens(10000000), "10M");
+assert.equal(fmtTokens(1000000000), "1B");
+assert.equal(fmtTokens(2500000000), "2.5B");
+assert.equal(fmtTokens(10000000000), "10B");
+assert.equal(fmtTokens(undefined), CANT_TELL);
+assert.equal(fmtTokens(-5), "-5");
+
+/* REAL BUG (not fixed): rounding at a unit boundary produces "1000K" / "1000M" /
+   "1000B" instead of rolling into the next unit (there is no T branch at all).
+     fmtTokens(999500)    -> "1000K"   (want "1M")
+     fmtTokens(999999)    -> "1000K"
+     fmtTokens(999500000) -> "1000M"   (want "1B")
+     fmtTokens(999999999999) -> "1000B" (no T formatting exists)
+*/
+
+// ---------------------------------------------------------------- tokenMeter
+
+// No arguments at all: empty meter, calm "Today 0" line.
+{
+  const m = tokenMeter();
+  assert.deepEqual(m.workers, []);
+  assert.equal(m.goal, null);
+  assert.deepEqual(m.today, { total: 0, cantTell: 0 });
+  assert.equal(m.line, "Today 0");
+}
+
+// "Today" is by startedAt: exactly midnight counts, 1 ms before does not. A job that
+// started yesterday but is still running counts toward the goal, never toward today.
+{
+  const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+  const sod = midnight.getTime();
+  const jobs = [
+    { id: 1, goal: "g", agent: "grok", dir: repo, worktree: wt(1), status: "accepted", startedAt: sod, finishedAt: sod + min, tokens: { n: 100 } },
+    { id: 2, goal: "g", agent: "grok", dir: repo, worktree: wt(2), status: "accepted", startedAt: sod - 1, finishedAt: sod + min, tokens: { n: 200 } },
+    // Started 26 h ago and still running: a kept count is never used while running,
+    // so it needs a live record in its worktree to have tokens at all.
+    { id: 3, goal: "g", agent: "grok", dir: repo, worktree: wt(3), status: "running", startedAt: now - 26 * 60 * min },
+  ];
+  const records = [rec("grok", wt(3), "s3", now - 60 * min, 400)];
+  const m = tokenMeter({ jobs, goal: { id: "g" }, records, now });
+  assert.equal(m.today.total, 100, "midnight itself is today; 1 ms before is not; the 26 h runner is not");
+  assert.equal(m.today.cantTell, 0);
+  assert.equal(m.goal.total, 700, "the goal still counts every launched job of it");
+}
+
+// A goal with no jobs of it still prints "This goal 0"; cantTell pluralizes.
+{
+  const jobs = [
+    { id: 1, goal: "other", agent: "grok", dir: repo, worktree: wt(1), status: "finished", startedAt: now - 30 * min, finishedAt: now - 20 * min, tokens: { n: 50 } },
+  ];
+  const m = tokenMeter({ jobs, goal: { id: "g" }, records: [], now });
+  assert.equal(m.goal.total, 0);
+  assert.deepEqual(m.goal.byAgent, []);
+  assert.equal(m.line, "This goal 0 · Today 50");
+}
+
+// One can't-tell job uses the singular; two use the plural. Workers keep job-id order.
+{
+  const mk = (id, agent, status = "running") => ({ id, goal: "g", agent, dir: repo, worktree: wt(id), status, startedAt: now - id * min });
+  const jobs = [mk(3, "grok"), mk(1, "devin"), mk(2, "grok", "finished")];
+  jobs[2].finishedAt = now - min;
+  jobs[2].tokens = { n: 50, sessions: ["s"], at: now - min };   // finished: its kept count counts
+  const m = tokenMeter({ jobs, goal: { id: "g" }, records: [], now, name: (id) => id.toUpperCase() });
+  assert.deepEqual(m.workers.map((w) => w.job), [1, 3], "only running jobs, sorted by id");
+  assert.equal(m.workers[0].name, "DEVIN", "name() is the fallback when worker is unset");
+  assert.equal(m.goal.cantTell, 2);
+  assert.match(m.line, /\+ 2 jobs can't tell/);
+  const one = tokenMeter({ jobs: [jobs[0]], goal: { id: "g" }, records: [], now });
+  assert.match(one.line, /\+ 1 job can't tell/);
+}
+
+// byAgent is sorted by tokens descending and carries the display name.
+{
+  const jobs = [
+    { id: 1, goal: "g", agent: "grok", dir: repo, worktree: wt(1), status: "finished", startedAt: now - 60 * min, finishedAt: now - 50 * min, tokens: { n: 100 } },
+    { id: 2, goal: "g", agent: "devin", dir: repo, worktree: wt(2), status: "finished", startedAt: now - 40 * min, finishedAt: now - 30 * min, tokens: { n: 900 } },
+    { id: 3, goal: "g", agent: "devin", dir: repo, worktree: wt(3), status: "finished", startedAt: now - 20 * min, finishedAt: now - 10 * min, tokens: { n: 100 } },
+  ];
+  const m = tokenMeter({ jobs, goal: { id: "g" }, records: [], now, name: (id) => id });
+  assert.deepEqual(m.goal.byAgent, [{ agent: "devin", name: "devin", tokens: 1000 }, { agent: "grok", name: "grok", tokens: 100 }]);
+  assert.equal(m.line, "This goal 1.1K (devin 1K · grok 100) · Today 1.1K");
+}
+
+// ---------------------------------------------------------------- records on disk
+
+const tmp = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), "constance-tokens-deep-"));
+const fakeHome = { HOME: tmp, XDG_STATE_HOME: "", FOLDER_USAGE_STATE_DIR: "" };
+
+// usageFile precedence: FOLDER_USAGE_STATE_DIR > XDG_STATE_HOME > HOME > os.homedir().
+assert.equal(usageFile({ FOLDER_USAGE_STATE_DIR: "/sd", XDG_STATE_HOME: "/xdg", HOME: "/h" }), "/sd/folder-usage.json");
+assert.equal(usageFile({ XDG_STATE_HOME: "/xdg", HOME: "/h" }), "/xdg/omarchy/agent-usage-tabs/folder-usage.json");
+assert.equal(usageFile({ HOME: "/h" }), "/h/.local/state/omarchy/agent-usage-tabs/folder-usage.json");
+assert.equal(usageFile({}), path.join(os.homedir(), ".local/state", "omarchy", "agent-usage-tabs", "folder-usage.json"));
+assert.equal(usageFile(fakeHome), path.join(tmp, ".local/state", "omarchy", "agent-usage-tabs", "folder-usage.json"),
+  "empty strings are falsy: HOME wins over nothing");
+
+// readRecords failure paths: every malformed file is "no records", never a throw.
+{
+  const dir = path.join(tmp, "records"); fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, "folder-usage.json");
+  const expect = (content, label) => {
+    fs.writeFileSync(f, content);
+    assert.deepEqual(readRecords(f), { records: [], refreshedAt: 0 }, label);
+  };
+  expect("{not json", "unparseable JSON");
+  expect("null", "JSON null");
+  expect("[1,2]", "top-level array");
+  expect('"str"', "top-level string");
+  expect('{"records": null}', "records not an array");
+  fs.writeFileSync(f, '{"records": [], "refreshedAt": "abc"}');
+  assert.equal(readRecords(f).refreshedAt, 0, "garbage refreshedAt -> 0");
+  fs.writeFileSync(f, '{"records": [1], "refreshedAt": -50}');
+  assert.equal(readRecords(f).refreshedAt, -50, "negative refreshedAt passes through"); // always stale
+  fs.mkdirSync(path.join(dir, "is-a-dir"), { recursive: true });
+  assert.deepEqual(readRecords(path.join(dir, "is-a-dir")), { records: [], refreshedAt: 0 }, "a directory reads as empty");
+  assert.deepEqual(readRecords(path.join(dir, "missing.json")), { records: [], refreshedAt: 0 }, "missing file");
+  // Records pass through unvalidated — matchJobs must cope (see the null-record note above).
+  fs.writeFileSync(f, '{"records": "nope", "refreshedAt": 5}');
+  assert.deepEqual(readRecords(f), { records: [], refreshedAt: 5 }, "non-array records -> [], refreshedAt still read");
+}
+
+// ---------------------------------------------------------------- refreshInBackground
+
+{
+  const dir = path.join(tmp, "refresh");
+  const env = { FOLDER_USAGE_STATE_DIR: dir };
+  const file = usageFile(env);
+  const marker = file + ".constance-refresh";
+  const write = (obj) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, JSON.stringify(obj)); };
+  const gap = 1000;
+  let runs = 0;
+  const run = () => runs++;
+
+  // Missing file -> stale -> refresh; marker then throttles.
+  assert.equal(refreshInBackground({ env, now, gap, run }), true);
+  assert.equal(runs, 1);
+  assert.equal(refreshInBackground({ env, now: now + gap - 1, gap, run }), false, "inside the gap: no second rescan");
+  assert.equal(refreshInBackground({ env, now: now + gap, gap, run }), true, "exactly at the gap boundary refreshes again");
+  assert.equal(runs, 2);
+
+  // refreshedAt boundaries (marker cleared so only the file decides): age < gap is
+  // fresh, age >= gap is stale. A refreshedAt in the future counts as fresh.
+  const at = (refreshedAt, t) => {
+    fs.rmSync(marker, { force: true });
+    write({ refreshedAt });
+    return refreshInBackground({ env, now: t, gap, run });
+  };
+  assert.equal(at(now + 5000, now + gap), false, "a future refreshedAt counts as fresh");
+  assert.equal(at(now + 1, now + gap), false, "age gap-1: still fresh");
+  assert.equal(at(now, now + gap), true, "age exactly gap: stale");
+  assert.equal(at(now - 1, now + gap), true, "age gap+1: stale");
+
+  // Marker boundaries, including a marker from the future (clock moved backwards).
+  write({ refreshedAt: 0 });
+  fs.writeFileSync(marker, String(now - gap + 1));
+  assert.equal(refreshInBackground({ env, now, gap, run }), false, "marker gap-1 old still throttles");
+  fs.writeFileSync(marker, String(now - gap));
+  assert.equal(refreshInBackground({ env, now, gap, run }), true, "marker exactly gap old lets one through");
+  fs.writeFileSync(marker, String(now + gap / 2));
+  assert.equal(refreshInBackground({ env, now: now + gap / 4, gap, run }), false, "a marker from the future within gap throttles");
+  fs.writeFileSync(marker, "not-a-number");
+  assert.equal(refreshInBackground({ env, now: now + 2 * gap, gap, run }), true, "garbage marker is ignored");
+  fs.writeFileSync(marker, "0");
+  assert.equal(refreshInBackground({ env, now: now + 3 * gap, gap, run }), true, "a 0 marker is ignored too (refreshedAt is still 0)");
+
+  // The marker is written before run() is invoked, so even a throwing run leaves a throttle.
+  fs.rmSync(marker, { force: true }); write({ refreshedAt: 0 });
+  assert.throws(() => refreshInBackground({ env, now, gap, run: () => { throw new Error("boom"); } }), /boom/);
+  assert.equal(fs.existsSync(marker), true, "marker written even when run throws");
+  assert.equal(refreshInBackground({ env, now: now + 1, gap, run }), false, "and it throttles the retry");
+
+  // Failure path: state dir under a regular file -> mkdir fails -> false, no throw.
+  const blocker = path.join(tmp, "blocker"); fs.writeFileSync(blocker, "x");
+  const badEnv = { FOLDER_USAGE_STATE_DIR: path.join(blocker, "sub") };
+  assert.equal(refreshInBackground({ env: badEnv, now, gap, run }), false);
+}
+
+// refreshNow failure path: no python3 on PATH -> false, fast, no throw. (The success
+// path runs the real folder-usage.py and is covered by the live plugin, not here.)
+{
+  const empty = path.join(tmp, "empty-bin"); fs.mkdirSync(empty);
+  assert.equal(refreshNow({ PATH: empty, HOME: tmp }), false);
+}
+
+fs.rmSync(tmp, { recursive: true, force: true });
+console.log("constance-tokens.deep: ok");
