@@ -2,8 +2,8 @@
 // complementing constance-backlog.test.mjs. Covers malformed inputs, checkbox
 // and kind/tag parsing boundaries, dedupe and tag-replacement corners, and
 // filesystem edge cases (missing file, file-as-directory, no trailing newline,
-// leftover tmp files). Suspected bugs are commented out with a note, not fixed
-// (this job is test-only). The module only touches <dir>/.constance/backlog.md;
+// leftover tmp files), plus regressions for CRLF files, tag-shaped user text
+// and bad markTaken ids. The module only touches <dir>/.constance/backlog.md;
 // the fake HOME under mktemp is a guard so nothing can ever touch the real one.
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -198,26 +198,58 @@ assert.equal(readBacklog(dir).filter((x) => x.text === "same words").length, 2, 
 const tagged = addItem(dir, { text: "watch this (job 3)" });
 assert.equal(tagged.job, null, "the returned item reports what was asked, not the re-parse");
 
-// SUSPECTED BUG (not fixed, test-only job): the line just written is
-// '- [ ] task: watch this (job 3)', which parseBacklog reads back with
-// job=3 — so the item is immediately excluded from openItems() even though
-// addItem returned job:null. User text ending in '(job N)' (or '(files: ...)')
-// is silently reinterpreted as a tag.
-//
-// assert.ok(openItems(dir).some((x) => x.id === tagged.id));
-// -> currently fails: openItems() does NOT contain tagged.id.
-//
-// Same class of issue: markTaken() accepts any jobId and returns true even when
-// the tag can never parse, e.g. markTaken(dir, id, "abc") writes '(job abc)'.
-// And a CRLF backlog parses to zero items entirely ('.' never matches '\r', so
-// ITEM_RE fails on every line): readBacklog/openItems see an empty file and
-// addItem can then append LF lines and duplicate "invisible" items.
-//
-// assert.deepEqual(parseBacklog("- [ ] task: a\r\n- [x] bug: b\r\n").length, 2);
-// -> currently fails: returns [].
-//
-// assert.equal(markTaken(dir, taken.id, "abc"), false);
-// -> currently fails: returns true and leaves an unparseable '(job abc)' tag.
+// Text that looks like a tag is escaped on write, so it stays plain text:
+// the item is open, untaken, and parses back verbatim.
+const taggedParsed = readBacklog(dir).find((x) => x.id === tagged.id);
+assert.equal(taggedParsed.job, null, "tag-shaped user text is not a job tag");
+assert.equal(taggedParsed.text, "watch this (job 3)");
+assert.equal(taggedParsed.done, false);
+assert.ok(openItems(dir).some((x) => x.id === tagged.id), "tag-shaped text stays an open item");
+// Same for text ending in a files group, and for parens inside a real files list.
+const taggedFiles = addItem(dir, { text: "ends with (files: a.mjs)" });
+const tf = readBacklog(dir).find((x) => x.id === taggedFiles.id);
+assert.equal(tf.text, "ends with (files: a.mjs)");
+assert.deepEqual(tf.files, []);
+assert.ok(openItems(dir).some((x) => x.id === taggedFiles.id));
+const parenFile = addItem(dir, { text: "paren file", files: ["a(1).mjs"] });
+assert.deepEqual(readBacklog(dir).find((x) => x.id === parenFile.id).files, ["a(1).mjs"], "parens in a file name round-trip");
+
+// markTaken refuses a jobId whose tag could never parse, leaving the file alone.
+const beforeBad = fs.readFileSync(backlogFile(dir), "utf8");
+for (const bad of ["abc", 1.5, -3, null, "", "   "]) {
+  assert.equal(markTaken(dir, taken.id, bad), false, `markTaken rejects ${JSON.stringify(bad)}`);
+}
+assert.equal(fs.readFileSync(backlogFile(dir), "utf8"), beforeBad, "rejected markTaken writes nothing");
+// A numeric string is still accepted and stored as a number.
+assert.equal(markTaken(dir, taken.id, "55"), true);
+assert.equal(readBacklog(dir).find((x) => x.text === "in flight").job, 55);
+
+// CRLF files parse: '\r' is part of the line ending, never of the item.
+const crlfParsed = parseBacklog("- [ ] task: a\r\n- [x] bug: b\r\n");
+assert.equal(crlfParsed.length, 2);
+assert.equal(crlfParsed[0].text, "a");
+assert.equal(crlfParsed[0].done, false);
+assert.equal(crlfParsed[1].kind, "bug");
+assert.equal(crlfParsed[1].done, true);
+assert.equal(crlfParsed[1].text, "b");
+// A CRLF backlog.md on disk reads, dedupes and edits without corruption.
+const crlfDir = path.join(tmp, "crlf");
+fs.mkdirSync(path.join(crlfDir, ".constance"), { recursive: true });
+fs.writeFileSync(backlogFile(crlfDir), "# Backlog\r\n- [ ] task: first\r\n- [ ] bug: second (job 4)\r\n");
+const crlfItems = readBacklog(crlfDir);
+assert.equal(crlfItems.length, 2, "CRLF items are not invisible");
+assert.equal(crlfItems[0].text, "first");
+assert.equal(crlfItems[1].job, 4);
+assert.ok(openItems(crlfDir).some((x) => x.text === "first"));
+const crlfDup = addItem(crlfDir, { kind: "bug", text: "second" });
+assert.equal(crlfDup.id, 2, "a CRLF item still dedupes");
+assert.equal(markTaken(crlfDir, 1, 9), true);
+assert.equal(markDone(crlfDir, 2), true);
+assert.equal(fs.readFileSync(backlogFile(crlfDir), "utf8"),
+  "# Backlog\r\n- [ ] task: first (job 9)\r\n- [x] bug: second (job 4)\r\n",
+  "edits keep CRLF and put the job tag before the '\\r'");
+addItem(crlfDir, { text: "third" });
+assert.ok(fs.readFileSync(backlogFile(crlfDir), "utf8").endsWith("- [ ] task: third\r\n"), "addItem matches the file's CRLF");
 
 // ---------- markTaken / markDone / removeItem: line surgery ----------
 
