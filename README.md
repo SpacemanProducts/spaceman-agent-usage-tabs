@@ -301,6 +301,12 @@ Her work is split into small helpers (`bin/constance-*.mjs`), each with its own 
 - **Resume plan** (`constance-resume`): decides whether a goal paused by Claude's own limit resumes after the stated reset, and keeps a
   ledger of the times she had to ask the owner.
 
+All of these are wired into her loop, not just tested: the ready queue refills itself from the project's open backlog when it runs
+low, a copy that failed on its own gets one automatic redo carrying the tail of its error output, self-merged jobs waiting for her
+are reviewed in batches of five (`C batchreview --apply` confirms or reverts each from its verdict), and a finished goal writes its
+ratio report into her history. `C split` and `C spec` turn a goal or a task into handoff-ready pieces, and `C route STEP` names the
+model her own step runs on.
+
 ### The agent catalog
 
 Beyond the eleven agents it reads directly, the plugin has a built-in catalog (`agents-catalog.json`) of CLI agents. An agent is
