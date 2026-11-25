@@ -935,6 +935,10 @@ Panel {
   function copyConstanceLog() {
     Quickshell.execDetached(["bash", "-c", 'node "$1" log | wl-copy', "copy-log", pluginDir + "/bin/constance.mjs"])
   }
+  // Copy summary: a short report (goals, checklist, failed jobs, leverage, last log lines), not the raw log.
+  function copyConstanceSummary() {
+    Quickshell.execDetached(["bash", "-c", 'node "$1" summary | wl-copy', "copy-summary", pluginDir + "/bin/constance.mjs"])
+  }
   onConstanceOpenChanged: if (!constanceOpen) { goalArea.focus = false; constanceTyping = false }
   property var constance: ({ goal: null, jobs: [], agents: [], pace: null, log: [], practice: true, queue: [], signals: [] })
   property string constanceError: ""
@@ -1115,6 +1119,24 @@ Panel {
     var v = root.constanceMilk
     return v <= 33 ? "milk" : (v <= 66 ? "balanced" : "quality")
   }
+  // The Brain picker (settings.json constanceBrain, "claude" or "antigravity"): which agent's
+  // model she thinks with. status.brain reports the live pick; every field is optional, and
+  // ok === false means the wanted brain can't run, with why saying so in one calm line.
+  readonly property string constanceBrain: userSettings.constanceBrain !== undefined
+    ? String(userSettings.constanceBrain) : String(root.setting("constanceBrain", "claude"))
+  readonly property var constanceBrainInfo: constance.brain && typeof constance.brain === "object" ? constance.brain : null
+  readonly property string constanceBrainCaption: {
+    var b = root.constanceBrainInfo
+    if (!b) return ""
+    if (b.ok === false) return b.why === undefined || b.why === null ? "" : String(b.why)
+    if (b.model) {
+      var n = b.name === undefined || b.name === null || b.name === "" ? "" : String(b.name) + " · "
+      return "Runs on " + n + String(b.model)
+    }
+    return ""
+  }
+  // The slider's lead-in: the brain's own milkLabel when status.brain carries one, else text: "Milk Opus".
+  readonly property string constanceMilkLabel: (constance.brain && constance.brain.milkLabel) || "Milk Opus"
   // Live clock for running cards' elapsed time (ticks only while her screen is open).
   property real constanceNow: Date.now()
   Timer { interval: 1000; running: root.constanceOpen && root.opened; repeat: true; triggeredOnStart: true; onTriggered: root.constanceNow = Date.now() }
@@ -2710,6 +2732,50 @@ Panel {
               }
             }
 
+            // Brain: which agent's model she thinks with. The pick saves constanceBrain;
+            // the caption under the chips says why the wanted brain isn't running, or what
+            // it runs on. Sandbox and guardrails stay either way.
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+              Flow {
+                width: parent.width
+                spacing: Style.space(6)
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Brain"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                  height: Style.font.bodySmall * 1.3
+                  verticalAlignment: Text.AlignVCenter
+                }
+                MiniChip {
+                  label: "Claude Code"
+                  tip: "She thinks with Claude Code (the claude CLI login)"
+                  on: root.constanceBrain === "claude"
+                  onClicked: root.writeSetting(["constanceBrain", "claude"])
+                }
+                MiniChip {
+                  label: "Antigravity"
+                  tip: "She thinks with Antigravity (the agy CLI login)"
+                  on: root.constanceBrain === "antigravity"
+                  onClicked: root.writeSetting(["constanceBrain", "antigravity"])
+                }
+              }
+              Text {
+                visible: root.constanceBrainCaption !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: root.constanceBrainCaption
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
             // Milk Opus: how much of the work she keeps for herself on the paid plan versus
             // hands to the free agents. Moving it saves constanceMilk; sandbox and guardrails
             // stay on at every setting.
@@ -2724,7 +2790,7 @@ Panel {
                   anchors.left: parent.left
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
-                  text: "Milk Opus"
+                  text: root.constanceMilkLabel
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -2796,7 +2862,7 @@ Panel {
                   }
                   onCanceled: pending = -1
                 }
-                PanelToolTip { visible: milkArea.containsMouse; text: "Milk Opus " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
+                PanelToolTip { visible: milkArea.containsMouse; text: root.constanceMilkLabel + " " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
               }
               Item {
                 width: parent.width
@@ -3589,12 +3655,22 @@ Panel {
             // The raw log, folded away by default; filters by job, worker and kind. Newest entry on top.
             Item {
               width: parent.width
-              height: Math.max(logHeader.implicitHeight, copyAllChip.height)
+              height: Math.max(logHeader.implicitHeight, copyAllChip.height, copySummaryChip.height)
               PanelSectionHeader {
                 id: logHeader
-                anchors.left: parent.left; anchors.right: copyAllChip.left; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter
+                anchors.left: parent.left; anchors.right: copySummaryChip.left; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter
                 text: (root.constanceLogOpen ? "▾ " : "▸ ") + "LOG" + ((root.constance.log || []).length ? " (" + (root.constance.log || []).length + ")" : "")
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.constanceLogOpen = !root.constanceLogOpen }
+              }
+              CopyChip {
+                id: copySummaryChip
+                visible: (root.constance.log || []).length > 0
+                anchors.right: copyAllChip.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                label: "Copy summary"
+                tip: "Copy a short report: goals, checklist, failed jobs, leverage and the last 30 log lines"
+                onCopy: root.copyConstanceSummary()
               }
               CopyChip {
                 id: copyAllChip
