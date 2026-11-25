@@ -51,7 +51,8 @@ export function parseCopilotQuota(payload) {
     // The chat and completions allowances, when the plan limits them, are the meters; otherwise just the reset date.
     if (allowances.length) return { limits: allowances, plan, free, status: "" };
     const d = new Date(resetsAt);
-    const when = isNaN(d.getTime()) ? "" : ` · resets ${fmtDate(resetsAt)}, 00:00 UTC`;
+    const hhmm = `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+    const when = isNaN(d.getTime()) ? "" : ` · resets ${fmtDate(resetsAt)}, ${hhmm} UTC`;
     return { limits: [], plan, free, status: `No included allowance on this plan${when}` };
   }
   let used = num(snap.credits_used);

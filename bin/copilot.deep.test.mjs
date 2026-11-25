@@ -66,15 +66,10 @@ try {
     "No included allowance on this plan · resets Dec 1, 00:00 UTC");
   assert.equal(parseCopilotQuota(q({ entitlement: 10, credits_used: 1 }, { quota_reset_date_utc: "2026-12-01T05:30:00+05:30" })).limits[0].resetsAt,
     "2026-12-01T00:00:00.000Z", "offset normalises to UTC");
-  // BUG: the 'No included allowance' status hardcodes ", 00:00 UTC". A reset
-  // date carrying a real time-of-day is reported at the wrong hour.
-  // assert.equal(
-  //   parseCopilotQuota({ copilot_plan: "individual", quota_reset_date_utc: "2026-12-01T15:30:00Z", ...noAllow }).status,
-  //   "No included allowance on this plan · resets Dec 1, 15:30 UTC");
+  // A reset date carrying a real time-of-day is reported at that hour, not 00:00.
   assert.equal(
     parseCopilotQuota({ copilot_plan: "individual", quota_reset_date_utc: "2026-12-01T15:30:00Z", ...noAllow }).status,
-    "No included allowance on this plan · resets Dec 1, 00:00 UTC",
-    "current (buggy) behaviour pinned: the status claims 00:00 UTC for a 15:30 reset");
+    "No included allowance on this plan · resets Dec 1, 15:30 UTC");
 
   // ---- quota_snapshots wrong types ----
   for (const bad of [null, undefined, 0, "x", 42, true, [], "[]"]) {
