@@ -97,6 +97,15 @@ export function handoffPrompt({ id, dir, task, files = [], account = null, workt
 }
 
 // Finished jobs waiting for review, oldest finish first (two that finish together are reviewed in order).
+// A job the sweep just marked finished is "settling" until that sweep has run
+// its guard and decided on a self-merge (milliseconds to seconds); a marker
+// older than SETTLE_MS is ignored, in case the sweeping process died. A job
+// that is settling or self-merging is still in Constance's own hands: `wait`
+// must not hand it out and `review` refuses it.
+export const SETTLE_MS = 60000;
+export const settling = (j, now = Date.now()) => !!j.settling && now - j.settling < SETTLE_MS;
+export const inHand = (j, now = Date.now()) => !!j.selfMerging || settling(j, now);
+
 export function reviewQueue(jobs) {
   return jobs.filter((j) => j.status === "finished").sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0) || a.id - b.id);
 }

@@ -182,7 +182,7 @@ keeps the developer in flow:
   There is still no goal-less loop, so spare room is only checked when a goal ends. Morning report
   (`bin/constance-morning.mjs`) when the queue empties after a queued or backlog goal. Copy jobs (own worktree)
   are never excused by, and never excuse, other jobs' files. Lessons are tidied once (`tidied: 1` marker).
-  Since 1.50.0 (constance-next, not merged): copies start as soon as memory allows (no load check, no
+  Since 1.50.0: copies start as soon as memory allows (no load check, no
   30 s spacing; `bin/constance-ramp.mjs`), and the ready queue fills every free slot after each sweep
   (`readyTasks` in `bin/constance-queue.mjs`, `fillSlots`), not only on accept. A clean copy (guard clean,
   diff inside its list, its report says tests pass) self-merges after the full suite passes
@@ -199,6 +199,14 @@ keeps the developer in flow:
   in their sandbox tmp, and `bin/handoff.mjs` never writes inside the plugins folder. Remote control is
   only a proposal (`docs/remote-control.md`) plus a read-only `remote-status.txt` (`C remote`); no port,
   nothing sent.
+  Since 1.50.1: the merge lock (`bin/constance-mergelock.mjs`) is pid-owned, never stale while its holder
+  lives, and only its owner removes it; a self-merge runs the suite outside it, then under it rebases onto
+  the current branch (suite again if that moved it) and merges `--no-ff` (one merge commit, so a send-back
+  revert undoes every commit). A job's `merged` status and its cleared `selfMerging` flag land in one
+  store update, and `wait` never hands out a job still flagged (the cause of the flaky sm1/sm2 check).
+  The sweep's "finished" update also sets `settling` (`settling`/`inHand` in `bin/constance-jobs.mjs`, ignored
+  after 60 s), cleared once the guard and the self-merge decision are done; `wait` skips such jobs and
+  `review` refuses them, so she is never handed a job a self-merge is about to take.
 
 ## Working rules
 

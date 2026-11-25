@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { openStore, overlaps, conflicts, handoffPrompt, reviewQueue, doneFile, stateDir } from "./constance-jobs.mjs";
+import { openStore, overlaps, conflicts, handoffPrompt, reviewQueue, doneFile, stateDir, settling, inHand, SETTLE_MS } from "./constance-jobs.mjs";
 
 assert.deepEqual(overlaps(["a.js"], ["b.js"]), []);
 assert.deepEqual(overlaps(["./src/a.js"], ["src/a.js"]), ["src/a.js"]);
@@ -58,6 +58,16 @@ assert.match(wt, /Do not push or deploy or merge/);
 assert.ok(wt.trim().split("\n").pop().includes(doneFile("/var/tmp/wt", 12)), "the done file lives in the worktree");
 
 assert.deepEqual(reviewQueue([{ id: 1, status: "finished", finishedAt: 20 }, { id: 2, status: "finished", finishedAt: 10 }, { id: 3, status: "accepted", finishedAt: 5 }]).map((j) => j.id), [2, 1], "reviewed in the order they finished");
+// A just-finished job is in her hands while its sweep settles it or it self-merges; a stale marker is ignored.
+{
+  const now = 1_000_000;
+  assert.equal(settling({ settling: now - 10 }, now), true);
+  assert.equal(settling({ settling: now - SETTLE_MS - 1 }, now), false, "a dead sweep's marker expires");
+  assert.equal(settling({}, now), false);
+  assert.equal(inHand({ selfMerging: true }, now), true);
+  assert.equal(inHand({ settling: now }, now), true);
+  assert.equal(inHand({ status: "finished" }, now), false);
+}
 
 assert.match(stateDir({ XDG_STATE_HOME: "/s" }), /^\/s\/omarchy\/agent-usage-tabs\/constance$/);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-test-"));

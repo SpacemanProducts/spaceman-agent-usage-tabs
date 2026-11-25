@@ -37,12 +37,13 @@ import { copyLimit, roomForCopy, readMachine, PUBLISHED_MAX } from "./constance-
 import { pace, canResume, keptGoing } from "./constance-pace.mjs";
 import { limitWall, writeWall } from "./constance-wall.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
-import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
+import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps, settling, inHand } from "./constance-jobs.mjs";
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
 import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
 import { NotifyParser, handleNotification, recentSignals, recordSignal, jobFinishSignal, logSaysFinished } from "./constance-notify.mjs";
 import { addTask, peekNext, finishTask, removeTask, queueView, readyTasks } from "./constance-queue.mjs";
-import { selfMerge, runSuite, addPending, pendingReviews, markReviewed, revertMerge } from "./constance-selfmerge.mjs";
+import { withLock } from "./constance-mergelock.mjs";
+import { selfMerge, selfMergeBranch, runSuite, addPending, pendingReviews, markReviewed, revertMerge } from "./constance-selfmerge.mjs";
 import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
 import { logText } from "./constance-logtext.mjs";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
@@ -161,7 +162,9 @@ function sweep() {
       if (j.status !== "running") {
         // A self-merge runs in a detached process (selfMerging); if it died
         // mid-run the flag is stuck, so clear it and let the review take the job.
-        if (j.selfMerging && !alive(j.selfMergePid, "selfmerge")) { delete j.selfMerging; delete j.selfMergePid; }
+        // No pid yet means the spawn is still under way: give it 30 s.
+        const gone = j.selfMergePid ? !alive(j.selfMergePid, "selfmerge") : Date.now() - (j.selfMergeAt || 0) > 30000;
+        if (j.selfMerging && gone) { delete j.selfMerging; delete j.selfMergePid; delete j.selfMergeAt; }
         continue;
       }
       const f = jobDoneFile(j);
@@ -171,14 +174,20 @@ function sweep() {
         if (fs.existsSync(f)) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
       }
       if (!done && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
-      if (done) { j.status = "finished"; j.summary = String(done.summary || ""); j.commit = String(done.commit || ""); changed.push(j); signals.push({ j, source }); }
+      if (done) { j.status = "finished"; j.settling = Date.now(); j.summary = String(done.summary || ""); j.commit = String(done.commit || ""); changed.push(j); signals.push({ j, source }); }
       // Still running, but its own log says it finished: record the signal
       // (deduped in notify.jsonl) without touching its status.
       else if (j.log && logSaysFinished(tailFile(j.log))) signals.push({ j, source: "log" });
     }
     return changed;
   });
-  for (const j of changed) { guardFinished(j); dropJobTmp(j); maybeSelfMerge(j); }
+  // `settling` (set with "finished" above) keeps the job out of `wait` until
+  // the guard and the self-merge decision are done; maybeSelfMerge swaps it
+  // for selfMerging in one update, and it is cleared here otherwise.
+  for (const j of changed) {
+    try { guardFinished(j); dropJobTmp(j); maybeSelfMerge(j); }
+    finally { store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) delete x.settling; }); }
+  }
   // Whoever's sweep sees the finish logs the return — status polls can beat `wait` to it.
   for (const j of changed) store.log({ kind: "returned", job: j.id, agent: j.agent, worker: j.worker, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
   for (const { j, source } of signals) recordSignal(store.dir, jobFinishSignal(j, { source, runDir: jobDoneDir(j) }));
@@ -314,7 +323,7 @@ function maybeSelfMerge(j) {
     try { done = JSON.parse(fs.readFileSync(jobDoneFile(fresh), "utf8")); } catch {}
     if (!ownTestsPassed(done)) return;   // normal review handles it
     if (!branchDiffOk(fresh)) return;
-    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x && x.status === "finished" && !x.selfMergeTried) { x.selfMergeTried = true; x.selfMerging = true; } });
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x && x.status === "finished" && !x.selfMergeTried) { x.selfMergeTried = true; x.selfMerging = true; x.selfMergeAt = Date.now(); delete x.settling; } });
     const marked = store.read().jobs.find((k) => k.id === j.id);
     if (marked?.selfMerging) spawnSelfMerge(marked);
   } catch (e) {
@@ -322,7 +331,7 @@ function maybeSelfMerge(j) {
   }
 }
 
-const clearSelfMerging = (id) => store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { delete x.selfMerging; delete x.selfMergePid; } });
+const clearSelfMerging = (id) => store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { delete x.selfMerging; delete x.selfMergePid; delete x.selfMergeAt; } });
 
 // `node constance.mjs selfmerge ID`, detached with its output appended to the
 // job's own log. On a spawn failure the flag is cleared so review takes it.
@@ -365,19 +374,26 @@ function runSelfMerge(id) {
     const merge = (repo, branch) => {
       const cur = store.read().jobs.find((k) => k.id === id);
       if (!cur || cur.status !== "finished" || cur.selfMerging !== true) return { ok: false, output: "the job was reviewed while the suite ran" };
-      return mergeBranch(repo, branch);
+      return selfMergeBranch(repo, branch);
     };
-    const m = withMergeLock(() => selfMerge({ repo: j.dir, worktree: j.worktree, branch: j.branch, checks, suite, merge }));
+    // The lock covers the rebase onto the current branch, a re-run of the suite
+    // if that brought in new work, and the merge, so wait as long as a live
+    // holder needs (a dead one's lock is taken over at once).
+    const lock = (fn) => withMergeLock(fn, { waitMs: 60 * 60 * 1000, pollMs: 200 });
+    const m = selfMerge({ repo: j.dir, worktree: j.worktree, branch: j.branch, checks, suite, merge, lock });
     if (m.merged) {
       keepTokens(true);
       const did = dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true, merged: true });
-      store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "merged"; x.mergedAt = Date.now(); x.mergeCommit = m.commit || ""; x.worktree = ""; x.cleaned = did.join("; "); } });
+      // The pending review goes in first, and "merged" and the cleared flag land
+      // in one update: `wait` hands out merged jobs, and `review` refuses one
+      // still flagged self-merging, so they must never be seen apart.
       addPending(reviewsFile(), { job: j.id, commit: j.commit, branch: j.branch });
+      store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "merged"; x.mergedAt = Date.now(); x.mergeCommit = m.commit || ""; x.worktree = ""; x.cleaned = did.join("; "); delete x.selfMerging; delete x.selfMergePid; } });
       store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `self-merged ${j.branch}${m.commit ? ` (${String(m.commit).slice(0, 9)})` : ""}; ${did.join("; ")}` });
       return;
     }
     if (m.conflict || m.flagged) {
-      store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "conflict"; x.mergeError = m.reason || ""; } });
+      store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "conflict"; x.mergeError = m.reason || ""; delete x.selfMerging; delete x.selfMergePid; } });
       store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `self-merge ${m.conflict ? "conflict" : "failed"} on ${j.branch}: ${(m.reason || "").slice(-300)}` });
       return;
     }
@@ -696,7 +712,7 @@ function queueCmd() {
 
 // What `wait` reports as still working: running jobs plus finished ones whose
 // self-merge is still running in the background.
-const busyJobs = (s) => s.jobs.filter((j) => j.status === "running" || j.selfMerging)
+const busyJobs = (s) => s.jobs.filter((j) => j.status === "running" || inHand(j))
   .map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, ...(j.selfMerging ? { selfMerging: true } : {}) }));
 
 async function waitJob() {
@@ -707,7 +723,7 @@ async function waitJob() {
     const s = store.read();
     // Finished jobs and self-merged ones waiting for their background review,
     // oldest finish first. A job still self-merging is not hers to review yet.
-    const next = [...reviewQueue(s.jobs).filter((j) => !j.selfMerging), ...s.jobs.filter((j) => j.status === "merged")]
+    const next = [...reviewQueue(s.jobs).filter((j) => !inHand(j)), ...s.jobs.filter((j) => j.status === "merged" && !inHand(j))]
       .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0) || a.id - b.id)[0];
     if (next) {
       const files = changedFiles(next.dir, next.commit);
@@ -721,7 +737,7 @@ async function waitJob() {
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     const held = s.jobs.filter((j) => j.status === "held").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, heldReason: j.heldReason || "" }));
-    if (!s.jobs.some((j) => j.status === "running" || j.status === "waiting" || j.selfMerging) && !held.length) return out({ review: null, stillRunning: [], next: "No jobs are running." });
+    if (!s.jobs.some((j) => j.status === "running" || j.status === "waiting" || inHand(j)) && !held.length) return out({ review: null, stillRunning: [], next: "No jobs are running." });
     if (s.goal?.status === "stopped") return out({ review: null, next: "Stopped by the owner. End now." });
     if (Date.now() > until) return out({ review: null, stillRunning: busyJobs(s), held,
       next: held.length ? `Still running; ${held.length} held cop${held.length === 1 ? "y starts" : "ies start"} by itself when the machine has room. Call \`wait\` again.` : "Still running; call `wait` again." });
@@ -729,19 +745,12 @@ async function waitJob() {
   }
 }
 
-// Merges of accepted copy branches run one at a time across separate `review`
-// calls: a tiny mkdir lock in her state dir, stale after 30 s.
-function withMergeLock(fn) {
-  const lock = path.join(store.dir, "merge.lock");
-  for (let i = 0; ; i++) {
-    try { fs.mkdirSync(lock); break; }
-    catch {
-      try { if (Date.now() - fs.statSync(lock).mtimeMs > 30000) { fs.rmdirSync(lock); continue; } } catch {}
-      if (i > 400) throw new Error("another merge is still running");
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
-    }
-  }
-  try { return fn(); } finally { try { fs.rmdirSync(lock); } catch {} }
+// Merges into a project (self-merge, accept, a send-back's revert) run one at a
+// time across her processes: constance-mergelock.mjs, a pid-owned lock in her
+// state dir that is only stale once its holder is gone. Review and revert keep
+// the short default wait; a self-merge waits as long as the holder runs.
+function withMergeLock(fn, opts = {}) {
+  return withLock(path.join(store.dir, "merge.lock"), fn, opts);
 }
 
 // Accept means the copy's branch merges into the repo's current branch, then
@@ -792,6 +801,7 @@ function review() {
   const found = store.read().jobs.find((x) => x.id === id);
   if (!found) fail(`No job ${id}.`);
   if (found.selfMerging) fail(`Job ${id} is self-merging right now; try again in a moment.`);
+  if (settling(found)) fail(`Job ${id} just finished and is still being checked; try again in a moment.`);
   if (found.status === "merged") return reviewMerged(found, verdict, note);
   if (found.status !== "finished") fail(`Job ${id} is ${found.status}; only a finished job can be reviewed.`);
   const j = store.update((s) => { const j = s.jobs.find((x) => x.id === id); if (j) { j.status = verdict === "accept" ? "accepted" : "sent back"; j.reviewNote = note; j.reviewedAt = Date.now(); } return j; });

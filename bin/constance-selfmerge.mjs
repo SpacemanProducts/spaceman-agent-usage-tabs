@@ -1,8 +1,9 @@
 // Constance self-merge: a copy whose own checks pass (its tests, the guard and
 // a clean diff) merges itself at once instead of waiting for Constance's
-// review, which then happens in the background and can revert the merge. A
-// conflict gets one rebase-and-retry; anything still failing is flagged for
-// the owner — nothing is ever forced, reset or deleted.
+// review, which then happens in the background and can revert the merge. It
+// rebases onto the current branch under the merge lock right before merging;
+// anything that still fails is flagged for the owner — nothing is ever
+// forced, reset or deleted.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -34,30 +35,48 @@ export function runSuite(dir, { env = process.env } = {}) {
   return { ok: failed.length === 0, failed, output: chunks.join("").slice(-2000) };
 }
 
+// A self-merge always makes a merge commit (--no-ff), even after the rebase
+// makes a fast-forward possible: a send-back reverts that one commit with -m 1
+// and so undoes all of the copy's commits, not just its last.
+export const selfMergeBranch = (repo, branch) => mergeBranch(repo, branch, { noFf: true });
+
 const CHECKS = ["ownTests", "guard", "diff"];
 
 // Merge a finished copy's branch once its checks and the whole suite pass.
-// On a conflict the branch is rebased onto the repo's current branch inside
-// the worktree and tried once more (suite, then merge); a second failure is
-// flagged for Constance instead of forcing anything.
-export function selfMerge({ repo, worktree, branch, checks = {}, suite = runSuite, merge = mergeBranch }) {
+// The suite runs first, outside the merge lock (it is the slow part). Then,
+// holding the lock so no other merge can land in between, the branch is
+// rebased onto the repo's current branch right before merging; if that
+// brought in new commits the suite runs again on the rebased tree. A rebase
+// that conflicts is aborted and flagged; a merge that still conflicts is
+// flagged too. Nothing is ever forced, reset or deleted.
+// `retried` is true when the branch had to be rebased onto newer work.
+export function selfMerge({ repo, worktree, branch, checks = {}, suite = runSuite, merge = selfMergeBranch, lock = (fn) => fn() }) {
   const failed = CHECKS.find((k) => checks[k] !== true);
   if (failed) return { merged: false, reason: `${failed} check failed` };
   const s = suite(worktree);
   if (!s.ok) return { merged: false, reason: "full test suite failed", failed: s.failed || [] };
-  const m = merge(repo, branch);
-  if (m.ok) return { merged: true, commit: m.commit, retried: false };
-  if (!m.conflict) return { merged: false, reason: String(m.output || "merge failed").slice(-400) };
-  const rb = git(worktree, "rebase", repoBranch(repo));
-  if (rb.status !== 0) {
-    git(worktree, "rebase", "--abort");
-    return { merged: false, conflict: true, flagged: true, reason: "conflict, rebase failed" };
-  }
-  const s2 = suite(worktree);
-  if (!s2.ok) return { merged: false, conflict: true, flagged: true, retried: true, reason: "conflict after rebase", failed: s2.failed || [] };
-  const m2 = merge(repo, branch);
-  if (m2.ok) return { merged: true, commit: m2.commit, retried: true };
-  return { merged: false, conflict: true, flagged: true, retried: true, reason: "conflict after rebase" };
+  return lock(() => {
+    const base = repoBranch(repo);
+    let moved = false;
+    if (base) {
+      const head = () => git(worktree, "rev-parse", "HEAD").stdout.trim();
+      const before = head();
+      const rb = git(worktree, "rebase", base);
+      if (rb.status !== 0) {
+        git(worktree, "rebase", "--abort");
+        return { merged: false, conflict: true, flagged: true, reason: "conflict, rebase failed" };
+      }
+      moved = head() !== before;
+      if (moved) {
+        const s2 = suite(worktree);
+        if (!s2.ok) return { merged: false, conflict: true, flagged: true, retried: true, reason: "suite failed after rebase", failed: s2.failed || [] };
+      }
+    }
+    const m = merge(repo, branch);
+    if (m.ok) return { merged: true, commit: m.commit, retried: moved };
+    if (!m.conflict) return { merged: false, reason: String(m.output || "merge failed").slice(-400) };
+    return { merged: false, conflict: true, flagged: true, retried: moved, reason: "conflict after rebase" };
+  });
 }
 
 // Merges that selfMerge landed wait in this list for Constance's background
