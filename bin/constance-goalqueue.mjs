@@ -98,3 +98,38 @@ export function needsOwner(goal, jobs = [], { practice = false } = {}) {
   }
   return why;
 }
+
+// What a finished goal does to the queue, split by who has to act: `stop` is only for things that
+// truly need the owner (the queue pauses and says why); `notes` are the rest, worth logging but not
+// worth stopping the queue for. Same rules and wording as needsOwner(), plus merged jobs (they wait
+// for her background review) which needsOwner never sees because its caller maps them to accepted.
+export function queueStops(goal, jobs = [], { practice = false } = {}) {
+  if (!goal) return { stop: [], notes: [] };
+  const stop = [], notes = [];
+  if (goal.status === "stopped") stop.push("you stopped her");
+  if (goal.needsOwner) stop.push(String(goal.needsOwner));
+  const mine = jobs.filter((j) => j.goal === goal.id);
+  const ids = (f) => mine.filter(f).map((j) => j.id);
+  const many = (n) => (n > 1 ? "s" : "");
+  const conflict = ids((j) => j.status === "conflict");
+  if (conflict.length) stop.push(`job${many(conflict.length)} ${conflict.join(", ")} hit a merge conflict`);
+  if (goal.status === "failed") {
+    const why = "she couldn't finish the goal";
+    notes.push(typeof goal.failReason === "string" && goal.failReason.length ? `${why}: ${goal.failReason}` : why);
+  }
+  const unreviewed = ids((j) => j.status === "finished" && !String(j.summary || "").startsWith("(practice run"));
+  if (unreviewed.length) notes.push(`job${many(unreviewed.length)} ${unreviewed.join(", ")} never got reviewed`);
+  const open = ids((j) => ["running", "waiting", "held"].includes(j.status));
+  if (open.length) notes.push(`job${many(open.length)} ${open.join(", ")} still running`);
+  const merged = ids((j) => j.status === "merged");
+  if (merged.length) notes.push(`job${many(merged.length)} ${merged.join(", ")} merged and still waiting for review`);
+  if (!practice && goal.status === "done") {
+    // Merged jobs already landed in the repo: count them as accepted for the checklist, the way
+    // afterGoal() hands needsOwner() asAccepted(s.jobs).
+    const forChecklist = jobs.map((j) => (j.status === "merged" ? { ...j, status: "accepted" } : j));
+    const list = checklist(goal, forChecklist);
+    const left = list.items.filter((x) => x.state !== "done").map((x) => x.n);
+    if (list.total > 1 && left.length) notes.push(`item${many(left.length)} ${left.join(", ")} of the checklist not done`);
+  }
+  return { stop, notes };
+}
