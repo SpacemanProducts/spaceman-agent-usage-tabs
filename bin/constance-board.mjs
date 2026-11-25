@@ -93,6 +93,7 @@ export function goalRecord(goal, jobs = [], live = {}) {
     jobs: mine.length, merged: mine.filter((j) => j.status === "accepted" && !isPractice(j)).length,
     sentBack: mine.filter((j) => j.status === "sent back").length, practice: mine.length > 0 && mine.every(isPractice),
     tokens: tokens || cantTell === 0 ? tokens : null, tokensCantTell: cantTell, itemsDone: list.done, itemsTotal: list.total,
+    leverage: goal.leverage || null,
   };
 }
 
@@ -123,6 +124,19 @@ export function goalsFromLog(log = []) {
   return out;
 }
 
+// One short line for a history row: "2/3 items · 4 jobs · 1h 0m", with her leverage
+// label tacked on when the meter had enough spent to measure (perPct not null).
+// Log-rebuilt goals have no item counts, so that part is simply left out.
+const rowSummary = (r) => {
+  const bits = [];
+  if (Number.isFinite(r.itemsTotal)) bits.push(`${r.itemsDone || 0}/${r.itemsTotal} items`);
+  bits.push(plural(r.jobs || 0, "job"));
+  const t = took(r.took);
+  if (t) bits.push(t);
+  if (r.leverage && r.leverage.perPct != null) bits.push(r.leverage.label);
+  return bits.join(" · ");
+};
+
 // Newest first: kept records, plus log-rebuilt goals that no record covers (same start within a minute),
 // plus the current goal once it has ended and isn't recorded yet.
 export function history({ records = [], log = [], goal = null, jobs = [], live = {}, limit = 30 } = {}) {
@@ -130,10 +144,12 @@ export function history({ records = [], log = [], goal = null, jobs = [], live =
   const covered = (at) => all.some((r) => Math.abs(Number(r.startedAt) - Number(at)) < 60e3);
   if (goal && !["running", "paused"].includes(goal.status) && !all.some((r) => r.id === goal.id)) all.push(goalRecord(goal, jobs, live));
   for (const g of goalsFromLog(log)) if (!covered(g.startedAt)) all.push(g);
-  return all.sort((a, b) => b.startedAt - a.startedAt).slice(0, limit).map((r) => ({
-    ...r, took: r.finishedAt && r.startedAt ? r.finishedAt - r.startedAt : null,
-    tokensText: r.tokens === null || r.tokens === undefined ? "" : fmtTokens(r.tokens) + (r.tokensCantTell ? "+" : ""),
-  }));
+  return all.sort((a, b) => b.startedAt - a.startedAt).slice(0, limit).map((r) => {
+    const row = { ...r, took: r.finishedAt && r.startedAt ? r.finishedAt - r.startedAt : null, leverage: r.leverage || null };
+    row.tokensText = r.tokens === null || r.tokens === undefined ? "" : fmtTokens(r.tokens) + (r.tokensCantTell ? "+" : "");
+    row.summary = rowSummary(row);
+    return row;
+  });
 }
 
 // "2h 5m" / "12m" / "40s".
