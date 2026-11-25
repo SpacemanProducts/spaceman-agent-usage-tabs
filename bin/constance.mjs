@@ -6,6 +6,7 @@
 //
 //   start --dir D --goal TEXT   new goal (refused while one is active); starts the driver in the background
 //   status                      JSON for the panel: goal, jobs, agents, pace, log
+//   remote                      write the phone-safe status summary to remote-status.txt (prints the path)
 //   agents | pace | jobs        what she reads before every handoff
 //   delegate --agent ID --task TEXT [--files a,b]   hand one task to one free agent (re-checks it first;
 //                                                   no --files = read-only; in practice mode it only logs the prompt)
@@ -54,6 +55,9 @@ import { secondTry, sendBackAdvice } from "./constance-retry.mjs";
 import { planSpare, useItOrLoseItOn } from "./constance-spare.mjs";
 import { readBacklog, addItem as addBacklogItem, markTaken, markDone, removeItem as removeBacklogItem, openItems as openBacklog, formatItem, KINDS as BACKLOG_KINDS } from "./constance-backlog.mjs";
 import { buildReport, writeReport, lastReportAt } from "./constance-morning.mjs";
+import { addSample, readSamples, sessionSpent, leverage, bestReturnLesson } from "./constance-leverage.mjs";
+import { readMilk, milkPolicy, milkPrompt } from "./constance-milk.mjs";
+import { writeRemoteStatus } from "./constance-remote.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -843,6 +847,13 @@ function recordHistory(fresh = true) {
   if (!s.goal || ["running", "paused"].includes(s.goal.status)) return null;
   if (readHistory().some((r) => r.id === s.goal.id)) return null;
   const rec = goalRecord(s.goal, asAccepted(s.jobs), matchJobs(s.jobs, records));
+  // The same leverage object status shows, kept on the history line; and, once
+  // per goal like the record itself, one lesson naming the handoff that paid
+  // off best (jobs carry tokens and their review verdicts for it).
+  rec.leverage = leverageView(s, tokenMeter({ jobs: s.jobs, goal: s.goal, records }).goal?.total ?? null);
+  const back = bestReturnLesson(s.jobs.filter((j) => j.goal === s.goal.id).map((j) => ({
+    ...j, verdict: j.status === "accepted" || j.status === "merged" ? "accept" : j.status === "sent back" ? "send-back" : "review" })));
+  if (back) addLesson(back, store.dir);
   fs.appendFileSync(historyFile(), JSON.stringify(rec) + "\n");
   return rec;
 }
@@ -1129,6 +1140,17 @@ function openWork(s) {
   return parts.join(" and ");
 }
 
+// The driver's heartbeat (its watch interval and adopt loop): refresh the
+// leverage samples and the phone-safe remote status, each at most once a
+// minute. statusPayload() does the sampling; nothing is sent anywhere.
+let lastBeat = 0;
+function heartbeat() {
+  const now = Date.now();
+  if (now - lastBeat < SAMPLE_GAP_MS) return;
+  lastBeat = now;
+  try { writeRemoteStatus(statusPayload(), remoteFile()); } catch {}
+}
+
 async function drive() {
   let pausedLogged = false, failures = 0, nudge = null;
   for (;;) {
@@ -1161,7 +1183,7 @@ async function drive() {
         const st = store.read().goal;
         if (!st || st.status === "stopped") return;
         if (!killed && pace(claudeOf(readData())).mode === "stop") { killGroup(g.brainPid); killed = true; }
-        try { releaseHeld(); fillSlots(); } catch {}
+        try { releaseHeld(); fillSlots(); heartbeat(); } catch {}
         await sleep(5000);
       }
       const st = store.read().goal;
@@ -1173,7 +1195,7 @@ async function drive() {
     // resume carries its own short message instead of the generic one.
     const prompt = resume
       ? nudge || "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal."
-      : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + rulesBlock(readProjectRules(g.dir));
+      : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + "\n" + milkPrompt(readMilk(readSettings())) + rulesBlock(readProjectRules(g.dir));
     nudge = null;
     const args = ["-p", "--model", g.model || "opus", "--dangerously-skip-permissions", "--output-format", "text", "--append-system-prompt", ROLE(g.dir),
       ...(resume ? ["--resume", g.session] : ["--session-id", g.session]), prompt];
@@ -1185,7 +1207,7 @@ async function drive() {
     const watch = setInterval(() => {
       const st = store.read().goal;
       if (!st || st.status === "stopped") { killGroup(brain.pid); return; }
-      try { releaseHeld(); fillSlots(); } catch {}
+      try { releaseHeld(); fillSlots(); heartbeat(); } catch {}
       if (pace(claudeOf(readData())).mode === "stop") { pausedByUs = true; killGroup(brain.pid); }
     }, 30e3);
     const code = await new Promise((r) => brain.on("exit", (c) => r(c)));
@@ -1322,19 +1344,50 @@ function scorecardView(name, dir) {
   return { rows, spareOn, spare };
 }
 
-function status() {
+// ---------------------------------------------------------------- leverage, milk, remote
+// The leverage meter's samples file: one Claude-session reading at most every
+// 60 s, shared by status calls, the remote command and the driver heartbeat.
+// The file's own mtime is the throttle, so separate processes agree.
+const leverageFile = () => path.join(store.dir, "leverage.jsonl");
+const SAMPLE_GAP_MS = 60e3;
+const remoteFile = () => path.join(store.dir, "remote-status.txt");
+
+function sampleLeverage(p) {
+  const used = (p?.windows || []).find((w) => w.title === "Session")?.used;
+  if (!Number.isFinite(used)) return;
+  const f = leverageFile();
+  try { if (Date.now() - fs.statSync(f).mtimeMs < SAMPLE_GAP_MS) return; } catch {}
+  try { addSample(f, { at: Date.now(), used }); } catch {}
+}
+
+// Her leverage for the goal on record: the free-agent token total the TOKENS
+// section shows for the goal, per 1% of her own session spent since it began.
+function leverageView(s, tokens) {
+  return leverage({ tokens: tokens ?? null, spentPct: sessionSpent(readSamples(leverageFile(), s.goal?.startedAt)) });
+}
+
+function statusPayload() {
   const records = keepTokens();
   fillSlots();
   const s = store.read(), d = readData();
-  out({ goal: s.goal, board: boardView(s, d, records), tokens: tokensView(s, d, records), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
-    queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) });
+  const p = pace(claudeOf(d));
+  sampleLeverage(p);
+  const tv = tokensView(s, d, records);
+  return { goal: s.goal, board: boardView(s, d, records), tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p,
+    leverage: leverageView(s, tv.goal?.total ?? null), milk: milkPolicy(readMilk(readSettings())), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
+    queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
 }
+
+function status() { out(statusPayload()); }
 
 const cmd = process.argv[2];
 if (process.argv[1] === SELF) {
   if (cmd === "start") startGoal();
   else if (cmd === "drive") await drive();
   else if (cmd === "status") status();
+  // The phone-safe summary (constance-remote.mjs): written to her state dir,
+  // nothing is sent anywhere and no port is opened. Prints the file's path.
+  else if (cmd === "remote") { writeRemoteStatus(statusPayload(), remoteFile()); out(remoteFile()); }
   else if (cmd === "agents") {
     const d = freshData(), guards = store.read().guards || {}, card = readScorecard(store.dir), rows = scoreRows(card);
     const all = judged(d), order = rankAgents(all.filter((a) => a.available).map((a) => a.id), card);
@@ -1380,5 +1433,5 @@ if (process.argv[1] === SELF) {
     out("noted: the goal queue waits for the owner after this goal");
   }
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|stop|recover");
+  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|stop|recover");
 }

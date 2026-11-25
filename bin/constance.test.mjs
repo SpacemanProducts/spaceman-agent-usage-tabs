@@ -1104,5 +1104,36 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 12
   const jobsNow = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "jobs.json"), "utf8")).jobs;
   for (const j of jobsNow) if (j.tmp && ["finished", "accepted", "sent back", "stopped"].includes(j.status)) assert.ok(!fs.existsSync(j.tmp), `job ${j.id}'s temp folder is gone`);
 }
+
+// Leverage, Milk Opus and remote status: status carries the meter and the
+// policy, a finished goal's history line keeps the same leverage object, her
+// first prompt carried the milk lines, and `remote` writes a phone-safe file
+// with no paths in it.
+{
+  const ms = status();
+  assert.ok(ms.leverage && typeof ms.leverage.label === "string" && Number.isFinite(ms.leverage.spentPct),
+    "status has leverage: " + JSON.stringify(ms.leverage));
+  assert.equal(ms.milk.value, 25, "no constanceMilk setting -> the default");
+  assert.equal(ms.milk.band, "milk"); assert.equal(ms.milk.sandbox, true); assert.equal(ms.milk.guardrails, true);
+  // `remote` writes the summary and prints the path; the file has no paths in it.
+  const rr = run("remote");
+  assert.equal(rr.status, 0, rr.stderr);
+  const rfile = path.join(tabs, "constance", "remote-status.txt");
+  assert.equal(rr.stdout.trim(), rfile, "remote prints the path it wrote");
+  const rtext = fs.readFileSync(rfile, "utf8");
+  assert.match(rtext, /^Goal: /m);
+  for (const p of [root, repo, tabs, fakeHome, "/home/", "/var/tmp"]) assert.ok(!rtext.includes(p), `no "${p}" in the remote status`);
+  // Every recorded goal carries the leverage object status computed.
+  const hist = fs.readFileSync(path.join(tabs, "constance", "history.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(hist.length > 0);
+  for (const h of hist) assert.ok(h.leverage && typeof h.leverage.label === "string" && Number.isFinite(h.leverage.spentPct),
+    `history line for "${h.text}" has leverage: ` + JSON.stringify(h.leverage));
+  // Her first prompt carried the milk lines (after her lessons, before the rules).
+  const ga = fs.readFileSync(path.join(root, "claude-args-guard"), "utf8");
+  assert.match(ga, /Milk Opus is at 25 \(milk\)/, "the milk line is in her goal prompt");
+  assert.match(ga, /Sandbox and guardrails stay on at every setting\./);
+  assert.ok(ga.indexOf("Lessons from your earlier goals") < ga.indexOf("Milk Opus is at"), "milk comes after her lessons");
+  assert.ok(ga.indexOf("Milk Opus is at") < ga.indexOf("Rules for this project"), "milk comes before the project rules");
+}
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance: tests passed");
