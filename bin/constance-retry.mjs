@@ -74,3 +74,50 @@ export function sendBackAdvice(jobs, job = {}) {
   if (ids.length < 2) return "";
   return `This work has now been sent back twice (jobs ${idList(ids)}): split it into smaller jobs or do it yourself. A new handoff with the same files will be refused.`;
 }
+
+// ---------------------------------------------------------------- auto-retry
+// A finished job that failed on its own — tests failing, a guard violation or
+// a crash — gets one automatic redo on a fresh copy of the same agent before
+// Constance's review ever sees it. shouldAutoRetry decides; retrySpec builds
+// the handoff ({ agent, files, task, again }) the caller passes to delegate.
+
+// The done-file `tests` field only counts as a failure when it says so
+// outright; silence is not a failure (self-merge already treats it that way).
+function testsFailed(t) {
+  if (t === false) return true;
+  return /^(fail|failed|failing|no|none)$/i.test(String(t ?? ""));
+}
+
+// Summaries the sweep writes when no real report exists: the agent exited
+// without its done file, the done file wasn't JSON, or it never launched.
+const CRASH_SUMMARY = /^\((the agent exited|done file was not valid JSON|not launched|no worktree)/;
+
+// True when the job's own record shows a failure worth retrying.
+function jobFailed(job) {
+  if (!job) return false;
+  if (Array.isArray(job.guardViolation) && job.guardViolation.length) return true;
+  if (testsFailed(job.tests)) return true;
+  const s = String(job.summary || "");
+  return CRASH_SUMMARY.test(s);
+}
+
+// True only when the job failed, has not been auto-retried yet (no history
+// entry with againOf === job.id marked autoRetry) and is not itself an
+// auto-retry, and the work is not past the second-try limit (secondTry still
+// applies to the same files/againOf chain).
+export function shouldAutoRetry(job, history = []) {
+  if (!jobFailed(job) || job.autoRetry) return false;
+  const jobs = Array.isArray(history) && history.length ? history : [job];
+  if (jobs.some((h) => h && h.againOf === job.id && h.autoRetry)) return false;
+  if (secondTry(jobs, { files: job.files || [], againOf: job.againOf ?? null })) return false;
+  return true;
+}
+
+// The redo spec for delegate: same agent and file list, the original task
+// plus a 'Last try failed with:' section carrying the last 1500 chars of the
+// job's error output, linked back with again: job.id.
+export function retrySpec(job, { errorOutput = "" } = {}) {
+  const tail = String(errorOutput ?? "").slice(-1500);
+  const task = `${String(job?.task || "").trim()}\n\nLast try failed with:\n${tail}`;
+  return { agent: job?.agent, files: [...(job?.files || [])], task, again: job?.id };
+}
