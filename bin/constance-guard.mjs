@@ -75,7 +75,15 @@ export function commitFromRun(dir, commit, baseHead) {
 // counts).
 const commitFiles = (dir, commit) => {
   const out = [];
-  const r = git(dir, "show", "--name-status", "--format=", "-M", commit);
+  // `git show --name-status` prints nothing for a clean merge commit, which
+  // would hide every file the merge brought in: for a merge, diff the commit
+  // against its first parent instead. Both outputs share the
+  // "STATUS\tpath[\tpath]" format parsed below.
+  const p = git(dir, "rev-list", "--parents", "-n", "1", commit);
+  const parents = p.status === 0 ? p.stdout.trim().split(/\s+/).length - 1 : 0;
+  const r = parents > 1
+    ? git(dir, "diff", "--name-status", "-M", commit + "^1", commit)
+    : git(dir, "show", "--name-status", "--format=", "-M", commit);
   if (r.status !== 0) return out;
   for (const line of r.stdout.split("\n")) {
     if (!line.trim()) continue;
