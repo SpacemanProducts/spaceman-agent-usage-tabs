@@ -43,6 +43,11 @@ export function cards({ jobs = [], goal = null, queue = [], live = {}, names = (
       title: jobTitle(j), files: j.files || [], tokens, tokensText: tokens === null ? "" : fmtTokens(tokens) + " tokens",
       startedAt: j.startedAt || null, endedAt: end, createdAt: j.createdAt || null,
       result: jobResult(j), items: count ? jobItems(j, count) : [],
+      // "Give it to Opus": offered on every running card Opus doesn't already have; a stuck
+      // one turns orange and offers it prominently. handedFrom names the worker it replaced.
+      stuck: j.status === "running" && j.stuck ? String(j.stuck.reason || "stuck") : "",
+      canTakeOver: j.status === "running" && !j.handedFrom && j.agent !== "claude",
+      handedFrom: j.handedFrom ? String(j.handedFrom.worker || names(j.handedFrom.agent)) : "",
     };
   });
   for (const q of queue) out.push({ id: null, key: `queue-${q.id}`, worker: q.agent ? names(q.agent) : "next free agent", agent: q.agent || "", status: "queued",
@@ -54,10 +59,11 @@ const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 const lower = (t) => t.charAt(0).toLowerCase() + t.slice(1);
 
 // "Devin 2 is fixing the guard; 2 jobs waiting for review."
-export function nowLine({ goal = null, jobs = [], names = (id) => id, goalQueue = [], queuePaused = "" } = {}) {
-  const next = goalQueue.length ? ` ${plural(goalQueue.length, "goal")} queued.` : "";
+export function nowLine({ goal = null, jobs = [], names = (id) => id, goalQueue = [], queuePaused = "", queueHeld = false } = {}) {
+  const next = goalQueue.length ? ` ${plural(goalQueue.length, "goal")} queued${queueHeld ? " (queue paused)" : ""}.` : "";
   if (!goal || !["running", "paused"].includes(goal.status)) {
     if (goal && goal.needsOwner) return `She stopped: ${goal.needsOwner}${goalQueue.length ? " The queue waits for you." : ""}`;
+    if (queueHeld && goalQueue.length) return `Queue paused: ${plural(goalQueue.length, "goal")} ${goalQueue.length === 1 ? "waits" : "wait"} for Resume queue.`;
     if (queuePaused && goalQueue.length) return `The goal queue is paused: ${queuePaused}`;
     return goal ? `Free. Last goal ${({ done: "finished", stopped: "was stopped", failed: "couldn't finish" })[goal.status] || goal.status}.${next}` : `Free. Give her a goal.${next}`;
   }

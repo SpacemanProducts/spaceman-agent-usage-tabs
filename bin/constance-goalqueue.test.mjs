@@ -7,7 +7,7 @@ import path from "node:path";
 import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner, queueStops } from "./constance-goalqueue.mjs";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-goalqueue-"));
-assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" });
+assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 });
 assert.throws(() => addGoal(dir, { text: "  ", dir: "/p" }), /goal first/);
 assert.throws(() => addGoal(dir, { text: "x" }), /folder/);
 const a = addGoal(dir, { text: " A ", dir: "/p/a" }), b = addGoal(dir, { text: "B", dir: "/p/b" }), c = addGoal(dir, { text: "C", dir: "/p/c" });

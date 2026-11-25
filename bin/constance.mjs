@@ -23,6 +23,9 @@
 //   goals [add --goal T --dir D | rm ID | edit ID [--goal T] [--dir D] | move ID up|down|top|N | next]
 //                               the owner's goal queue (the panel's GOAL QUEUE); no subcommand lists it
 //   note TEXT                   a line in the owner's log
+//   takeover ID                 "Give it to Opus": stop job ID's worker and let Opus (claude) finish it in
+//                               the same folder, with the partial diff and the last 50 log lines
+//   goals pause | goals resume  the owner's queue pause: the current goal runs on, no queued goal starts
 //   stop                        halt everything at once (her, every job)
 //   recover                     panel load: restart the driver if a goal is active and it isn't running
 //   route STEP                  which model her STEP runs on, as JSON (constance-route.mjs)
@@ -55,7 +58,9 @@ import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, bra
 import { tokenMeter, matchJobs, snapshots, readRecords, usageFile, refreshInBackground, refreshNow } from "./constance-tokens.mjs";
 import { parseItems, parseItemArg, checklist } from "./constance-checklist.mjs";
 import { cards, nowLine, history, goalRecord } from "./constance-board.mjs";
-import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, queueStops } from "./constance-goalqueue.mjs";
+import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, queueStops, holdQueue, releaseQueue } from "./constance-goalqueue.mjs";
+import { stuckCheck, expectedMs, activitySignature, observe, dueForCheck, IDLE_MS, CHECK_GAP_MS } from "./constance-stuck.mjs";
+import { OPUS, opusCommand, autoTakeoverOn, takeoverProblem, opusBlocked, lastLines, partialDiff, readTail, takeoverPrompt } from "./constance-takeover.mjs";
 import { readScorecard, recordReview, scoreRows, sizeHint, rankAgents, scoreLine } from "./constance-scorecard.mjs";
 import { secondTry, sendBackAdvice, shouldAutoRetry, retrySpec } from "./constance-retry.mjs";
 import { refill } from "./constance-refill.mjs";
@@ -92,7 +97,9 @@ export function alive(pid, needle = "") {
   if (!needle) return true;
   try { return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(needle); } catch { return false; }
 }
-function killGroup(pid) { try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch {} } }
+function killGroup(pid, sig = "SIGTERM") { try { process.kill(-pid, sig); } catch { try { process.kill(pid, sig); } catch {} } }
+// The CLI a job's process runs: its agent's, or Claude Code's once Opus took it over.
+const cliOf = (j) => (j.handedFrom ? OPUS.cli : LAUNCH[j.agent]?.cli || "");
 
 function readData() { try { return JSON.parse(fs.readFileSync(path.join(STATE, "data.json"), "utf8")); } catch { return { agents: [] }; } }
 // Fresh numbers before a handoff: run the collector when data.json is over 5 minutes old (same sound
@@ -185,9 +192,13 @@ function sweep() {
       let done = null, source = "";
       try { done = JSON.parse(fs.readFileSync(f, "utf8")); j.finishedAt = fs.statSync(f).mtimeMs; source = "done-file"; }
       catch {
-        if (fs.existsSync(f)) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
+        // A done file still being written reads as broken JSON: while it is under 3 s old and its
+        // agent still runs, wait for the next sweep instead of finishing the job on half a file.
+        let writing = false;
+        try { writing = Date.now() - fs.statSync(f).mtimeMs < 3000 && alive(j.pid, cliOf(j)); } catch {}
+        if (fs.existsSync(f) && !writing) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
       }
-      if (!done && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
+      if (!done && !alive(j.pid, cliOf(j))) { done = { summary: j.summaryNote ? `(${j.summaryNote}; the worker had been stopped)` : "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
       if (done) { j.status = "finished"; j.settling = Date.now(); j.summary = String(done.summary || ""); j.commit = String(done.commit || ""); if (done.tests !== undefined) j.tests = done.tests; changed.push(j); signals.push({ j, source }); }
       // Still running, but its own log says it finished: record the signal
       // (deduped in notify.jsonl) without touching its status.
@@ -205,8 +216,144 @@ function sweep() {
   // Whoever's sweep sees the finish logs the return — status polls can beat `wait` to it.
   for (const j of changed) store.log({ kind: "returned", job: j.id, agent: j.agent, worker: j.worker, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
   for (const { j, source } of signals) recordSignal(store.dir, jobFinishSignal(j, { source, runDir: jobDoneDir(j) }));
+  checkStuck();
   fillSlots();
   return changed;
+}
+
+// ---------------------------------------------------------------- stuck jobs and "Give it to Opus"
+// Every sweep looks at running jobs (each one's files and log at most every 30 s,
+// constance-stuck.mjs): more than twice its agent's usual time on the scorecard, or
+// 15 minutes with no file change and no log output, flags it stuck. A newly stuck job
+// is logged and the owner gets one silent notification; when the Milk Opus slider
+// leans toward Opus (constance-takeover.mjs AUTO_FROM) it goes to Opus by itself.
+// Tests shorten the windows with CONSTANCE_STUCK_IDLE_MS / CONSTANCE_STUCK_CHECK_MS.
+const envMs = (name, dflt) => (process.env[name] !== undefined && Number.isFinite(Number(process.env[name])) ? Number(process.env[name]) : dflt);
+function checkStuck() {
+  try {
+    const running = store.read().jobs.filter((j) => j.status === "running");
+    if (!running.length) return;
+    const now = Date.now(), gap = envMs("CONSTANCE_STUCK_CHECK_MS", CHECK_GAP_MS), idleMs = envMs("CONSTANCE_STUCK_IDLE_MS", IDLE_MS);
+    let rows = null;
+    const newly = [];
+    for (const j of running) {
+      const due = dueForCheck(j.activity, now, gap);
+      const activity = due ? observe(j.activity, activitySignature(runDir(j), j.log), now) : j.activity;
+      rows ??= scoreRows(readScorecard(store.dir));
+      // Opus's own run is timed from its takeover; it has no scorecard row of its own at first.
+      const res = stuckCheck({ ...j, startedAt: j.takenOverAt || j.startedAt }, { now, expected: expectedMs(rows.find((r) => r.agent === j.agent)), activityAt: activity?.at || 0, idleMs });
+      if (!due && !!j.stuck === res.stuck) continue;
+      const flagged = store.update((s) => {
+        const x = s.jobs.find((k) => k.id === j.id);
+        if (!x || x.status !== "running") return false;
+        if (activity) x.activity = activity;
+        if (!res.stuck) { delete x.stuck; return false; }
+        const fresh = !x.stuck;
+        x.stuck = { kind: res.kind, reason: res.reason, at: x.stuck?.at || now };
+        if (fresh && !x.stuckNotified) { x.stuckNotified = now; return { ...x }; }
+        return false;
+      });
+      if (flagged) newly.push(flagged);
+    }
+    for (const j of newly) {
+      const who = j.worker || j.agent;
+      store.log({ kind: "stuck", job: j.id, agent: j.agent, worker: j.worker, text: `looks stuck: ${j.stuck.reason}.` });
+      let auto = "";
+      if (!j.handedFrom && autoTakeoverOn(readMilk(readSettings()))) {
+        try { takeOver(j.id, { auto: true, reason: `it looked stuck: ${j.stuck.reason}` }); auto = "handed to Opus automatically"; }
+        catch (e) { store.log({ kind: "note", job: j.id, agent: j.agent, text: `not handed to Opus automatically: ${e.message}` }); }
+      }
+      tellOwner(`Job ${j.id} looks stuck`, `${who}: ${j.stuck.reason}. ${auto ? "Milk Opus is high, so it was " + auto + "." : j.handedFrom ? "Opus already has it; you may want to stop it." : "Open her panel and press Give it to Opus."}`);
+    }
+  } catch (e) { store.log({ kind: "note", text: `Stuck check skipped: ${e.message}` }); }
+}
+
+const pause = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch {} };
+function waitGone(pid, needle, ms = 5000) {
+  const end = Date.now() + ms;
+  while (alive(pid, needle) && Date.now() < end) pause(100);
+  if (alive(pid, needle)) { killGroup(pid, "SIGKILL"); pause(300); }
+  return !alive(pid, needle);
+}
+
+// "Give it to Opus": stop the worker (its partial changes and log stay where they are) and
+// relaunch the same job as Opus in the same folder or worktree, in the same sandbox kind,
+// with the original prompt, the partial diff and the last 50 log lines. The job keeps its
+// id, files, guard snapshot (the guard checks the worker's and Opus's changes together), done
+// file and review path; its card shows Opus as the worker. Throws with a reason on refusal.
+function takeOver(id, { auto = false, reason = "" } = {}) {
+  const g = store.read().goal;
+  if (!g || !["running", "paused"].includes(g.status)) throw new Error("No goal is running.");
+  if (practiceMode()) throw new Error("Practice mode is on: nothing launches, so nothing can go to Opus.");
+  const blocked = opusBlocked(claudeOf(readData()), { auto });
+  if (blocked) throw new Error(`Opus can't take it now: ${blocked}.`);
+  const box = boxProblem(OPUS.agent);
+  if (box) throw new Error(`Opus can't run sandboxed: ${box}.`);
+  // Claim it: "waiting" keeps the sweep off it while the worker stops, and Stop still covers it.
+  const j = store.update((s) => {
+    const x = s.jobs.find((k) => k.id === id);
+    const problem = takeoverProblem(x);
+    if (problem) return { problem };
+    x.status = "waiting"; x.handingOver = Date.now();
+    return { ...x };
+  });
+  if (j.problem) throw new Error(`Can't give it to Opus: ${j.problem}.`);
+  const back = (extra = {}) => store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "running"; delete x.handingOver; Object.assign(x, extra); } });
+  if (alive(j.pid, cliOf(j))) killGroup(j.pid);
+  waitGone(j.pid, cliOf(j));
+  // It finished on its own just now: let the sweep take it the normal way.
+  if (fs.existsSync(jobDoneFile(j))) { back(); throw new Error(`job ${id} just finished on its own; it goes to review.`); }
+  keepTokens(true);
+  const workerTokens = store.read().jobs.find((k) => k.id === id)?.tokens ?? null;
+  const rd = runDir(j);
+  const from = j.worker || (readData().agents || []).find((a) => a.id === j.agent)?.name || j.agent;
+  const why = reason || (auto ? "it looked stuck" : "the owner handed it to Opus");
+  const { diff, untracked } = partialDiff(rd, j.guardBefore?.head || "");
+  const logTail = lastLines(readTail(j.log));
+  const prompt = takeoverPrompt({ prompt: j.prompt, from, reason: why, diff, untracked, logTail });
+  const logPath = j.log || path.join(store.dir, `job-${id}.log`);
+  let child, tmp = j.tmp;
+  try {
+    if (!tmp || !fs.existsSync(tmp)) tmp = fs.mkdtempSync(path.join(os.tmpdir(), `constance-job-${id}-`));
+    const doneDir = j.worktree ? rd : tmp;
+    fs.mkdirSync(path.join(doneDir, ".constance"), { recursive: true });
+    fs.appendFileSync(logPath, `\n--- ${new Date().toISOString()} ${from} stopped; handed to Opus (${why}) ---\n`);
+    const fd = fs.openSync(logPath, "a");
+    try {
+      const b = sandboxLaunch(opusCommand(prompt), { agent: OPUS.agent, dir: rd, tmp, env: ENV, keyringAgents: [] });
+      const [cmd, ...args] = b.cmd;
+      child = spawn(cmd, args, { cwd: rd, env: b.env, detached: true, stdio: ["ignore", fd, fd] });
+      child.unref();
+    } finally { fs.closeSync(fd); }
+  } catch (e) {
+    // The worker is already stopped: the job goes on to the sweep as an exit without a done file.
+    back({ tmp, summaryNote: `Opus couldn't launch: ${e.message}` });
+    store.log({ kind: "note", job: id, agent: j.agent, worker: j.worker, text: `Job ${id} could not go to Opus: ${e.message}. Its worker was stopped, so it goes to review as it is.` });
+    throw new Error(`Opus couldn't launch: ${e.message}`);
+  }
+  const now = Date.now();
+  const kept = store.update((s) => {
+    const x = s.jobs.find((k) => k.id === id);
+    // Stop was pressed during the handover: it stays stopped, and Opus goes too.
+    if (!x || x.status !== "waiting" || !x.handingOver) return false;
+    x.handedFrom = { agent: x.agent, worker: x.worker || "", account: x.account?.label || "", pid: x.pid, at: now, auto, reason: why, ...(workerTokens !== null ? { tokens: workerTokens } : {}) };
+    x.agent = OPUS.agent; x.worker = OPUS.worker; x.account = null;
+    x.workerPrompt = x.prompt; x.prompt = prompt;
+    x.status = "running"; x.pid = child.pid; x.tmp = tmp; x.log = logPath; x.takenOverAt = now;
+    delete x.handingOver; delete x.stuck; delete x.activity;
+    return true;
+  });
+  if (!kept) { killGroup(child.pid); throw new Error(`job ${id} was stopped during the handover.`); }
+  store.log({ kind: "takeover", job: id, agent: OPUS.agent, worker: OPUS.worker, files: j.files || [], text: `${from} stopped and Opus took over${auto ? " automatically" : ""} (${why}).` });
+  return { id, from };
+}
+
+function takeoverCmd() {
+  const id = Number(process.argv[3]);
+  if (!Number.isInteger(id) || id < 1) fail("Usage: takeover ID");
+  sweep();
+  try { const r = takeOver(id); out(`Opus took over job ${id} from ${r.from}. Its card shows Opus now; it is reviewed like any other job.`); }
+  catch (e) { fail(e.message); }
 }
 
 // Same containment rule the guard uses: a changed path is covered by a file
@@ -429,7 +576,7 @@ function runSelfMerge(id) {
 // job back to finished for the normal review.
 function autoRetry(j) {
   try {
-    if (!j.copy || j.autoRetry) return;
+    if (!j.copy || j.autoRetry || j.handedFrom) return;
     const fresh = store.read().jobs.find((k) => k.id === j.id);
     if (!fresh || fresh.status !== "finished" || fresh.autoRetried || !shouldAutoRetry(fresh, store.read().jobs)) return;
     const spec = retrySpec(fresh, { errorOutput: fresh.log ? tailFile(fresh.log) : "" });
@@ -1167,6 +1314,13 @@ function afterGoal() {
     }
     return false;
   }
+  // The owner paused the queue: this goal is done and nothing else starts (no queued goal and
+  // no use-it-or-lose-it goal) until "Resume queue".
+  if (q.ownerPaused) {
+    if (q.goals.length) store.log({ kind: "queue", text: `Queue paused: ${q.goals.length} goal${q.goals.length === 1 ? " waits" : "s wait"} until you press Resume queue.` });
+    else if (g.fromQueue || g.fromSpare) morningReport();
+    return false;
+  }
   const next = takeNext(store.dir);
   if (!next) {
     // The queue is empty. Room an agent would lose at a reset goes to the project's backlog
@@ -1265,12 +1419,11 @@ function goalsCmd() {
       const g = addGoal(store.dir, { text, dir: resolveDir(arg("--dir"), arg("--new")) });
       store.log({ kind: "queue", text: `Goal queued: ${g.text.split("\n")[0].slice(0, 100)} (in ${g.dir})` });
       // Nothing running: the owner adding a goal is the go-ahead, so start it now.
-      const cur = store.read().goal;
+      const cur = store.read().goal, q = readGoalQueue(store.dir);
       if (!cur || !["running", "paused"].includes(cur.status)) {
-        const q = readGoalQueue(store.dir);
-        if (!q.paused && q.goals.length === 1) return startNextNow();
+        if (!q.paused && !q.ownerPaused && q.goals.length === 1) return startNextNow();
       }
-      return out(`Queued: ${g.text.split("\n")[0].slice(0, 100)}`);
+      return out(`Queued: ${g.text.split("\n")[0].slice(0, 100)}${q.ownerPaused ? " (the queue is paused: it waits for Resume queue)" : ""}`);
     }
     if (sub === "rm") { const g = removeGoal(store.dir, id); store.log({ kind: "queue", text: `Goal removed from the queue: ${g.text.split("\n")[0].slice(0, 100)}` }); return out("removed"); }
     if (sub === "edit") {
@@ -1280,6 +1433,19 @@ function goalsCmd() {
     }
     if (sub === "move") { moveGoal(store.dir, id, process.argv[5]); return out("moved"); }
     if (sub === "next") return startNextNow();
+    if (sub === "pause") {
+      const q = holdQueue(store.dir);
+      store.log({ kind: "queue", text: "Queue paused by you: the current goal keeps running; no queued goal starts until Resume queue." });
+      return out(`Queue paused.${q.goals.length ? ` ${q.goals.length} goal${q.goals.length === 1 ? " waits" : "s wait"}.` : ""}`);
+    }
+    if (sub === "resume") {
+      const q = releaseQueue(store.dir);
+      store.log({ kind: "queue", text: "Queue resumed." });
+      // Nothing running and nothing stopping it: the next goal starts now, as it would have.
+      const cur = store.read().goal;
+      if ((!cur || !["running", "paused"].includes(cur.status)) && !q.paused && q.goals.length) return startNextNow();
+      return out(`Queue resumed.${q.paused ? ` It is still stopped for you: ${q.paused} Press Start next when ready.` : ""}`);
+    }
   } catch (e) { fail(e.message); }
   const q = readGoalQueue(store.dir);
   out(q);
@@ -1288,6 +1454,7 @@ function goalsCmd() {
 function startNextNow() {
   const cur = store.read().goal;
   if (cur && ["running", "paused"].includes(cur.status)) fail("She is already on a goal; the next one starts when it ends.");
+  if (readGoalQueue(store.dir).ownerPaused) fail("The queue is paused: press Resume queue to start the next goal.");
   const next = takeNext(store.dir, { force: true });
   if (!next) fail("The goal queue is empty.");
   let dir;
@@ -1580,10 +1747,11 @@ function stopAll() {
   // Jobs that were actually running still get their guard check before their
   // worktrees and temp folders go: a stopped agent's stray changes count too.
   // Held/waiting jobs never launched, so there is nothing to check for them.
-  const halted = new Set(store.read().jobs.filter((j) => j.status === "running").map((j) => j.id));
+  // A job mid-handover to Opus ran too: its worker's partial changes are checked as well.
+  const halted = new Set(store.read().jobs.filter((j) => j.status === "running" || j.handingOver).map((j) => j.id));
   const s = store.update((s) => {
     if (s.goal && ["running", "paused"].includes(s.goal.status)) { s.goal.status = "stopped"; s.goal.finishedAt = Date.now(); }
-    for (const j of s.jobs) if (j.status === "running" || j.status === "waiting" || j.status === "held") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; j.stoppedAt = Date.now(); }
+    for (const j of s.jobs) if (j.status === "running" || j.status === "waiting" || j.status === "held") { if (alive(j.pid, cliOf(j))) killGroup(j.pid); j.status = "stopped"; j.stoppedAt = Date.now(); }
     return JSON.parse(JSON.stringify(s));
   });
   // A self-merge still running in the background dies with everything else;
@@ -1638,7 +1806,7 @@ function boardView(s, d, records) {
     checklist: checklist(s.goal, asAccepted(s.jobs)),
     cards: cards({ jobs: s.jobs, goal: s.goal, queue: s.goal && ["running", "paused"].includes(s.goal.status) ? queueView(s.goal.dir, store.dir) : [], live, names: name }),
     // A merged job still waits for her review, so the Now line counts it with the finished ones.
-    now: nowLine({ goal: s.goal, jobs: s.jobs.map((j) => (j.status === "merged" ? { ...j, status: "finished" } : j)), names: name, goalQueue: gq.goals, queuePaused: gq.paused }),
+    now: nowLine({ goal: s.goal, jobs: s.jobs.map((j) => (j.status === "merged" ? { ...j, status: "finished" } : j)), names: name, goalQueue: gq.goals, queuePaused: gq.paused, queueHeld: gq.ownerPaused }),
     history: history({ records: readHistory(), log: store.readLog(5000), goal: s.goal, jobs: s.jobs, live }),
     goalQueue: gq,
     scorecard: scorecardView(name, s.goal?.dir),
@@ -1756,7 +1924,7 @@ function statusPayload() {
   if (pline) board.now += ` · ${pline}`;
   lastProgressArgs = pargs;
   return { goal: s.goal, board, progress: { line: pline }, tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p,
-    leverage: leverageView(s, tv.goal?.total ?? null), milk: milkPolicy(readMilk(readSettings())), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
+    leverage: leverageView(s, tv.goal?.total ?? null), milk: { ...milkPolicy(readMilk(readSettings())), autoTakeover: autoTakeoverOn(readMilk(readSettings())) }, practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
 }
 
@@ -1806,6 +1974,7 @@ if (process.argv[1] === SELF) {
     out("lesson added");
   }
   else if (cmd === "stop") stopAll();
+  else if (cmd === "takeover") takeoverCmd();
   else if (cmd === "goals") goalsCmd();
   else if (cmd === "check") checkCmd();
   else if (cmd === "job") jobCmd();
@@ -1826,5 +1995,5 @@ if (process.argv[1] === SELF) {
   else if (cmd === "split") splitCmd();
   else if (cmd === "spec") specCmd();
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|selfmerge|route|batchreview|split|spec|stop|recover");
+  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|selfmerge|route|batchreview|split|spec|takeover|stop|recover");
 }

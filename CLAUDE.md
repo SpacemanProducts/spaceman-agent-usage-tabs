@@ -224,6 +224,16 @@ keeps the developer in flow:
   machine/ramp (no NaN admits); tokens, scorecard, queue (locked writes), pace, backlog, agents
   (`judge()` treats malformed input as unavailable, never a crash), notify (never stores a body) and
   spare/goalqueue all take bad input without crashing or leaking.
+  Since 1.52.0 (owner request): "Give it to Opus" (`C takeover ID`, `bin/constance-takeover.mjs`) is the
+  ONE way Claude works as a worker; `judge()` still never lists Claude. It stops the worker, keeps its
+  changes and log, and relaunches the same job (same id, files, guard snapshot, done file, review) as the
+  real `claude` CLI, sandboxed with the `claude` profile (`~/.claude`, `~/.claude.json` if present);
+  `handedFrom` names the replaced worker, and the job is never auto-retried. Stuck (`bin/constance-stuck.mjs`):
+  > 2x the scorecard's avgMs (floor 5 min) or 15 min with no file/log activity; orange card, one silent
+  notify per job. Auto-handoff only at Milk >= 51 and every Claude meter < 70%; a click is refused at 90%.
+  The owner's "Pause queue" is `ownerPaused` in goal-queue.json, separate from `paused` (a stop for the
+  owner): nothing starts from a paused queue, not even Start next or a spare goal; Resume starts the next
+  goal when she is free. Tests shorten the windows with `CONSTANCE_STUCK_IDLE_MS` / `CONSTANCE_STUCK_CHECK_MS`.
 
 ## Working rules
 

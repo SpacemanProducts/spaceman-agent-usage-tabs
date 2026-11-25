@@ -68,6 +68,8 @@ Panel {
   }
   // Celebration colors: bright and white-heavy on dark themes, deeper (no white) on light ones.
   readonly property color gold: lightPanel ? "#b8860b" : "#ffd700"
+  // A stuck job card (bin/constance-stuck.mjs): orange, apart from the meters' green/amber/red.
+  readonly property color orange: lightPanel ? "#c25400" : "#ff8c1a"
   readonly property var surpriseConfetti: lightPanel
     ? ["#b8860b", "#d70015", "#c25400", "#b8860b", "#1f8a3b", "#008a82", "#0062cc", "#8e3bbf", foreground, "#b8860b"]
     : ["#ffd700", "#ff3b30", "#ff9500", "#ffd700", "#34c759", "#00c7be", "#0a84ff", "#bf5af2", "#ffffff", "#ffd700"]
@@ -1198,13 +1200,30 @@ Panel {
     constanceGoalsRunner.command = ["node", root.pluginDir + "/bin/constance.mjs", "goals"].concat(args)
     constanceGoalsRunner.running = true
   }
+  // "Give it to Opus" on a running job card: stop its worker and let Opus finish it (constance.mjs takeover).
+  function constanceTakeOver(id) {
+    if (constanceTakeoverRunner.running) return
+    root.constanceError = ""
+    constanceTakeoverRunner.command = ["node", root.pluginDir + "/bin/constance.mjs", "takeover", String(id)]
+    constanceTakeoverRunner.running = true
+  }
+  Process {
+    id: constanceTakeoverRunner
+    stderr: StdioCollector { id: constanceTakeoverErr }
+    onExited: function(code) {
+      if (code !== 0) root.constanceError = String(constanceTakeoverErr.text).trim() || ("That didn't work (exit " + code + ").")
+      root.refreshConstance()
+    }
+  }
+  // The owner's queue pause (goal-queue.json ownerPaused): the current goal runs on, no queued goal starts.
+  readonly property bool constanceQueueHeld: constanceGoalQueue.ownerPaused === true
   function constanceWhere() { return root.squadNewName !== "" ? ["--new", root.squadNewName] : ["--dir", root.squadRepo !== "" ? root.squadRepo : root.home] }
   // The goal box's button: start now when she's free, queue it while she works, or save an edit.
   function submitConstanceGoal() {
     var text = String(goalArea.text || "").trim()
     if (text === "") return
     if (root.constanceEditId !== "") { root.constanceGoals(["edit", root.constanceEditId, "--goal", text].concat(root.constanceWhere())); return }
-    if (root.constanceActive) { root.constanceGoals(["add", "--goal", text].concat(root.constanceWhere())); return }
+    if (root.constanceActive || (root.constanceQueueHeld && root.constanceAddingGoal)) { root.constanceGoals(["add", "--goal", text].concat(root.constanceWhere())); return }
     root.startConstance(text)
   }
   function editQueuedGoal(g) {
@@ -1589,14 +1608,15 @@ Panel {
     property string label: ""
     property string tip: ""
     property bool on: false
+    property bool strong: false   // filled in its tint: the one thing to press (a stuck job's Give it to Opus)
     property color tint: root.foreground
     signal clicked()
     width: mcLabel.implicitWidth + Style.space(12)
     height: mcLabel.implicitHeight + Style.space(6)
     radius: Style.cornerRadius
-    color: mc.on ? root.soft(Color.accent, 0.22) : (mcArea.containsMouse ? root.soft(Color.accent, 0.1) : "transparent")
+    color: mc.on ? root.soft(Color.accent, 0.22) : mc.strong ? root.soft(mc.tint, mcArea.containsMouse ? 0.34 : 0.22) : (mcArea.containsMouse ? root.soft(Color.accent, 0.1) : "transparent")
     border.width: 1
-    border.color: mc.on ? root.soft(Color.accent, 0.8) : root.soft(root.foreground, 0.3)
+    border.color: mc.on ? root.soft(Color.accent, 0.8) : mc.strong ? mc.tint : root.soft(root.foreground, 0.3)
     Text {
       id: mcLabel
       anchors.centerIn: parent
@@ -1605,6 +1625,7 @@ Panel {
       color: mc.on ? Color.accent : mc.tint
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
+      font.bold: mc.strong
     }
     MouseArea { id: mcArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: mc.clicked() }
     PanelToolTip { visible: mcArea.containsMouse && mc.tip !== ""; text: mc.tip; fontFamily: root.fontFamily }
@@ -3243,7 +3264,7 @@ Panel {
             // The goal queue: goals waiting their turn, each with its folder. Reorder, edit, remove; she starts
             // the next one by herself when a goal ends well, and stops here when one ends needing the owner.
             Column {
-              visible: root.constanceGoalQueue.goals.length > 0 || root.constanceActive
+              visible: root.constanceGoalQueue.goals.length > 0 || root.constanceActive || root.constanceQueueHeld
               width: parent.width
               spacing: Style.space(6)
               Item {
@@ -3256,19 +3277,37 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(6)
                   MiniChip {
-                    visible: !root.constanceActive && root.constanceGoalQueue.goals.length > 0
+                    visible: !root.constanceActive && !root.constanceQueueHeld && root.constanceGoalQueue.goals.length > 0
                     label: "Start next"
                     tint: root.green
                     tip: "Start the first queued goal now" + (root.constanceGoalQueue.paused ? " (the queue stopped for you)" : "")
                     onClicked: root.constanceGoals(["next"])
                   }
                   MiniChip {
-                    visible: root.constanceActive && !root.constanceAddingGoal && root.constanceEditId === ""
+                    visible: (root.constanceActive || root.constanceQueueHeld) && !root.constanceAddingGoal && root.constanceEditId === ""
                     label: "+ Add a goal"
-                    tip: "Line up another goal, with its own folder; it starts when this one ends well"
+                    tip: root.constanceQueueHeld ? "Line up another goal, with its own folder; it waits until you resume the queue" : "Line up another goal, with its own folder; it starts when this one ends well"
                     onClicked: { root.constanceAddingGoal = true; goalArea.forceActiveFocus() }
                   }
+                  MiniChip {
+                    label: root.constanceQueueHeld ? "Resume queue" : "Pause queue"
+                    tint: root.constanceQueueHeld ? root.green : root.foreground
+                    tip: root.constanceQueueHeld ? "Let queued goals start again" + (root.constanceActive ? " when this one ends" : "; the next one starts now")
+                                                 : "The current goal keeps running; the next queued goal waits until you resume"
+                    onClicked: root.constanceGoals([root.constanceQueueHeld ? "resume" : "pause"])
+                  }
                 }
+              }
+              Text {
+                visible: root.constanceQueueHeld
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: "Queue paused" + (root.constanceGoalQueue.goals.length ? ": " + root.constanceGoalQueue.goals.length + (root.constanceGoalQueue.goals.length === 1 ? " goal waits" : " goals wait") + " until you resume it." : ".")
+                color: root.amber
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
               }
               Text {
                 visible: root.constanceGoalQueue.paused !== "" && root.constanceGoalQueue.goals.length > 0
@@ -3369,13 +3408,14 @@ Panel {
                     id: jobCard
                     required property var modelData
                     readonly property bool open: modelData.id !== null && root.constanceCardOpen === modelData.id
-                    readonly property color tint: root.constanceStatusColor(modelData.status)
+                    readonly property bool stuck: !!modelData.stuck
+                    readonly property color tint: stuck ? root.orange : root.constanceStatusColor(modelData.status)
                     width: open ? cardFlow.width : cardFlow.half
                     height: cardCol.implicitHeight + Style.space(14)
                     radius: Style.cornerRadius
-                    color: cardArea.containsMouse && modelData.id !== null ? root.soft(Color.accent, 0.08) : root.soft(root.foreground, 0.04)
-                    border.width: 1
-                    border.color: open ? root.soft(Color.accent, 0.7) : root.soft(jobCard.tint, modelData.status === "running" ? 0.7 : 0.3)
+                    color: cardArea.containsMouse && modelData.id !== null ? root.soft(Color.accent, 0.08) : jobCard.stuck ? root.soft(root.orange, 0.08) : root.soft(root.foreground, 0.04)
+                    border.width: jobCard.stuck ? 2 : 1
+                    border.color: open ? root.soft(Color.accent, 0.7) : jobCard.stuck ? root.orange : root.soft(jobCard.tint, modelData.status === "running" ? 0.7 : 0.3)
                     MouseArea {
                       id: cardArea
                       anchors.fill: parent
@@ -3416,7 +3456,7 @@ Panel {
                           height: pillText.implicitHeight + Style.space(2)
                           radius: height / 2
                           color: root.soft(jobCard.tint, 0.18)
-                          Text { id: pillText; anchors.centerIn: parent; textFormat: Text.PlainText; text: jobCard.modelData.status; color: jobCard.tint; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                          Text { id: pillText; anchors.centerIn: parent; textFormat: Text.PlainText; text: jobCard.stuck ? "stuck" : jobCard.modelData.status; color: jobCard.tint; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                         }
                       }
                       Text {
@@ -3429,6 +3469,28 @@ Panel {
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
+                      }
+                      // Stuck: why, in orange, open or closed. After a handoff: who Opus replaced.
+                      Text {
+                        visible: jobCard.stuck || (jobCard.open && !!jobCard.modelData.handedFrom)
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
+                        text: jobCard.stuck ? "Stuck: " + jobCard.modelData.stuck : "Took over from " + jobCard.modelData.handedFrom
+                        color: jobCard.stuck ? root.orange : root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                      // Give it to Opus: on every running card Opus doesn't already have; filled orange when stuck.
+                      MiniChip {
+                        visible: !!jobCard.modelData.canTakeOver && !root.constance.practice
+                        label: "Give it to Opus"
+                        strong: jobCard.stuck
+                        tint: jobCard.stuck ? root.orange : root.foreground
+                        tip: "Stop " + jobCard.modelData.worker + " and let Opus finish this job in the same folder, with its partial changes and log. Same sandbox, guardrails and review."
+                        onClicked: root.constanceTakeOver(jobCard.modelData.id)
                       }
                       // Closed: worker, title and the status word only. Time, tokens, items and
                       // files open with the card (queued tasks can't open, so theirs stays).
