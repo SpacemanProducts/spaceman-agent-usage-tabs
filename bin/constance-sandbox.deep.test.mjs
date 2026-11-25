@@ -6,14 +6,10 @@
 // the keyring bus bind, per-job /tmp and the error paths. Pure argv inspection
 // with a mktemp fake HOME; .git layouts are hand-made dirs/files, no real repo.
 //
-// BUGS FOUND (documented as commented-out tests at the bottom, NOT fixed):
-//   1. extraRw is bound verbatim: an extraRw of the home folder itself (or "/")
-//      emits `--bind <home> <home>` / `--bind / /` AFTER `--tmpfs <home>`, which
-//      re-exposes everything the empty-home tmpfs was hiding.
-//   2. `.git/config` (dir repo) and `<common>/config` (worktree) are only
-//      ro-bound when the file exists at argv-build time. If it is missing the
-//      agent can CREATE it inside the writable project bind and set
-//      core.hooksPath/core.fsmonitor, which host git then runs unsandboxed.
+// Section 7 covers the two bugs this pass found and that are now fixed:
+// extraRw that would reopen the home folder or cover a read-only bind is
+// refused, and .git/config (dir repo and worktree common dir) is ro-bound even
+// when the file didn't exist at argv-build time.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -248,35 +244,55 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   assert.throws(() => args({ agent: "grok", dir: path.join(tmp, "no-such-dir"), tmp: jobtmp, env: envFor(home) }), /ENOENT/, "a missing project dir throws");
 }
 
-// ============================================================ 7. bugs found (NOT fixed — see header)
-// BUG 1: extraRw is bound verbatim with no check that it isn't the home folder
-// or a wider ancestor. `--bind <home> <home>` lands AFTER `--tmpfs <home>`, so it
-// remounts the real home writable inside the "empty" home; `--bind / /` would do
-// the same for the whole root. sandboxArgs should refuse extraRw that is home
-// itself or an ancestor of it (under() is only used for the project check).
-//
-//   // const home = mkHome(), proj = mkProj(home);
-//   // const a = args({ agent: "grok", dir: proj, env: envFor(home), extraRw: [home] });
-//   // SHOULD throw (or omit the bind); currently emits:
-//   //   --tmpfs <home> ... --bind <home> <home>  -> real home writable
-//   // assert.throws(() => args({ agent: "grok", dir: proj, env: envFor(home), extraRw: [home] }), /home/);
-//   // assert.ok(!hasMount(a, "bind", home, home), "home must never be re-bound writable");
-//
-// BUG 2: `.git/config` (plain repo) and `<common>/config` (worktree) are only
-// ro-bound `if (exists(cfg))`. With no config file yet, the agent can create one
-// inside the writable project bind and set core.hooksPath/core.fsmonitor to a
-// directory it controls; the next UNSANDBOXED host git command (commit, status)
-// then runs that hook. Rare — git always writes config — but the protection is
-// conditional on a file that can appear later. The .git dir itself would need a
-// ro-bind (or a stub config ro-bound over a writable .git) to close it.
-//
-//   // const home = mkHome(), proj = mkProj(home);
-//   // put(path.join(proj, ".git", "HEAD"));              // .git exists, config does NOT
-//   // const a = args({ agent: "grok", dir: proj, env: envFor(home) });
-//   // SHOULD keep .git/config unwritable even when absent; currently there is
-//   // no ro-bind at all, so `--bind <proj>` leaves .git/config creatable:
-//   // assert.ok(hasMount(a, "ro-bind", path.join(proj, ".git", "config")), ".git/config protected even when missing");
-//   // (this assert FAILS today — that is the bug)
+// ============================================================ 7. bugs found (now fixed)
+// BUG 1 (fixed): extraRw is bound verbatim, so `--bind <home> <home>` landed
+// AFTER `--tmpfs <home>` and remounted the real home writable inside the
+// "empty" one; `--bind / /` did the same for the whole root. sandboxArgs now
+// refuses extraRw that is the home folder, any parent of it ("/" included), or
+// anything that is or contains a read-only bind destination.
+{
+  const home = mkHome(), proj = mkProj(home);
+  assert.throws(() => args({ agent: "grok", dir: proj, env: envFor(home), extraRw: [home] }), /home/, "the home folder itself is refused");
+  assert.throws(() => args({ agent: "grok", dir: proj, env: envFor(home), extraRw: ["/"] }), /home|read-only/, "root is refused");
+  assert.throws(() => args({ agent: "grok", dir: proj, env: envFor(home), extraRw: [path.dirname(home)] }), /home|read-only/, "a parent of home is refused");
+  // A writable bind on top of a read-only one is refused too: .config/git is a
+  // HOME_RO ro-bind, so its parent can't come back writable.
+  put(path.join(home, ".config", "git", "config"));
+  assert.throws(() => args({ agent: "grok", dir: proj, env: envFor(home), extraRw: [path.join(home, ".config")] }), /read-only/, "a parent of a ro-bind is refused");
+  assert.throws(() => args({ agent: "grok", dir: proj, env: envFor(home), extraRw: [path.join(home, ".config", "git")] }), /read-only/, "a ro-bind itself is refused");
+  // A harmless sibling folder is still bound writable.
+  const sib = path.join(tmp, `sib${seq}`); put(path.join(sib, "f"));
+  const a = args({ agent: "grok", dir: proj, env: envFor(home), extraRw: [sib] });
+  assert.ok(hasMount(a, "bind", sib, sib), "a harmless extraRw is still bound");
+}
+
+// BUG 2 (fixed): `.git/config` (plain repo) and `<common>/config` (worktree)
+// were only ro-bound `if (exists(cfg))`. With no config file yet, the agent
+// could create one inside the writable project bind and set
+// core.hooksPath/core.fsmonitor; the next UNSANDBOXED host git command would
+// then run that hook. bwrap can only ro-bind an existing file, so the builder
+// now creates an empty config on the host (valid git) and always ro-binds it.
+{
+  const home = mkHome(), proj = mkProj(home);
+  put(path.join(proj, ".git", "HEAD"));              // .git exists, config does NOT
+  const a = args({ agent: "grok", dir: proj, env: envFor(home) });
+  const cfg = path.join(proj, ".git", "config");
+  assert.ok(hasMount(a, "ro-bind", cfg), ".git/config is read-only even when it was missing");
+  assert.equal(fs.readFileSync(cfg, "utf8"), "", "the created config is empty");
+
+  // Same for a linked worktree's common-dir config.
+  const home2 = mkHome();
+  const main = mkProj(home2, "main");
+  const wt = path.join(tmp, `wt${seq}`); fs.mkdirSync(wt);
+  const gitDir = path.join(main, ".git", "worktrees", "wt2");
+  fs.mkdirSync(gitDir, { recursive: true });
+  fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
+  fs.writeFileSync(path.join(wt, ".git"), `gitdir: ${gitDir}\n`);
+  const a2 = args({ agent: "grok", dir: wt, env: envFor(home2) });
+  const commonCfg = path.join(main, ".git", "config");
+  assert.ok(hasMount(a2, "ro-bind", commonCfg), "worktree common config is read-only even when missing");
+  assert.equal(fs.readFileSync(commonCfg, "utf8"), "", "the created common config is empty");
+}
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("constance-sandbox.deep: tests passed");

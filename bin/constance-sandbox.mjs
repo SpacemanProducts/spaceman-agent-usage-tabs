@@ -115,6 +115,20 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
     "--die-with-parent",
   ];
   const exists = (p) => { try { fs.statSync(p); return true; } catch { return false; } };
+  const gi = gitPointer(proj);
+  // extraRw is bound verbatim, so it must never be able to mount the real home
+  // (or "/") back over the empty-home tmpfs, or land on top of a read-only bind
+  // and re-expose it writable. Refuse the home folder, any parent of it ("/"
+  // included), and anything that is or contains a read-only bind destination.
+  const roPaths = HOME_RO.map((r) => path.join(home, r)).filter(exists);
+  if (gi?.type === "dir") roPaths.push(path.join(gi.dir, "hooks"), path.join(gi.dir, "config"));
+  else if (gi?.type === "worktree") roPaths.push(gi.file, path.join(gi.common, "hooks"), path.join(gi.common, "config"), path.join(gi.common, "worktrees"));
+  for (const raw of extraRw) {
+    const p = path.resolve(raw);
+    if (p === "/" || under(home, p) || roPaths.some((r) => under(r, p))) {
+      throw new Error(`extraRw ${p} would reopen the home folder or cover a read-only bind`);
+    }
+  }
   for (const rel of HOME_RO) {
     const p = path.join(home, rel);
     if (exists(p)) a.push("--ro-bind", p, p);
@@ -128,13 +142,17 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
   a.push("--bind", proj, proj);
   // The project's git config and hooks stay read-only: both can name commands
   // that git runs later, outside the sandbox (hooks, core.fsmonitor, core.hooksPath).
-  const gi = gitPointer(proj);
   if (gi?.type === "dir") {
     const hooks = path.join(gi.dir, "hooks");
     if (!exists(hooks)) fs.mkdirSync(hooks);
     a.push("--ro-bind", hooks, hooks);
     const cfg = path.join(gi.dir, "config");
-    if (exists(cfg)) a.push("--ro-bind", cfg, cfg);
+    // bwrap can only ro-bind a file that exists, so a missing config gets an
+    // empty one on the host first (an empty file is a valid git config). Without
+    // this the agent could CREATE .git/config inside the writable project bind
+    // and set core.hooksPath/core.fsmonitor for the next unsandboxed host git run.
+    if (!exists(cfg)) fs.writeFileSync(cfg, "");
+    a.push("--ro-bind", cfg, cfg);
   } else if (gi?.type === "worktree") {
     // In a worktree .git is a file: keep the pointer itself read-only, bind the
     // shared git dir for objects/refs, then re-expose only THIS worktree's
@@ -145,7 +163,10 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
     if (!exists(hooks)) fs.mkdirSync(hooks);
     a.push("--ro-bind", hooks, hooks);
     const cfg = path.join(gi.common, "config");
-    if (exists(cfg)) a.push("--ro-bind", cfg, cfg);
+    // Same as a plain repo's .git/config: create an empty file when missing so
+    // the read-only bind always exists and the agent can't write one itself.
+    if (!exists(cfg)) fs.writeFileSync(cfg, "");
+    a.push("--ro-bind", cfg, cfg);
     const wts = path.join(gi.common, "worktrees");
     if (exists(wts)) {
       a.push("--ro-bind", wts, wts);
