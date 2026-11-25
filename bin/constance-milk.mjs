@@ -24,7 +24,11 @@ export const MILK_STEPS = [
 // The slider value from settings: an integer 0..100, DEFAULT_MILK when missing or not a
 // number, clamped when out of range.
 export function readMilk(settings) {
-  const n = Number(settings?.constanceMilk);
+  const v = settings?.constanceMilk;
+  // null, "", false and blank strings must fall back, not coerce to 0
+  // (Max delegation) through Number().
+  if (v === null || v === undefined || v === false || (typeof v === "string" && v.trim() === "")) return DEFAULT_MILK;
+  const n = Number(v);
   if (!Number.isFinite(n)) return DEFAULT_MILK;
   return Math.min(100, Math.max(0, Math.round(n)));
 }
