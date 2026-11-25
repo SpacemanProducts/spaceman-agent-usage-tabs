@@ -76,12 +76,10 @@ try {
   assert.deepEqual(parseAmpUsage("Total tokens:"), { tokens: null, status: "" }, "label with nothing after it");
   assert.deepEqual(parseAmpUsage("Total tokens:    \n"), { tokens: null, status: "" }, "label with only whitespace");
   assert.deepEqual(parseAmpUsage("Total tokens: -5"), { tokens: null, status: "" }, "a negative sign is not in [\\d,]");
-  // BUG: a "Total tokens:" line holding only commas still yields a number:
-  // m[1] is ",,,", the comma-strip leaves "", and Number("") === 0 — so input
-  // that reported NO digits is shown as a real "0 tokens" reading, which the
-  // honest-data rule forbids. The assertion below documents the desired
-  // behavior and currently fails; left commented out per job rules.
-  // assert.deepEqual(parseAmpUsage("Total tokens: ,,,"), { tokens: null, status: "" });
+  // A "Total tokens:" line holding only commas reports no digits, so it is
+  // no data — never a fabricated "0 tokens" (Number("") === 0).
+  assert.deepEqual(parseAmpUsage("Total tokens: ,,,"), { tokens: null, status: "" });
+  assert.deepEqual(parseAmpUsage("Total tokens: ,"), { tokens: null, status: "" });
   assert.deepEqual(parseAmpUsage("Total  tokens: 5"), { tokens: null, status: "" },
     "two spaces between the words do not match the literal 'Total tokens:'");
   assert.equal(parseAmpUsage("NotTotal tokens: 5").tokens, 5, "the match is not anchored to a word boundary");

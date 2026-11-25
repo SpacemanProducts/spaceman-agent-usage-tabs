@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 export function parseAmpUsage(text) {
   const t = String(text || "");
   const m = t.match(/Total tokens:\s*([\d,]+)/i);
-  const tokens = m ? Number(m[1].replace(/,/g, "")) : null;
+  const tokens = m && /\d/.test(m[1]) ? Number(m[1].replace(/,/g, "")) : null;
   const range = t.match(/Range:\s*(\S+)\s+to\s+(\S+)/i);
   const days = range ? Math.round((Date.parse(range[2]) - Date.parse(range[1])) / 86400000) : null;
   if (tokens === null || !Number.isFinite(tokens)) return { tokens: null, status: "" };
