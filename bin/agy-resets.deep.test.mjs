@@ -80,22 +80,21 @@ try {
   for (const bad of ["", null, undefined, "junk", 0, 1764000000000, {}, []]) {
     assert.equal(corroborate([R({ announced_at: bad })], S("Gemini Session"), NOW, "Free"), null, `announced_at=${JSON.stringify(bad)} skipped`);
   }
-  // BUG: an announcement whose `plans` or `models` is a non-array truthy
-  // (e.g. the string "all", which a sloppy API payload could send) throws
-  // TypeError on `.map` instead of being skipped or treated as a wildcard.
-  // assert.equal(corroborate([R({ models: "all" })], S("Gemini Session"), NOW, "Free"), null);
-  // assert.equal(corroborate([R({ plans: "all" })], S("Gemini Session"), NOW, "Free"), null);
+  // Regression: an announcement whose `plans` or `models` is a non-array
+  // truthy (e.g. the string "all", which a sloppy API payload could send)
+  // must be skipped, not throw TypeError on `.map`.
+  assert.equal(corroborate([R({ models: "all" })], S("Gemini Session"), NOW, "Free"), null);
+  assert.equal(corroborate([R({ plans: "all" })], S("Gemini Session"), NOW, "Free"), null);
 
-  // BUG: corroborate has no try/catch, so a non-array `details` (object,
-  // string, number) throws TypeError on `.filter` instead of returning null.
+  // Regression: a non-array `details` (object, string, number) returns null
+  // instead of throwing TypeError on `.filter`.
   // collect.mjs always passes the classifier's array, so this is latent.
-  // assert.equal(corroborate([R()], { title: "Gemini Session", surprise: true }, NOW), null);
-  // assert.equal(corroborate([R()], "Gemini Session", NOW), null);
+  assert.equal(corroborate([R()], { title: "Gemini Session", surprise: true }, NOW), null);
+  assert.equal(corroborate([R()], "Gemini Session", NOW), null);
 
-  // BUG: with `detectedAt` missing or NaN every comparison against it is
-  // false, so the time window silently disables itself and ANY dated
-  // announcement corroborates regardless of age.
-  // assert.equal(corroborate([R({ announced_at: "2020-01-01T00:00:00Z" })], S("Gemini Session"), undefined, "Free"), null);
+  // Regression: with `detectedAt` missing or NaN the time window must not
+  // silently disable itself — no readable time means no match.
+  assert.equal(corroborate([R({ announced_at: "2020-01-01T00:00:00Z" })], S("Gemini Session"), undefined, "Free"), null);
 
   // ---- fetchResets: response shape edges ----
   assert.deepEqual(await fetchResets({ now: NOW, fetchFn: okBody(null) }), []);
