@@ -2,8 +2,8 @@
 // The module is synchronous with no shared state, so the "races" here are
 // stale-state and repeat-call checks. Every file lives in a fresh mkdtemp dir
 // and HOME/XDG_* are pointed there; nothing touches the real home folder.
-// TZ is pinned to UTC so local-day math is deterministic; the DST-sensitive
-// window bugs are kept as commented-out BUG tests at the bottom.
+// TZ is pinned to UTC so local-day math is deterministic; the DST window
+// regression tests at the bottom switch TZ themselves and restore it.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -407,6 +407,45 @@ try {
     assert.deepEqual(a1, a2);
     assert.equal(a1.days[day(1)], 3);
     fs.rmSync(d, { recursive: true, force: true });
+  }
+
+  // ---- DST regression: windows step by calendar day, not 86400000 ms ----
+  // (These started life as commented-out BUG tests: fixed-ms steps produced
+  // a duplicate/missing date across a transition and dropped that day's
+  // tokens.)
+  {
+    const savedTz = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      // now = local noon 2026-03-20 (EDT); the 30-day window crosses the
+      // 2026-03-08 spring-forward, when that local day is only 23 hours.
+      const dstNow = new Date(2026, 2, 20, 12, 0, 0).getTime();
+      const dstRoot = fs.mkdtempSync(path.join(tmp, "dst-"));
+      const dstSessions = store(dstRoot, {
+        "s/messages.jsonl":
+          asst(new Date(2026, 2, 8, 12).toISOString(), "dst-model", { input: 42 }) + "\n" +
+          asst(new Date(2026, 2, 7, 12).toISOString(), "dst-model", { input: 1 }),
+      });
+      const rd = mcodeUsageFromSessions(dstSessions, dstNow);
+      const dates = rd.days.map((x) => x.date);
+      assert.equal(dates.length, 30);
+      assert.equal(new Set(dates).size, 30, "no calendar day is skipped or duplicated");
+      assert.equal(dates[dates.length - 1], "2026-03-20");
+      const byDate = Object.fromEntries(rd.days.map((x) => [x.date, x.tokens]));
+      assert.equal(byDate["2026-03-08"], 42, "spring-forward day keeps its tokens");
+      assert.equal(byDate["2026-03-07"], 1);
+      fs.rmSync(dstRoot, { recursive: true, force: true });
+
+      // now = local noon 2026-11-03 (EST); the 7-day model window is
+      // 2026-10-28..11-03 and crosses the 2026-11-01 fall-back (a 25-hour
+      // day). A message on the window's first day must still count.
+      const fbNow = new Date(2026, 10, 3, 12, 0, 0).getTime();
+      const acc = { days: {}, models: {} };
+      addMcodeMessages(asst(new Date(2026, 9, 28, 0, 30).toISOString(), "edge", { input: 6 }), acc, fbNow);
+      assert.deepEqual(acc.models, { edge: 6 }, "first day of the week still counts in models");
+    } finally {
+      process.env.TZ = savedTz;
+    }
   }
 
   console.log("mcode-usage deep: all tests passed");
