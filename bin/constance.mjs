@@ -55,7 +55,7 @@ import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, bra
 import { tokenMeter, matchJobs, snapshots, readRecords, usageFile, refreshInBackground, refreshNow } from "./constance-tokens.mjs";
 import { parseItems, parseItemArg, checklist } from "./constance-checklist.mjs";
 import { cards, nowLine, history, goalRecord } from "./constance-board.mjs";
-import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner } from "./constance-goalqueue.mjs";
+import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, queueStops } from "./constance-goalqueue.mjs";
 import { readScorecard, recordReview, scoreRows, sizeHint, rankAgents, scoreLine } from "./constance-scorecard.mjs";
 import { secondTry, sendBackAdvice, shouldAutoRetry, retrySpec } from "./constance-retry.mjs";
 import { refill } from "./constance-refill.mjs";
@@ -1110,6 +1110,8 @@ function recordHistory(fresh = true) {
   if (!s.goal || ["running", "paused"].includes(s.goal.status)) return null;
   if (readHistory().some((r) => r.id === s.goal.id)) return null;
   const rec = goalRecord(s.goal, asAccepted(s.jobs), matchJobs(s.jobs, records));
+  rec.failReason = s.goal.failReason || "";
+  rec.endNotes = s.goal.endNotes || [];
   // The same leverage object status shows, kept on the history line; and, once
   // per goal like the record itself, one lesson naming the handoff that paid
   // off best (jobs carry tokens and their review verdicts for it).
@@ -1131,31 +1133,37 @@ function tellOwner(title, body) {
 function afterGoal() {
   const s = store.read(), g = s.goal;
   if (!g || ["running", "paused"].includes(g.status)) return false;
-  const why = needsOwner(g, asAccepted(s.jobs), { practice: practiceMode() });
-  // A self-merged job still owes its background review: ending the goal with
-  // one pending would orphan the revert path, so it stops the queue like an
-  // unreviewed finished job does.
-  const unreviewedMerged = s.jobs.filter((j) => j.goal === g.id && j.status === "merged").map((j) => j.id);
-  if (unreviewedMerged.length) why.push(`job${unreviewedMerged.length > 1 ? "s" : ""} ${unreviewedMerged.join(", ")} merged and still waiting for review`);
-  if (why.length) {
-    const text = why.join("; ");
-    store.update((x) => { if (x.goal && x.goal.id === g.id) x.goal.needsOwner = text.charAt(0).toUpperCase() + text.slice(1) + "."; });
+  // Only `stop` reasons halt the queue; `notes` (a failed goal, unreviewed or
+  // merged jobs, open checklist items) are kept on the goal and logged, then
+  // the queue goes on. queueStops() sees the jobs as they are — merged jobs
+  // included — and counts them as accepted for the checklist itself.
+  const { stop, notes } = queueStops(g, s.jobs, { practice: practiceMode() });
+  if (stop.length || notes.length) {
+    const text = stop.join("; ");
+    store.update((x) => {
+      if (x.goal && x.goal.id === g.id) {
+        if (notes.length) x.goal.endNotes = notes;
+        if (stop.length) x.goal.needsOwner = text.charAt(0).toUpperCase() + text.slice(1) + ".";
+      }
+    });
   }
+  if (notes.length) store.log({ kind: "note", text: `Goal ended with: ${notes.join("; ")}. The queue goes on.` });
   recordHistory();
   try { ratioReportFor(g); } catch (e) { store.log({ kind: "note", text: `Ratio report not written: ${e.message}` }); }
   const q = readGoalQueue(store.dir);
-  if (why.length) {
+  if (stop.length) {
+    const text = stop.join("; ");
     if (q.goals.length) {
-      pauseQueue(store.dir, why.join("; "));
-      store.log({ kind: "needs-you", text: `Goal queue stopped: ${why.join("; ")}. ${q.goals.length} goal${q.goals.length === 1 ? "" : "s"} wait for you.` });
-      tellOwner("Constance needs you", `${why.join("; ")}. The goal queue is stopped until you start the next goal.`);
+      pauseQueue(store.dir, text);
+      store.log({ kind: "needs-you", text: `Goal queue stopped: ${text}. ${q.goals.length} goal${q.goals.length === 1 ? "" : "s"} wait for you.` });
+      tellOwner("Constance needs you", `${text}. The goal queue is stopped until you start the next goal.`);
     } else if (g.fromQueue || g.fromSpare) {
       // The queue ran dry on a goal that needs the owner: the morning report says so (one notice, not two).
-      store.log({ kind: "needs-you", text: `${why.join("; ")}.` });
+      store.log({ kind: "needs-you", text: `${text}.` });
       morningReport();
     } else {
-      store.log({ kind: "needs-you", text: `${why.join("; ")}.` });
-      tellOwner("Constance needs you", `${why.join("; ")}.`);
+      store.log({ kind: "needs-you", text: `${text}.` });
+      tellOwner("Constance needs you", `${text}.`);
     }
     return false;
   }
@@ -1555,9 +1563,12 @@ async function drive() {
       continue;
     }
     if (++failures >= 3) {
-      store.update((s) => { s.goal.status = "failed"; s.goal.finishedAt = Date.now(); });
-      store.log({ kind: "failed", text: `Claude exited with code ${code} three times. ${report.slice(-400)}` });
-      afterGoal();
+      const last = report.split("\n").map((l) => l.trim()).filter(Boolean).at(-1) || "";
+      const reason = `Claude exited with code ${code} three times: ${last ? last.slice(0, 200) : "no output"}`;
+      store.update((s) => { s.goal.status = "failed"; s.goal.finishedAt = Date.now(); s.goal.failReason = reason; });
+      store.log({ kind: "failed", text: reason });
+      // A failed goal is a note, not a stop: afterGoal() starts the next queued goal.
+      if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
     }
     store.log({ kind: "note", text: `Claude exited with code ${code}; retrying in a minute.` });
