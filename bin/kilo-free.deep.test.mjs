@@ -47,19 +47,21 @@ try {
   assert.equal(isFreeModel("p/m", { cost: { input: 0, output: 0 }, tag: "free", extra: { deep: true } }), true,
     "extra entry keys are ignored");
 
-  // BUG: a models-cache entry reporting real cost cannot veto a :free-looking
-  // id. isFreeModel returns true on the id pattern before the entry is ever
-  // consulted, so {cost:{input:1,output:1}} still counts as free.
-  // assert.equal(isFreeModel("x/free", { cost: { input: 1, output: 1 } }), false,
-  //   "a paid cache entry should veto a free-looking id");
+  // A models-cache entry reporting real cost vetoes a :free-looking id.
+  assert.equal(isFreeModel("x/free", { cost: { input: 1, output: 1 } }), false,
+    "a paid cache entry vetoes a free-looking id");
+  assert.equal(isFreeModel("x/free", { cost: { input: "0.5", output: 0 } }), false,
+    "a numeric-string cost vetoes a free-looking id too");
+  assert.equal(isFreeModel("x/free", { cost: { input: 0, output: 0 } }), true,
+    "a zero-cost entry does not veto the id");
 
-  // BUG: null/false/"" cost fields coerce to 0 via Number(), so a malformed
-  // entry like {cost:{input:null,output:null},tag:"free"} counts as provably
-  // free even though the source never reported a cost ("unknown is never free").
-  // assert.equal(isFreeModel("p/m", { cost: { input: null, output: null }, tag: "free" }), false,
-  //   "null cost fields are unknown, not zero");
-  // assert.equal(isFreeModel("p/m", { cost: { input: false, output: false }, tag: "free" }), false,
-  //   "boolean cost fields are unknown, not zero");
+  // null/false/"" cost fields are unknown, not zero ("unknown is never free").
+  assert.equal(isFreeModel("p/m", { cost: { input: null, output: null }, tag: "free" }), false,
+    "null cost fields are unknown, not zero");
+  assert.equal(isFreeModel("p/m", { cost: { input: false, output: false }, tag: "free" }), false,
+    "boolean cost fields are unknown, not zero");
+  assert.equal(isFreeModel("p/m", { cost: { input: "", output: "" }, tag: "free" }), false,
+    "empty-string cost fields are unknown, not zero");
 
   // ---- pickFreeModel: non-list and odd item shapes ----
   assert.equal(pickFreeModel("kilo-auto/free"), null, "a bare string is not a list");
@@ -88,11 +90,10 @@ try {
   assert.equal(pickFreeModel([{ id: "prov/m", cost: { input: 0, output: 0 }, tag: "free" }]), "prov/m",
     "item.cost makes the item its own cache entry");
 
-  // BUG: pickFreeModel accepts the self-entry shape above, but kiloArgs only
-  // reads model.entry — so the same object pickFreeModel calls free makes
-  // kiloArgs throw. The two entry conventions disagree.
-  // assert.deepEqual(kiloArgs("hi", { id: "prov/m", cost: { input: 0, output: 0 }, tag: "free" }).slice(4, 6),
-  //   ["-m", "prov/m"], "kiloArgs should accept the self-entry shape pickFreeModel accepts");
+  // pickFreeModel accepts the self-entry shape, and kiloArgs reads the same
+  // convention, so the same object is free on both sides.
+  assert.deepEqual(kiloArgs("hi", { id: "prov/m", cost: { input: 0, output: 0 }, tag: "free" }).slice(4, 6),
+    ["-m", "prov/m"], "kiloArgs accepts the self-entry shape pickFreeModel accepts");
 
   // ---- kiloArgs: model argument shapes ----
   assert.deepEqual(kiloArgs("hi", { providerID: "prov", modelID: "m:free" }).slice(4, 6),
@@ -123,7 +124,7 @@ try {
   assert.equal(costCheck(JSON.stringify({ modelID: 5 })), null, "numeric modelID is ignored");
   assert.equal(costCheck(JSON.stringify({ modelID: null, providerID: "p" })), null, "null modelID is ignored");
   assert.equal(costCheck(JSON.stringify({ providerID: "anthropic" })), null, "providerID alone is ignored");
-  assert.equal(costCheck(JSON.stringify({ cost: "0.5" })), null, "string cost is ignored");
+  assert.equal(costCheck(JSON.stringify({ cost: "soon" })), null, "a non-numeric string cost is not a reported cost");
   assert.equal(costCheck(JSON.stringify({ cost: -1 })), null, "negative cost is not a charge");
   assert.equal(costCheck(JSON.stringify({ cost: 1e-9 })).paid, true, "any positive cost flags, however tiny");
   assert.deepEqual(costCheck(JSON.stringify({ cost: 0.5 })), { paid: true, reason: "cost 0.5 reported" },
@@ -133,17 +134,26 @@ try {
   assert.equal(costCheck(JSON.stringify({ items: [{ deep: { cost: 0.5 } }] })).paid, true,
     "cost nested inside arrays is found");
 
-  // BUG: cost is only checked when it is a JSON number. A cost reported as a
-  // string ("0.5") or nested under a different key evades the guard entirely.
-  // assert.equal(costCheck(JSON.stringify({ cost: "0.5" })).paid, true,
-  //   "a string-typed cost should still flag");
+  // A cost reported as a numeric string is checked like the number it spells.
+  assert.equal(costCheck(JSON.stringify({ cost: "0.5" })).paid, true,
+    "a string-typed cost still flags");
+  assert.deepEqual(costCheck(JSON.stringify({ cost: "0.5" })), { paid: true, reason: "cost 0.5 reported" },
+    "the reason reports the coerced number");
+  assert.equal(costCheck(JSON.stringify({ cost: { input: 0, output: 0.5 } })).paid, true,
+    "a cost object with a positive field flags too");
+  assert.equal(costCheck(JSON.stringify({ cost: { input: 0, output: 0 } })), null,
+    "a cost object of zeros stays clean");
 
-  // BUG: records() stops at depth 8, so a paid signal nested deeper is never
-  // seen — a hostile or buggy emitter could hide cost/modelID past the limit.
-  // let deep = { modelID: "gpt-5" };
-  // for (let i = 0; i < 10; i++) deep = { wrap: deep };
-  // assert.equal(costCheck(JSON.stringify(deep)).paid, true,
-  //   "modelID nested past the depth cap should still flag");
+  // records() walks iteratively with no depth cap: a paid signal nested past
+  // any fixed limit is still seen.
+  let deep = { modelID: "gpt-5" };
+  for (let i = 0; i < 10; i++) deep = { wrap: deep };
+  assert.equal(costCheck(JSON.stringify(deep)).paid, true,
+    "modelID nested past the old depth cap still flags");
+  let deepCost = { cost: 0.5 };
+  for (let i = 0; i < 12; i++) deepCost = { wrap: deepCost };
+  assert.equal(costCheck(JSON.stringify(deepCost)).paid, true,
+    "cost nested past the old depth cap still flags");
 
   // ---- costCheck: stream/buffer edge cases ----
   assert.equal(costCheck('{"a":}\n{"cost":0.5}\n').paid, true,
