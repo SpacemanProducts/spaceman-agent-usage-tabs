@@ -434,20 +434,23 @@ const ag = (id, extra = {}) => ({ id, name: id, installed: true, signedIn: true,
   // Free model id with a positive cost still fails on the cost.
   const c = kiloPaidVerdict('{"type":"step_finish","part":{"providerID":"kilo","modelID":"kilo-auto/free","cost":0.01}}\n');
   assert.equal(c.fail, true); assert.match(c.note, /cost 0\.01 reported/);
-  // Negative and string costs are not `typeof number` positives: ignored.
+  // Negative costs are not charges; null/""/false costs are unknown — but a
+  // numeric string is checked like the number it spells (fail closed).
   assert.equal(kiloPaidVerdict('{"cost":-1}\n'), null);
-  assert.equal(kiloPaidVerdict('{"cost":"0.5"}\n'), null, "string costs are not checked (kilo-free.mjs contract)");
-  // A cost buried deeper than records()' depth cap is invisible.
+  for (const v of ["null", '""', "false"]) {
+    assert.equal(kiloPaidVerdict(`{"cost":${v}}\n`), null, `cost ${v} is unknown, not a charge`);
+  }
+  const sc = kiloPaidVerdict('{"cost":"0.5"}\n');
+  assert.equal(sc.fail, true, "a numeric-string cost counts as paid");
+  assert.match(sc.note, /cost 0\.5 reported/);
+  // records() has no depth cap: a cost buried deep is still seen.
   let deep = { cost: 0.5 };
   for (let i = 0; i < 12; i++) deep = { wrap: deep };
-  assert.equal(kiloPaidVerdict(JSON.stringify(deep) + "\n"), null, "records() stops at depth 8");
-  // BUG (in bin/kilo-free.mjs costCheck, surfaced via kiloPaidVerdict): the
-  // comment promises tolerance of "a single pretty-printed doc", but output is
-  // split on "\n" first and each line parsed alone, so a pretty-printed event
-  // never parses and its cost/model is silently missed:
-  //   assert.equal(kiloPaidVerdict('{\n  "cost": 0.5\n}\n').fail, true);
-  // Real `kilo run --format json` emits one event per line, so this only bites
-  // if the stream format ever changes — noted, not fixed here.
+  assert.equal(kiloPaidVerdict(JSON.stringify(deep) + "\n").fail, true, "deeply nested cost still flags");
+  // A single pretty-printed doc spanning several lines is parsed whole.
+  const pretty = kiloPaidVerdict('{\n  "cost": 0.5\n}\n');
+  assert.equal(pretty.fail, true, "multi-line JSON is parsed, not dropped line-by-line");
+  assert.match(pretty.note, /cost 0\.5 reported/);
 }
 
 // ---- reviewText: passthrough contract for non-freebuff agents.
