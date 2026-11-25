@@ -41,6 +41,26 @@ assert.equal(sessionSpent([{ used: -0.5 }, { used: 0.5 }]), 100);
 assert.equal(sessionSpent(undefined), 0);
 assert.equal(sessionSpent("junk"), 0);
 
+// Infinity readings are non-finite and ignored without moving the baseline.
+assert.equal(sessionSpent([{ used: 0.1 }, { used: Infinity }, { used: -Infinity }, { used: 0.4 }]), 30);
+
+// Non-number `used` types (bigint, Number object, boolean) are all ignored.
+assert.equal(sessionSpent([{ used: 0.1 }, { used: 5n }, { used: new Number(0.9) }, { used: true }, { used: 0.3 }]), 20);
+
+// More float dust: 0.58 - 0.29 is 0.28999...996 in binary, rounded to 29.
+assert.equal(sessionSpent([{ used: 0.29 }, { used: 0.58 }]), 29);
+// Repeating-decimal inputs round at 1e9, not to a friendly number.
+assert.equal(sessionSpent([{ used: 1 / 3 }, { used: 2 / 3 }]), 33.333333333);
+
+// A tiny downward drift still counts as a reset: any u < prev resets, and the
+// ~50-point result rounds back to exactly 50 at 1e9 precision.
+assert.equal(sessionSpent([{ used: 0.5 }, { used: 0.5 - Number.EPSILON }]), 50);
+
+// Non-iterable `samples` throws; an iterable non-array (string) is walked.
+assert.throws(() => sessionSpent(5), TypeError);
+assert.throws(() => sessionSpent({}), TypeError);
+assert.equal(sessionSpent("ab"), 0);
+
 // ---------------------------------------------------------------- leverage
 
 // Boundary: exactly MIN_SPENT_PCT (0.5) measures; a hair under does not.
@@ -69,6 +89,10 @@ for (const tokens of [NaN, Infinity, -Infinity, "5", null, true]) {
 // Negative tokens are finite, so they produce a negative perPct and sort as
 // the "cheapest" possible handoff — see the suspected-bugs note below.
 assert.equal(leverage({ tokens: -5, spentPct: 10 }).perPct, -0.5);
+
+// The returned spentPct is the normalized 0, not the junk input.
+assert.equal(leverage({ tokens: 1, spentPct: "12" }).spentPct, 0);
+assert.equal(leverage({ tokens: 1, spentPct: 12.5 }).spentPct, 12.5);
 
 // `name` only appears in the not-enough label, never in the no-tokens one.
 assert.equal(leverage({ tokens: "x", spentPct: 0.1, name: "Sonnet" }).label, "not enough Sonnet spent to measure yet");
@@ -152,6 +176,63 @@ assert.equal(capped[1999].at, 2000);
 // addSample(nonl, { at: 1, used: 0.5 });
 // assert.equal(readSamples(nonl).length, 1); // currently 0 — merged into "x{...}"
 
+// addSample with no fields writes a bare "{}" line, which readSamples keeps
+// (an object with no usable fields — see suspected bug 3 above).
+const noargs = path.join(dir, "noargs.jsonl");
+addSample(noargs);
+assert.equal(fs.readFileSync(noargs, "utf8"), "{}\n");
+assert.deepEqual(readSamples(noargs), [{}]);
+
+// readSamples preserves file order; it never sorts by `at`.
+const unsorted = path.join(dir, "unsorted.jsonl");
+addSample(unsorted, { at: 300, used: 0.3 });
+addSample(unsorted, { at: 100, used: 0.1 });
+assert.deepEqual(readSamples(unsorted).map((s) => s.at), [300, 100]);
+
+// sinceAt coerces `at` with Number(): null -> 0, true -> 1, "250" -> 250.
+// A null `at` survives sinceAt=0 but not sinceAt=1.
+const coerce = path.join(dir, "coerce.jsonl");
+fs.writeFileSync(coerce, "{\"at\":null,\"used\":0}\n{\"at\":true,\"used\":0}\n{\"at\":\"250\",\"used\":0}\n");
+assert.deepEqual(readSamples(coerce, 0).map((s) => s.at), [null, true, "250"]);
+assert.deepEqual(readSamples(coerce, 1).map((s) => s.at), [true, "250"]);
+assert.deepEqual(readSamples(coerce, 251).map((s) => s.at), []);
+
+// A file of pure binary garbage reads as [] without throwing; a valid line
+// after the garbage still parses.
+const bin = path.join(dir, "bin.jsonl");
+fs.writeFileSync(bin, Buffer.from([0xff, 0xfe, 0x00, 0x0a, 0x7b, 0x7d, 0x0a]));
+assert.deepEqual(readSamples(bin), [{}]);
+
+// An unreadable file (mode 000) reads as [] — the read error is swallowed
+// like a missing file. Skipped when running as root, which can read anyway.
+const locked = path.join(dir, "locked.jsonl");
+fs.writeFileSync(locked, "{\"at\":1,\"used\":0.5}\n");
+fs.chmodSync(locked, 0);
+if (process.getuid && process.getuid() !== 0) {
+  assert.deepEqual(readSamples(locked), []);
+}
+fs.chmodSync(locked, 0o600);
+
+// The MAX_LINES trim counts lines it didn't write: foreign lines appended
+// by another process between addSample calls are kept and the oldest evicted.
+// (Deterministic stand-in for two writers racing on the same file — the
+// read-modify-write trim is not atomic across processes.)
+const foreign = path.join(dir, "foreign.jsonl");
+for (let i = 0; i < 1999; i++) addSample(foreign, { at: i, used: 0 });
+for (let i = 0; i < 5; i++) fs.appendFileSync(foreign, JSON.stringify({ at: 9000 + i, used: 0 }) + "\n");
+addSample(foreign, { at: 9999, used: 0 });
+const fkept = readSamples(foreign);
+assert.equal(fkept.length, 2000);
+assert.equal(fkept[0].at, 5, "1999 own + 5 foreign + 1 new = 2005, oldest 5 evicted");
+assert.equal(fkept[1999].at, 9999);
+
+// addSample error paths: a file in the way of the parent dir, or the target
+// itself being a directory, throws instead of writing anything.
+const blocker = path.join(dir, "blocker");
+fs.writeFileSync(blocker, "x");
+assert.throws(() => addSample(path.join(blocker, "s.jsonl"), { at: 1, used: 0.1 }));
+assert.throws(() => addSample(dir, { at: 1, used: 0.1 }));
+
 // ---------------------------------------------------------------- handoffReturns
 
 // Missing list and null entries are skipped.
@@ -212,6 +293,36 @@ const tie = handoffReturns([
 ]);
 assert.deepEqual(tie.map((g) => g.key), ["alpha, read-only", "zeta, read-only"]);
 
+// Truthy non-object entries are not skipped: numbers, strings and booleans
+// all count as jobs in the "?, read-only" bucket (only falsy entries are
+// dropped). See suspected bug 4 below.
+const nonobj = handoffReturns([5, "x", true]);
+assert.equal(nonobj.length, 1);
+assert.equal(nonobj[0].key, "?, read-only");
+assert.equal(nonobj[0].jobs, 3);
+assert.equal(nonobj[0].accepted, 0);
+assert.equal(nonobj[0].perJob, null);
+
+// A string `jobs` is iterable, so it is walked char by char — same bogus
+// group. Non-iterable input (number, plain object) throws TypeError.
+assert.equal(handoffReturns("ab")[0].jobs, 2);
+assert.throws(() => handoffReturns(5), TypeError);
+assert.throws(() => handoffReturns({}), TypeError);
+
+// tokensOf shapes not covered above: { n: NaN/Infinity/"50" }, a numeric
+// string, a boolean and { n: -5 } (negative counts, see bug 2).
+const tk2 = handoffReturns([
+  { agent: "a", files: [], tokens: { n: NaN }, verdict: "accept" },
+  { agent: "b", files: [], tokens: { n: Infinity }, verdict: "accept" },
+  { agent: "c", files: [], tokens: { n: "50" }, verdict: "accept" },
+  { agent: "d", files: [], tokens: "100", verdict: "accept" },
+  { agent: "e", files: [], tokens: true, verdict: "accept" },
+  { agent: "f", files: [], tokens: { n: -5 }, verdict: "accept" },
+]);
+assert.deepEqual(tk2.map((g) => g.key), ["f, read-only", "a, read-only", "b, read-only", "c, read-only", "d, read-only", "e, read-only"]);
+assert.equal(tk2[0].perJob, -5);
+for (const g of tk2.slice(1)) assert.equal(g.perJob, null, g.key);
+
 // SUSPECTED BUGS found while writing these tests (not fixed, per job rules):
 //
 // 1. perJob divides summed tokens by ALL accepted jobs, not by the accepted
@@ -232,6 +343,18 @@ assert.deepEqual(tie.map((g) => g.key), ["alpha, read-only", "zeta, read-only"])
 //
 // 3. readSamples accepts JSON arrays and empty objects as samples
 //    (typeof [] === "object") — see the commented assert above.
+//
+// 4. handoffReturns counts truthy non-object entries (5, "x", true) as jobs
+//    in the "?, read-only" bucket — the `if (!j) continue` guard only drops
+//    falsy entries, so a malformed jobs list inflates `jobs`. Pinned by the
+//    asserts above; probably should require a plain object.
+//      handoffReturns([5, "x", true])[0].jobs === 3   // arguably should be 0/throw
+//
+// 5. addSample's MAX_LINES trim is a read-modify-write across two syscalls;
+//    two processes appending concurrently can both pass the length check and
+//    leave the file over the cap or drop a just-written line. Not testable
+//    deterministically in-process; the foreign-lines test above shows the
+//    trim does at least count lines it didn't write.
 
 // ---------------------------------------------------------------- bestReturnLesson
 
@@ -264,6 +387,35 @@ assert.equal(bestReturnLesson(twoAcc), "");
 // Junk input and accepted-but-tokenless mixes stay quiet.
 assert.equal(bestReturnLesson(null), "");
 assert.equal(bestReturnLesson([null, { verdict: "accept" }]), "");
+
+// Sub-1K perJob formats without a suffix; the lesson is an exact sentence.
+assert.equal(bestReturnLesson([
+  { agent: "a", files: [], tokens: 500, verdict: "accept" },
+  { agent: "a", files: [], tokens: 500, verdict: "accept" },
+  { agent: "a", files: [], tokens: 500, verdict: "accept" },
+]), "Best handoff return: a, read-only averages 500 tokens per accepted job.");
+
+// A perJob tie between groups resolves by key (localeCompare), same as
+// handoffReturns' sort — the lesson names the alphabetically first key.
+assert.equal(bestReturnLesson([
+  { agent: "z", files: [], tokens: 100, verdict: "accept" },
+  { agent: "a", files: [], tokens: 100, verdict: "accept" },
+  { agent: "z", files: ["x"], tokens: 100, verdict: "accept" },
+]), "Best handoff return: a, read-only averages 100 tokens per accepted job.");
+
+// Extra accepted jobs beyond the minimum don't change the winner, and
+// non-"accept" verdicts never do either.
+assert.equal(bestReturnLesson([
+  ...three,
+  { agent: "a", files: [], tokens: 1, verdict: "send-back" },
+  { agent: "a", files: [], tokens: 1 },
+]), l3);
+
+// Non-array input throws: a number has no .filter, a string has no .filter
+// either (only null/undefined fall back to []).
+assert.throws(() => bestReturnLesson(5), TypeError);
+assert.throws(() => bestReturnLesson("ab"), TypeError);
+assert.throws(() => bestReturnLesson({}), TypeError);
 
 fs.rmSync(dir, { recursive: true, force: true });
 fs.rmSync(home, { recursive: true, force: true });
