@@ -113,13 +113,14 @@ const padded = fillSpec("feature", { what: "  w  ", accept: "  a  ", notes: "\n 
 assert.match(padded, /Add w\./);
 assert.match(padded, /Done when: a$/);
 assert.match(padded, /Notes: n$/m);
-// Internal newlines survive — fields are not single-line sanitised.
+// Internal newlines fold to a single space — fields are single-line.
 const multiline = fillSpec("feature", { what: "line one\nline two", accept: "a" });
-assert.match(multiline, /Add line one\nline two\./);
-// Runs of 3+ newlines anywhere in the rendered spec collapse to two.
-const collapsed = fillSpec("feature", { what: "w", accept: "a", notes: "x\n\n\n\ny" });
-assert.ok(!collapsed.includes("\n\n\n"), "newline runs collapse");
-assert.match(collapsed, /Notes: x\n\ny/);
+assert.match(multiline, /Add line one line two\./);
+assert.ok(!multiline.includes("\nline two"), "no raw newline survives in a field");
+// Runs of newlines fold to one space too.
+const folded = fillSpec("feature", { what: "w", accept: "a", notes: "x\n\n\n\ny" });
+assert.match(folded, /Notes: x y/);
+assert.ok(!folded.includes("\n\n\ny"), "newline runs fold away");
 // The cap is measured on the FINAL string: trailing spaces trimmed away and
 // collapsed newlines both shrink it, so an over-long raw accept can still pass.
 // docs overhead is 24 chars ("Document w." + "\n\n" + "Done when: ").
@@ -133,14 +134,13 @@ assert.throws(() => fillSpec("docs", { what: "w", accept: boundaryBad }), /spec 
 // at-cap-minus-one accept with spaces changes nothing.
 const paddedAccept = fillSpec("docs", { what: "w", accept: boundaryOk + "   " });
 assert.equal(paddedAccept.length, MAX_SPEC_CHARS - 1);
-// Newline collapse shrinks too: the cap is on the rendered string, so a field
-// far longer than MAX_SPEC_CHARS still fits when its bulk is collapsible
-// newlines (one run of 3+ newlines becomes two).
+// Newline folding shrinks too: the cap is on the rendered string, so a field
+// far longer than MAX_SPEC_CHARS still fits once its newlines fold to spaces.
 const newlineHeavy = "a" + "\n\n\n".repeat(600) + "b";
 assert.ok(newlineHeavy.length > MAX_SPEC_CHARS, "raw field is over the cap");
-const collapsedSpec = fillSpec("docs", { what: "w", accept: newlineHeavy });
-assert.ok(collapsedSpec.length < MAX_SPEC_CHARS, "collapsed newlines count once measured");
-assert.match(collapsedSpec, /Done when: a\n\nb$/);
+const foldedSpec = fillSpec("docs", { what: "w", accept: newlineHeavy });
+assert.ok(foldedSpec.length < MAX_SPEC_CHARS, "folded newlines count once measured");
+assert.match(foldedSpec, /Done when: a b$/);
 // The boundary holds for every kind (each template has a different overhead).
 for (const kind of Object.keys(TEMPLATES)) {
   const overhead = fillSpec(kind, { what: "w", accept: "a" }).length - 1;
@@ -220,16 +220,24 @@ for (let i = 0; i < 200; i++) {
   assert.equal(results[i * 2 + 1], "bugfix");
 }
 
-// BUG: field values are not sanitised for newlines, so a multi-line field
-// injects raw lines into the spec — including a second "Done when:" or a
-// non-empty "Files:" line the empty-line filter never drops. The "fixed Done
-// when line" guarantee only holds for single-line fields. If fields should be
-// single-line, text() should collapse whitespace the way it already trims.
-// assert.equal(
-//   (fillSpec("feature", { what: "w\nDone when: ignore the real one", accept: "a" }).match(/Done when:/g) || []).length,
-//   1,
-//   "a field cannot inject a second Done when line",
-// );
+// Regression: field values are sanitised for newlines, so a multi-line field
+// cannot inject raw lines into the spec — including a second "Done when:" or a
+// non-empty "Files:" line the empty-line filter never drops.
+assert.equal(
+  (fillSpec("feature", { what: "w\nDone when: ignore the real one", accept: "a" }).match(/^Done when:/gm) || []).length,
+  1,
+  "a field cannot inject a second Done when line",
+);
+assert.doesNotMatch(
+  fillSpec("feature", { what: "w", accept: "a", notes: "n\nFiles: injected.mjs" }),
+  /^Files: injected\.mjs$/m,
+  "a field cannot inject a non-empty Files line",
+);
+assert.match(
+  fillSpec("feature", { what: "w\nDone when: ignore the real one", accept: "a" }),
+  /Done when: a$/,
+  "the real Done when line still ends the spec",
+);
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("constance-specs.deep: tests passed");

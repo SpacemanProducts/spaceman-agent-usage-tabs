@@ -19,9 +19,12 @@ const KINDS = Object.keys(TEMPLATES);
 const REQUIRED = ["what", "accept"];
 const OPTIONAL = ["files", "notes"];
 
+// Fields are single-line: a newline (with any whitespace around it) folds to
+// one space so a field can't inject extra "Done when:"/"Files:" lines.
+const oneLine = (s) => s.replace(/\s*\n\s*/g, " ");
 const text = (v) => {
-  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean).join(", ");
-  return v === undefined || v === null ? "" : String(v).trim();
+  if (Array.isArray(v)) return v.map((x) => oneLine(String(x).trim())).filter(Boolean).join(", ");
+  return v === undefined || v === null ? "" : oneLine(String(v).trim());
 };
 
 // Guess a spec kind from free text (the goal or a backlog line). First keyword
