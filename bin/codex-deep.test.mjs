@@ -14,13 +14,11 @@
 // that installs besides codex is Antigravity (agy ships in /usr/bin); its
 // live-models cache is pre-seeded so `agy models` never spawns.
 //
-// KNOWN BUGS FOUND (asserted as current behaviour, NOT fixed here):
-//   1. fromBuiltin() assumes r.limits is an array: a truthy non-array
-//      (`limits: {}`) crashes on `.filter`, and `limits: [null]` crashes on
-//      `l.percent`. One malformed Omarchy record kills the whole collector.
-//   2. Same for recentDays: a non-iterable (`{}`) or a null entry crashes the
-//      `for...of` / `d.date` access. (`recentDays: "abc"` survives because
-//      strings are iterable; the char entries land on days["undefined"].)
+// Regression coverage: fromBuiltin() used to assume r.limits and
+// r.recentDays were well-formed and crashed the whole collector on
+// wrong-typed Omarchy records (limits not a list, null entries, recentDays
+// not iterable). Section 3 asserts the fixed behaviour: collect exits 0,
+// Codex keeps its tab, and only numbers the record really carried are shown.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -196,21 +194,27 @@ assert.deepEqual(codexResets({ resetCredits: { available: 1, nextExpiresAt: "202
   ctx.cleanup();
 }
 
-// --------------------------- 3. KNOWN BUG: malformed shapes crash collect.mjs
-// fromBuiltin() never validates r.limits / r.recentDays before iterating them.
-// Each case below exits non-zero today; asserted so a future fix flips them.
-for (const [label, record] of [
-  ["limits is an object", { ready: true, limits: { session: { percent: 0.5 } } }],
-  ["limits contains null", { ready: true, limits: [null, { title: "Weekly", percent: 0.5 }] }],
-  ["recentDays is an object", { ready: true, recentDays: {} }],
-  ["recentDays contains null", { ready: true, recentDays: [{ date: TODAY, messageCount: 1 }, null] }],
+// ---------------- 3. malformed shapes are diagnosed, not fatal ----------
+// fromBuiltin() validates r.limits / r.recentDays before iterating them:
+// wrong-typed fields count as missing (with a collector.log diagnostic) and
+// bad entries are skipped, so one malformed record can't kill the run.
+for (const [label, record, check] of [
+  ["limits is an object", { ready: true, limits: { session: { percent: 0.5 } } },
+    (c, log) => { assert.deepEqual(c.limits, [], "no meters the record didn't carry"); assert.match(log, /limits that aren't a list/); }],
+  ["limits contains null", { ready: true, limits: [null, { title: "Weekly", percent: 0.5 }] },
+    (c) => assert.deepEqual(c.limits.map((l) => [l.title, l.percent]), [["Weekly", 0.5]], "null entry dropped, real limit kept")],
+  ["recentDays is an object", { ready: true, recentDays: {} },
+    (c, log) => { assert.deepEqual(c.days, [], "no day series fabricated"); assert.equal(c.hasTokens, false); assert.match(log, /recentDays that aren't a list/); }],
+  ["recentDays contains null", { ready: true, recentDays: [{ date: TODAY, messageCount: 1 }, null] },
+    (c) => { assert.equal(c.days.length, 7); assert.equal(c.today, 1, "the valid day survives, the null entry is skipped"); }],
 ]) {
   const ctx = setup();
   ctx.writeRecord(record);
   const r = ctx.run();
-  // BUG (not fixed per task): a malformed Omarchy record crashes the whole run.
-  assert.notEqual(r.status, 0, `${label}: collector should survive, currently crashes`);
-  assert.match(r.stderr, /TypeError/, `${label}: crash is a TypeError in fromBuiltin`);
+  assert.equal(r.status, 0, `${label}: malformed record must not crash the collector:\n${r.stderr}`);
+  assert.ok(r.codex, `${label}: codex agent emitted`);
+  assert.equal(r.codex.signedIn, true, `${label}: ready:true still reads as signed in`);
+  check(r.codex, ctx.collectorLog());
   ctx.cleanup();
 }
 
