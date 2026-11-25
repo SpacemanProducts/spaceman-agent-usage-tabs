@@ -103,6 +103,16 @@ export function newCommits(dir, baseHead) {
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
+// True when the recorded pre-run HEAD still resolves but is no longer an
+// ancestor of HEAD: the run rewrote history, so base..HEAD can no longer be
+// trusted to list the run's own commits — checkRun reports this as a
+// violation instead of silently checking nothing.
+const historyRewritten = (dir, baseHead) => {
+  if (!baseHead) return false;
+  const base = git(dir, "rev-parse", "--verify", "--quiet", baseHead + "^{commit}");
+  return base.status === 0 && git(dir, "merge-base", "--is-ancestor", base.stdout.trim(), "HEAD").status !== 0;
+};
+
 // Paths the run changed: its own commit's files plus anything dirty now that
 // wasn't dirty before the run (an agent that forgot to commit still shows up;
 // the owner's earlier uncommitted work never does).
@@ -138,6 +148,9 @@ export function checkRun({ dir, files = [], commit = "", before = null, env = pr
   // Every commit since the pre-run HEAD is the run's, reported or not: an agent
   // that commits but reports nothing still gets diff-checked.
   const ownCommits = before.head !== undefined ? newCommits(dir, before.head) : [];
+  // A rewritten base makes newCommits return [] — "can't verify", not "clean":
+  // the run's commits cannot be identified, so say so instead of passing.
+  if (historyRewritten(dir, before.head)) violations.push("history rewritten during the run; its commits cannot be verified");
   const paths = new Set();
   for (const c of ownCommits) commitFiles(dir, c).forEach((p) => paths.add(p));
   const already = new Set(before.dirty || []);
