@@ -7,18 +7,10 @@
 // Complements constance-route.test.mjs. Everything lives in mktemp dirs with
 // HOME and the XDG dirs pointed there; nothing touches a real home.
 //
-// Suspected bugs found (kept as commented-out tests, reported to the owner):
+// Suspected bugs found: the BOM, `.at`-shadowing, `in`-operator and
+// non-iterable splitByModel ones are fixed and now run as regression tests.
+// Still open, kept as commented-out tests pending the owner's call:
 //   1. logRoute(file, null) throws TypeError while routeModel(null opts) is fine.
-//   2. logRoute(file, "str") or an array writes a bare "{}" line: String/Array
-//      .prototype.at shadows the `at = Date.now()` default, so the timestamp is
-//      never written and the record loses its only guaranteed field.
-//   3. readRoutes drops the first record of a UTF-8-BOM file (JSON.parse
-//      rejects the BOM, the line is skipped as "broken").
-//   4. splitByModel uses `m in out`, so a row with model "constructor",
-//      "hasOwnProperty", "toString" etc. writes a string onto the counts object
-//      instead of ignoring the unknown model.
-//   5. splitByModel(5) (any non-iterable) throws "(rows || []) is not iterable"
-//      instead of reading as an empty tally like splitByModel(null) does.
 //   6. routeModel's `why` shows Math.round(milk): milk 66.5 routes Sonnet but
 //      says "milk 67 picks Sonnet", and 67 actually picks Opus — the displayed
 //      number contradicts the pick.
@@ -192,14 +184,11 @@ try {
   fs.writeFileSync(binary, Buffer.from([0xff, 0xfe, 0x00, 0x7b, 0x22, 0x7d, 0x0a, 0xff]));
   assert.deepEqual(readRoutes(binary), [], "binary garbage -> []");
 
-  // BUG: a UTF-8 BOM makes JSON.parse reject the first line, so readRoutes
-  // silently drops the first route record of a BOM'd file. Strip a leading
-  // \uFEFF before splitting, or parse per-line with BOM tolerance.
-  // {
-  //   const bom = path.join(dir, "bom.jsonl");
-  //   fs.writeFileSync(bom, "\uFEFF" + JSON.stringify({ model: "opus" }) + "\n" + JSON.stringify({ model: "haiku" }) + "\n");
-  //   assert.equal(readRoutes(bom).length, 2, "BOM'd file keeps both records");
-  // }
+  {
+    const bom = path.join(dir, "bom.jsonl");
+    fs.writeFileSync(bom, "\uFEFF" + JSON.stringify({ model: "opus" }) + "\n" + JSON.stringify({ model: "haiku" }) + "\n");
+    assert.equal(readRoutes(bom).length, 2, "BOM'd file keeps both records");
+  }
 
   // `at` and `job` are stored verbatim — no coercion, no validation.
   const odd = path.join(dir, "odd.jsonl");
@@ -241,19 +230,13 @@ try {
   //   assert.doesNotThrow(() => logRoute(f, null));
   // }
 
-  // BUG: logRoute(file, "str") or an array writes a bare "{}" — String.prototype
-  // .at and Array.prototype.at exist (ES2022), so the destructured `at` resolves
-  // to a function instead of undefined, the Date.now() default never fires, and
-  // JSON.stringify drops the function. The line loses its only guaranteed field.
-  // 42/true have no .at, so they DO get the timestamp — the behavior is a trap
-  // for anyone passing a string id or row array as the record.
-  // {
-  //   const f = path.join(dir, "stringrec.jsonl");
-  //   logRoute(f, "plan");
-  //   const rows = readRoutes(f);
-  //   assert.equal(rows.length, 1);
-  //   assert.ok(Number.isFinite(rows[0].at), "a string record should still get a timestamp");
-  // }
+  {
+    const f = path.join(dir, "stringrec.jsonl");
+    logRoute(f, "plan");
+    const rows = readRoutes(f);
+    assert.equal(rows.length, 1);
+    assert.ok(Number.isFinite(rows[0].at), "a string record should still get a timestamp");
+  }
 
   // Filesystem error paths: a blocked mkdir and a directory-as-file both throw
   // (the module doesn't catch — callers own the path). Assert the throw, don't
@@ -297,25 +280,17 @@ try {
   counts.haiku = 99;
   assert.deepEqual(splitByModel([{ model: "haiku" }]), { opus: 0, sonnet: 0, haiku: 1 });
 
-  // BUG: splitByModel uses `m in out`, which sees Object.prototype. A row with
-  // model "constructor"/"hasOwnProperty"/"toString" writes a STRING onto the
-  // counts object (function + 1) instead of being ignored as an unknown model —
-  // the returned tally is corrupted. Use Object.hasOwn(out, m) or a
-  // null-prototype map.
-  // {
-  //   const out = splitByModel([{ model: "constructor" }, { model: "opus" }]);
-  //   assert.equal(typeof out.constructor, "function", "inherited props must not be counted");
-  //   assert.deepEqual({ opus: out.opus, sonnet: out.sonnet, haiku: out.haiku },
-  //     { opus: 1, sonnet: 0, haiku: 0 });
-  // }
+  {
+    const out = splitByModel([{ model: "constructor" }, { model: "opus" }]);
+    assert.equal(typeof out.constructor, "function", "inherited props must not be counted");
+    assert.deepEqual({ opus: out.opus, sonnet: out.sonnet, haiku: out.haiku },
+      { opus: 1, sonnet: 0, haiku: 0 });
+  }
 
-  // BUG: splitByModel(5) — or any non-iterable — throws "(rows || []) is not
-  // iterable" while splitByModel(null) correctly reads as an empty tally. The
-  // tally is advisory; junk input should read as nothing, not crash.
-  // {
-  //   assert.doesNotThrow(() => splitByModel(5));
-  //   assert.deepEqual(splitByModel(5), { opus: 0, sonnet: 0, haiku: 0 });
-  // }
+  {
+    assert.doesNotThrow(() => splitByModel(5));
+    assert.deepEqual(splitByModel(5), { opus: 0, sonnet: 0, haiku: 0 });
+  }
 } finally {
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 }

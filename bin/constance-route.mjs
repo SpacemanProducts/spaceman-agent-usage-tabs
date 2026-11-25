@@ -60,10 +60,14 @@ export function claudeArgs(model) {
 // ---------------------------------------------------------------- routes file
 
 // Append one route record ({step, model, job, at}) as a JSON line. `at`
-// defaults to now; callers pass an explicit clock in tests.
-export function logRoute(file, { step, model, job, at = Date.now() } = {}) {
+// defaults to now; callers pass an explicit clock in tests. `at` only counts
+// as provided when it is an OWN property — String/Array records inherit a
+// prototype `.at` method that must not shadow the timestamp default.
+export function logRoute(file, record = {}) {
+  const { step, model, job, at } = record;
+  const stamp = at !== undefined && Object.hasOwn(Object(record), "at") ? at : Date.now();
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.appendFileSync(file, JSON.stringify({ step, model, job, at }) + "\n");
+  fs.appendFileSync(file, JSON.stringify({ step, model, job, at: stamp }) + "\n");
 }
 
 // All route records in the file, oldest first. A missing file or broken lines
@@ -71,6 +75,7 @@ export function logRoute(file, { step, model, job, at = Date.now() } = {}) {
 export function readRoutes(file) {
   let text;
   try { text = fs.readFileSync(file, "utf8"); } catch { return []; }
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);   // strip a UTF-8 BOM
   const rows = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -87,9 +92,10 @@ export function readRoutes(file) {
 // are ignored — they were never hers to begin with.
 export function splitByModel(rows) {
   const out = { opus: 0, sonnet: 0, haiku: 0 };
-  for (const r of rows || []) {
+  const list = rows != null && typeof rows[Symbol.iterator] === "function" ? rows : [];
+  for (const r of list) {
     const m = typeof r === "string" ? r : r && r.model;
-    if (m in out) out[m] += 1;
+    if (Object.hasOwn(out, m)) out[m] += 1;
   }
   return out;
 }
