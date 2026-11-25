@@ -343,12 +343,16 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   assert.throws(() => args({ agent: "grok", dir: outProj, tmp: jobtmp, env: envFor(home), extraRw: [path.join(outProj, ".git", "hooks")] }),
     /read-only/, "extraRw can't re-cover .git/hooks itself");
 
-  // extraRw: an existing FILE binds verbatim; a non-string throws a TypeError.
+  // extraRw: an existing FILE binds verbatim; blank and non-string entries are
+  // dropped before resolving — "" would resolve to the process cwd and bind it
+  // writable.
   const f = path.join(tmp, `file${seq}`); put(f);
   const aF = args({ agent: "grok", dir: proj, tmp: jobtmp, env: envFor(home), extraRw: [f] });
   assert.ok(hasMount(aF, "bind", f, f), "an extraRw file is bound verbatim");
-  assert.throws(() => args({ agent: "grok", dir: proj, tmp: jobtmp, env: envFor(home), extraRw: [42] }), TypeError,
-    "a non-string extraRw throws");
+  const cwd = process.cwd();
+  const aDrop = args({ agent: "grok", dir: proj, tmp: jobtmp, env: envFor(home), extraRw: ["", "   ", 42, null, undefined] });
+  assert.ok(!mounts(aDrop).some((x) => x.op === "bind" && x.src === cwd), "a blank extraRw never binds the cwd");
+  assert.ok(!mounts(aDrop).some((x) => x.op === "bind" && x.dst === cwd), "a blank extraRw never lands on the cwd");
 
   // A .git that is neither a directory nor a gitdir pointer is ignored.
   const homeG = mkHome();
@@ -420,25 +424,18 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
 }
 
 // ============================================================ 10. bwrapWorks cache and sandboxLaunch
-// bwrapWorks(bin) caches its FIRST result process-wide and ignores `bin`
-// afterwards — the only stateful/timing surface this module has (hasProxy is
-// the same shape but isn't exported). Everything below runs in this process,
-// so the first bwrapWorks() call here warms the cache with the real answer.
-//
-// BUG: the cache is not keyed by `bin`. A first call with a missing path makes
-// a working bwrap look broken (sandboxLaunch then refuses EVERY agent), and a
-// first good call makes a missing one look fine. The test that shows it,// commented out because it needs a cold cache (run in a subprocess):
-//
-//   // in a fresh `node --input-type=module -e` process:
-//   // m.bwrapWorks("/definitely/missing-bwrap");        // -> false, cached
-//   // assert.equal(m.bwrapWorks(), true);              // FAILS: still false
-//   // assert.equal(m.bwrapWorks("/definitely/missing-bwrap"), false);
-//   // on a host where bwrap works, bwrapWorks() must be true.
-//
-// and the mirror image:
-//
-//   // m.bwrapWorks();                                    // -> true, cached
-//   // assert.equal(m.bwrapWorks("/definitely/missing-bwrap"), false); // FAILS: still true
+// bwrapWorks(bin) caches per bin: probing one path must not decide another's
+// fate. The first call below warms the cache for the REAL bwrap; the missing
+// path is then probed (and cached) separately.
+{
+  const missingBin = path.join(tmp, `missing-bwrap-${seq}`);
+  assert.equal(bwrapWorks(missingBin), false, "a missing bwrap path is refused");
+  assert.equal(bwrapWorks(missingBin), false, "the refusal is cached for that bin");
+  if (bwrapWorks()) {
+    assert.equal(bwrapWorks(), true, "the real bwrap still works");
+    assert.equal(bwrapWorks(missingBin), false, "a bad bin doesn't poison the good one's cache");
+  }
+}
 if (!bwrapWorks()) {
   console.log("constance-sandbox.deep: bwrap can't run here — launch-shape tests skipped");
 } else {
@@ -460,10 +457,16 @@ if (!bwrapWorks()) {
     assert.ok(!(k in l.env), `launch env strips ${k}`);
   }
 
-  // A custom bwrap path is used verbatim (bwrapWorks is already cached true, so
-  // the missing path is never actually probed — see the BUG above).
-  const lb = sandboxLaunch(["true"], { agent: "grok", dir: projL, tmp: jobtmp, env: dirty }, "/nonexistent/bwrap-bin");
-  assert.ok(lb.cmd.includes("/nonexistent/bwrap-bin"), "a custom bwrap path lands in argv");
+  // A custom bwrap path is used verbatim: a stub that exits 0 passes the
+  // per-bin probe and its path lands in argv untouched. (A missing path is now
+  // really probed — bwrapWorks is keyed by bin — so it would be refused.)
+  const fakeBwrap = path.join(tmp, `fake-bwrap-${seq}`);
+  fs.writeFileSync(fakeBwrap, "#!/bin/sh\nexit 0\n");
+  fs.chmodSync(fakeBwrap, 0o755);
+  const lb = sandboxLaunch(["true"], { agent: "grok", dir: projL, tmp: jobtmp, env: dirty }, fakeBwrap);
+  assert.ok(lb.cmd.includes(fakeBwrap), "a custom bwrap path lands in argv");
+  assert.throws(() => sandboxLaunch(["true"], { agent: "grok", dir: projL, tmp: jobtmp, env: dirty }, "/nonexistent/bwrap-bin"),
+    /bubblewrap/, "a missing custom bwrap path is refused, not trusted from another bin's cache");
 
   // Keyring agent with the owner's opt-in: the filtered proxy wraps bwrap and
   // gets a private socket dir under XDG_RUNTIME_DIR.
@@ -528,28 +531,26 @@ if (!bwrapWorks()) {
 {
   const home = mkHome(), proj = mkProj(home);
 
-  // BUG: agent names that collide with Object.prototype members pass
-  // sandboxProblem: PROFILES["__proto__"] is Object.prototype (truthy), so the
-  // "no sandbox profile" check misses it. sandboxArgs then dies on a bare
-  // TypeError (PROFILES[agent].rw is undefined) instead of refusing cleanly.
-  // The tests that show it, commented out:
-  //   assert.match(sandboxProblem("__proto__"), /no sandbox profile/);   // returns ""
-  //   assert.match(sandboxProblem("constructor"), /no sandbox profile/); // returns ""
-  //   assert.throws(() => args({ agent: "__proto__", dir: proj, tmp: jobtmp, env: envFor(home) }), /no sandbox profile/);
-  //   // actually throws: TypeError Cannot read properties of undefined (reading 'map')
-  assert.equal(sandboxProblem("__proto__"), "", "current (buggy) behaviour: inherited members look like profiles");
-  assert.throws(() => args({ agent: "__proto__", dir: proj, tmp: jobtmp, env: envFor(home) }), TypeError,
-    "BUG: __proto__ agent crashes argv building instead of being refused");
+  // Agent names that collide with Object.prototype members must be refused as
+  // unknown: PROFILES["__proto__"] is Object.prototype (truthy), which used to
+  // pass the "no sandbox profile" check and then crash sandboxArgs on a bare
+  // TypeError. Profile lookups are own-property only now.
+  for (const bad of ["__proto__", "constructor", "hasOwnProperty", "toString"]) {
+    assert.match(sandboxProblem(bad), /no sandbox profile/, `${bad} has no profile`);
+    assert.throws(() => args({ agent: bad, dir: proj, tmp: jobtmp, env: envFor(home) }), /no sandbox profile/,
+      `${bad} is refused, not crashed on`);
+  }
 
-  // BUG: a `.git` file `gitdir:   ` (blank target) resolves to the project dir
-  // itself — gitPointer returns the project as its own gitdir/common, and
-  // sandboxArgs mkdirs <proj>/hooks and writes a `config` FILE into the project
-  // root, then ro-binds both. Verified: both are created on the host.
-  //   const p = mkProj(mkHome(), "blankgit");
-  //   fs.writeFileSync(path.join(p, ".git"), "gitdir:   \n");
-  //   args({ agent: "grok", dir: p, tmp: jobtmp, env: envFor(home) });
-  //   // BUG: fs.existsSync(path.join(p, "config")) === true  (a stray file!)
-  //   // BUG: fs.existsSync(path.join(p, "hooks")) === true
+  // A `.git` file `gitdir:   ` (blank target) used to resolve to the project
+  // dir itself — gitPointer returned the project as its own gitdir/common, and
+  // sandboxArgs mkdir'd <proj>/hooks and wrote a `config` FILE into the project
+  // root, then ro-bound both. A blank or unreadable gitdir is now no gitdir.
+  const pBlank = mkProj(mkHome(), "blankgit");
+  fs.writeFileSync(path.join(pBlank, ".git"), "gitdir:   \n");
+  const aBlank = args({ agent: "grok", dir: pBlank, tmp: jobtmp, env: envFor(home) });
+  assert.ok(!aBlank.join(" ").includes(".git"), "a blank gitdir yields no git mounts");
+  assert.ok(!fs.existsSync(path.join(pBlank, "config")) && !fs.existsSync(path.join(pBlank, "hooks")),
+    "a blank gitdir creates no stray config/hooks in the project");
   // A gitdir pointing at a NONEXISTENT dir throws a raw ENOENT from mkdirSync —
   // better than silently doing nothing, but not a friendly error either.
   const homeN = mkHome(), projN = mkProj(homeN, "nogitdir");

@@ -41,10 +41,14 @@ export const PROFILES = {
 // Read-only toolchain and git identity, brought back into the empty home.
 export const HOME_RO = [".local/bin", ".local/share/mise", ".config/mise", ".config/git", ".gitconfig", ".cargo/bin", ".bun/bin"];
 
+// Own-property lookup only: names like "__proto__" or "constructor" must not
+// resolve to inherited Object members and look like a profile.
+const profile = (agent) => (Object.hasOwn(PROFILES, agent) ? PROFILES[agent] : undefined);
+
 // Why an agent can't be sandboxed, or "" when it can. `keyringAgents` is the
 // owner's list of agents allowed keyring access (settings.json).
 export function sandboxProblem(agent, keyringAgents = []) {
-  const p = PROFILES[agent];
+  const p = profile(agent);
   if (!p) return "no sandbox profile";
   if (p.keyring && !keyringAgents.includes(agent)) return "its login is in the desktop keyring, which the sandbox keeps closed (allow it in settings: constanceKeyringAgents)";
   if (p.keyring && !hasProxy()) return "xdg-dbus-proxy is missing, so its keyring login can't be reached sandboxed";
@@ -57,14 +61,16 @@ function hasProxy() {
   return proxyChecked;
 }
 
-let bwrapChecked = null;
+// The cache is keyed by bin: probing one path must not decide another's fate.
+const bwrapChecked = new Map();
 // bwrap must exist and be able to create a namespace here (some kernels forbid
-// unprivileged user namespaces). Checked once per process.
+// unprivileged user namespaces). Checked once per bin per process.
 export function bwrapWorks(bin = "bwrap") {
-  if (bwrapChecked !== null) return bwrapChecked;
+  if (bwrapChecked.has(bin)) return bwrapChecked.get(bin);
   const r = spawnSync(bin, ["--ro-bind", "/", "/", "--unshare-pid", "--dev", "/dev", "--proc", "/proc", "true"], { stdio: "ignore", timeout: 10e3 });
-  bwrapChecked = r.status === 0;
-  return bwrapChecked;
+  const ok = r.status === 0;
+  bwrapChecked.set(bin, ok);
+  return ok;
 }
 
 const under = (child, parent) => child === parent || child.startsWith(parent.endsWith("/") ? parent : parent + "/");
@@ -80,8 +86,11 @@ function gitPointer(dir) {
     if (st.isDirectory()) return { type: "dir", dir: file };
     if (!st.isFile()) return null;
     const m = fs.readFileSync(file, "utf8").match(/^gitdir:\s*(.+)$/m);
-    if (!m) return null;
-    const gitDir = path.resolve(dir, m[1].trim());
+    // A blank gitdir ("gitdir:   ") would resolve to the project dir itself,
+    // making hooks/ and config/ of the PROJECT root look like git internals.
+    const target = m?.[1].trim();
+    if (!target) return null;
+    const gitDir = path.resolve(dir, target);
     let common = gitDir;
     try {
       const rel = fs.readFileSync(path.join(gitDir, "commondir"), "utf8").trim();
@@ -125,7 +134,10 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
   const roPaths = HOME_RO.map((r) => path.join(home, r)).filter(exists);
   if (gi?.type === "dir") roPaths.push(path.join(gi.dir, "hooks"), path.join(gi.dir, "config"));
   else if (gi?.type === "worktree") roPaths.push(gi.file, path.join(gi.common, "hooks"), path.join(gi.common, "config"), path.join(gi.common, "worktrees"));
-  for (const raw of extraRw) {
+  // Blank and non-string entries are dropped before resolving: "" would
+  // resolve to the process cwd and bind it writable.
+  const extra = extraRw.filter((p) => typeof p === "string" && p.trim() !== "");
+  for (const raw of extra) {
     const p = path.resolve(raw);
     if (p === "/" || under(home, p) || roPaths.some((r) => under(r, p))) {
       throw new Error(`extraRw ${p} would reopen the home folder or cover a read-only bind`);
@@ -135,7 +147,7 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
     const p = path.join(home, rel);
     if (exists(p)) a.push("--ro-bind", p, p);
   }
-  const rw = [...PROFILES[agent].rw.map((r) => path.join(home, r)), ...extraRw.map((p) => path.resolve(p))];
+  const rw = [...profile(agent).rw.map((r) => path.join(home, r)), ...extra.map((p) => path.resolve(p))];
   for (const p of rw) {
     // The agent's own folders are made if missing, so a first login can land.
     if (!exists(p) && under(p, home)) fs.mkdirSync(p, { recursive: true });
@@ -187,7 +199,7 @@ export function sandboxEnv(env = process.env, agent = "", withBus = false) {
   const e = { ...env, TMPDIR: "/tmp" };
   for (const k of ["DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO", "WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"]) delete e[k];
   if (withBus) e.DBUS_SESSION_BUS_ADDRESS = `unix:path=/run/user/${typeof process.getuid === "function" ? process.getuid() : 1000}/bus`;
-  return { ...e, ...(PROFILES[agent]?.env || {}) };
+  return { ...e, ...(profile(agent)?.env || {}) };
 }
 
 // Runs the keyring proxy for exactly as long as the sandboxed agent: the proxy
@@ -206,7 +218,7 @@ export function sandboxLaunch(argv, opts, bin = "bwrap") {
   const env = opts.env || process.env;
   const problem = sandboxProblem(opts.agent, opts.keyringAgents || []);
   if (problem) throw new Error(`${opts.agent} can't run sandboxed: ${problem}`);
-  const keyring = !!PROFILES[opts.agent]?.keyring;
+  const keyring = !!profile(opts.agent)?.keyring;
   // The proxy (started first by PROXY_SH) creates this socket before bwrap
   // runs, so bwrap binds the socket itself as the agent's only bus.
   // It lives in a private folder in the runtime dir: socket paths are capped at
