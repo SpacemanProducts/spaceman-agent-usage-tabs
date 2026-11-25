@@ -393,35 +393,43 @@ assert.deepEqual(readBacklog(freshState).map((x) => x.text), ["gamma"]);
 assert.throws(() => formatItem({ kind: "task", text: "x", files: "a.mjs" }), TypeError, "files must be an array");
 assert.throws(() => formatItem({ kind: "task", text: "x", files: { length: 1 } }), TypeError);
 
-// ---------- known bugs (kept as commented-out tests) ----------
+// ---------- regressions: bugs found 2026-11-25 ----------
 
-// BUG: addItem accepts item text containing '\n' or '\r' and writes it raw.
-// With '\n' the item splits across two physical lines — the tail becomes
-// prose, the stored item parses back truncated, and dedupe/edit-by-id break.
-// With '\r' ITEM_RE can never match the line, so the item is invisible to
-// readBacklog/openItems. Verified 2026-11-25: addItem(d,{text:"a\nb"}) writes
-// '- [ ] task: a\nb\n' and readBacklog sees text "a" only; text "a\rb" yields
-// no item at all. addItem should refuse or escape control characters.
-// assert.throws(() => addItem(dir, { text: "multi\nline" }));
-// const bugCr = addItem(dir, { text: "carriage\rreturn" });
-// assert.equal(readBacklog(dir).find((x) => x.id === bugCr.id)?.text, "carriage\rreturn");
+// addItem folds '\n'/'\r' in item text to spaces, so one item always stays
+// on one physical line. Before the fix a raw '\n' split the item across two
+// lines (the tail became prose, the stored item parsed back truncated, and
+// dedupe/edit-by-id broke) and a raw '\r' made ITEM_RE never match, leaving
+// the item invisible to readBacklog/openItems.
+const folded = addItem(dir, { text: "multi\nline" });
+assert.equal(folded.text, "multi line", "newline folds to a space in the returned item");
+assert.equal(readBacklog(dir).find((x) => x.id === folded.id)?.text, "multi line");
+const bugCr = addItem(dir, { text: "carriage\rreturn" });
+assert.equal(readBacklog(dir).find((x) => x.id === bugCr.id)?.text, "carriage return");
+const bugCrLf = addItem(dir, { text: "crlf\r\nhere" });
+assert.equal(readBacklog(dir).find((x) => x.id === bugCrLf.id)?.text, "crlf here", "a CRLF run folds to one space");
+// The file itself gains exactly one line per add — no embedded line breaks.
+const foldedRaw = fs.readFileSync(backlogFile(dir), "utf8");
+assert.ok(foldedRaw.includes("- [ ] task: multi line\n"), "stored item is a single line");
+assert.ok(!foldedRaw.includes("multi\nline"), "no raw newline inside the item");
 
-// BUG: files entries containing ',' do not round-trip. esc() leaves commas
-// alone but parseBacklog splits '(files: ...)' on ',', so addItem(dir,
-// {files:["a,b.mjs"]}) stores '(files: a,b.mjs)' which parses back as two
-// files ["a","b.mjs"]. Verified 2026-11-25. Either refuse commas in file
-// names or escape the separator.
-// const bugComma = addItem(dir, { text: "comma", files: ["a,b.mjs"] });
-// assert.deepEqual(readBacklog(dir).find((x) => x.id === bugComma.id).files, ["a,b.mjs"]);
+// Files entries containing ',' round-trip: escFile writes '\,' and
+// splitFiles only splits on unescaped commas. Before the fix
+// '(files: a,b.mjs)' parsed back as two files ["a","b.mjs"].
+const bugComma = addItem(dir, { text: "comma", files: ["a,b.mjs"] });
+assert.deepEqual(readBacklog(dir).find((x) => x.id === bugComma.id).files, ["a,b.mjs"]);
+// Mixed comma and non-comma files keep their order.
+const bugCommaMix = addItem(dir, { text: "comma mix", files: ["one,two.mjs", "plain.mjs", "a\\,b.mjs"] });
+assert.deepEqual(readBacklog(dir).find((x) => x.id === bugCommaMix.id).files, ["one,two.mjs", "plain.mjs", "a\\,b.mjs"]);
 
-// BUG: markTaken accepts jobId 1e21 — Number.isInteger(1e21) is true for the
-// integral double — but String(1e21) is "1e+21", so the written '(job 1e+21)'
-// tag fails parseBacklog's /\(job (\d+)\)/ and is silently lost: the item
-// stays open with the tag glued into its text. Verified 2026-11-25. The
-// guard should also require the stringified id to match /^\d+$/.
-// const bugBig = addItem(dir, { text: "big job" });
-// assert.equal(markTaken(dir, bugBig.id, 1e21), false);
-// assert.equal(readBacklog(dir).find((x) => x.text === "big job").job, null);
+// markTaken refuses a jobId whose tag could never parse. 1e21 is an integral
+// double (Number.isInteger passes) but String(1e21) is "1e+21", which fails
+// parseBacklog's /\(job (\d+)\)/ — the written tag was silently lost and the
+// item stayed open with the tag glued into its text. Safe integers only.
+const bugBig = addItem(dir, { text: "big job" });
+assert.equal(markTaken(dir, bugBig.id, 1e21), false);
+assert.equal(markTaken(dir, bugBig.id, "1e21"), false, "the string form is refused too");
+assert.equal(readBacklog(dir).find((x) => x.text === "big job").job, null);
+assert.equal(readBacklog(dir).find((x) => x.text === "big job").text, "big job", "no '(job 1e+21)' glued into the text");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("constance-backlog.deep: tests passed");
