@@ -165,25 +165,24 @@ try {
     assert.ok(JSON.parse(fs.readFileSync(cacheFile(d), "utf8")).amp, `and is then rewritten as a real cache (${good})`);
   }
 
-  // BUG: a syntactically valid plan-info.json holding a TRUTHY JSON primitive
-  // (nonzero number, nonempty string, true) makes planInfo throw a TypeError:
-  // `cache[agentId] = ...` assigns a property on a primitive in strict-mode
-  // module code, and the `|| {}` fallback only replaces falsy parses.
-  // for (const prim of ["5", '"x"', "true"]) {
-  //   const d = stateDir(); seed(d, prim);
-  //   assert.equal(planInfo("amp", { stateDir: d, env: {}, now: NOW, run: () => AMP_OK }).signedIn, true,
-  //     `cache ${prim} should be treated as empty, not crash`);
-  // }
-  // BUG: plan-info.json containing `[]` parses to an array; `cache["amp"]=...`
-  // succeeds, but JSON.stringify drops non-index properties, so the fresh
-  // answer is never persisted and every later call re-runs the tool.
-  // {
-  //   const d = stateDir(); seed(d, "[]");
-  //   let n = 0; const run = () => { n++; return AMP_OK; };
-  //   planInfo("amp", { stateDir: d, env: {}, now: NOW, run });
-  //   planInfo("amp", { stateDir: d, env: {}, now: NOW + 1, run });
-  //   assert.equal(n, 1, "an array cache should still persist the amp entry");
-  // }
+  // A syntactically valid plan-info.json holding a TRUTHY JSON primitive
+  // (nonzero number, nonempty string, true) must be treated as an empty
+  // cache, not crash `cache[agentId] = ...` on a primitive.
+  for (const prim of ["5", '"x"', "true"]) {
+    const d = stateDir(); seed(d, prim);
+    assert.equal(planInfo("amp", { stateDir: d, env: {}, now: NOW, run: () => AMP_OK }).signedIn, true,
+      `cache ${prim} should be treated as empty, not crash`);
+  }
+  // An array cache must also be treated as empty: `cache["amp"]=...` would
+  // succeed on an array but JSON.stringify drops non-index properties, so
+  // the fresh answer would never persist.
+  {
+    const d = stateDir(); seed(d, "[]");
+    let n = 0; const run = () => { n++; return AMP_OK; };
+    planInfo("amp", { stateDir: d, env: {}, now: NOW, run });
+    planInfo("amp", { stateDir: d, env: {}, now: NOW + 1, run });
+    assert.equal(n, 1, "an array cache should still persist the amp entry");
+  }
 
   // ---- planInfo: cache entry shapes and TTL edges ----
   {
@@ -345,13 +344,12 @@ try {
       stateDir: d, env: {}, now: NOW, run: () => { throw new Error("spawn died"); },
     }), /spawn died/);
   }
-  // BUG: a `run` that returns null (or any non-string) makes planInfo throw at
-  // `raw.trim()` instead of reporting "no data".
-  // for (const bad of [null, undefined, 42]) {
-  //   const d = stateDir();
-  //   assert.equal(planInfo("amp", { stateDir: d, env: {}, now: NOW, run: () => bad }), null,
-  //     `run() -> ${String(bad)} should be no data, not a TypeError`);
-  // }
+  // A `run` that returns null (or any non-string) is no data, not a TypeError.
+  for (const bad of [null, undefined, 42]) {
+    const d = stateDir();
+    assert.equal(planInfo("amp", { stateDir: d, env: {}, now: NOW, run: () => bad }), null,
+      `run() -> ${String(bad)} should be no data, not a TypeError`);
+  }
 
   // ---- planInfo: sequential calls share no state ----
   {

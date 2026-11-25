@@ -26,9 +26,10 @@ export function planInfo(agentId, { env, stateDir, now = Date.now(), run = defau
   if (!spec) return null;
   const file = path.join(stateDir, "plan-info.json");
   let cache = {}; try { cache = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch {}
+  if (!cache || typeof cache !== "object" || Array.isArray(cache)) cache = {};
   const hit = cache[agentId];
   if (hit && now - hit.at < TTL_MS) return hit.info ?? null;
-  const raw = run(spec.cmd, env);
+  const raw = String(run(spec.cmd, env) ?? "");
   const info = spec.parse(raw);
   if (!info && raw.trim() && !/not (logged|signed) in|not authenticated|log ?in|sign ?in|only available for/i.test(raw) && onUnexpected)
     onUnexpected("usage output didn't match the expected format", { command: spec.cmd.join(" "), head: raw.slice(0, 200) });
