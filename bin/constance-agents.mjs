@@ -32,7 +32,7 @@ export const LAUNCH = {
   cursor: { cli: "cursor-agent", args: (p) => ["-p", "--yolo", "--trust", p], skip: "--yolo --trust" },
   // kilo run is already inside its worktree (spawn cwd), so no --dir; the model
   // is pinned to the free router and costCheck fails the job if it ever bills.
-  kilo: { cli: "kilo", args: (p) => kiloArgs(p, "kilo-auto/free"), skip: "--auto" },
+  kilo: { cli: "kilo", args: (p) => kiloArgs(p, "kilo/kilo-auto/free"), skip: "--auto" },
 };
 
 export function launchCommand(id, prompt) {
