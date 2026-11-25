@@ -17,7 +17,8 @@
 //     dead-holder lock and an ownerless-old lock at once, holder/contender
 //     ordering, and a SIGKILLed holder.
 //
-// Suspected bugs are commented out at the bottom and reported, not fixed.
+// The takeover TOCTOU, the sync-only footgun and the non-number pid leak that
+// an earlier pass found are fixed in the module and asserted below.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -238,17 +239,15 @@ withLock(${JSON.stringify(lock)}, () => {
 }, { waitMs: 30000, pollMs: 10 });`;
   const kids = Array.from({ length: N }, () => runChild(code));
   assert.deepEqual(await Promise.all(kids), Array(N).fill(0));
-  // NOTE: the counter can come out below N — see the takeover TOCTOU bug in
-  // the commented-out section below. Assert only that every child ran and
-  // the file is a sane count; the strict check is commented out there.
-  const got = Number(fs.readFileSync(counter, "utf8"));
-  assert.ok(got >= 1 && got <= N, `counter ${got} within [1, ${N}] (lost updates = reported bug)`);
+  // The rename-based takeover is atomic: every child ran one at a time and
+  // the counter lost nothing.
+  assert.equal(fs.readFileSync(counter, "utf8"), String(N), "no holder's update was lost");
   assert.equal(fs.existsSync(lock), false);
 }
 {
   // Same race, but the stale lock has NO owner file (an old version's lock,
-  // or a holder that died between mkdir and writing `owner`). Same caveat:
-  // a lost update is the reported takeover bug, not a test failure.
+  // or a holder that died between mkdir and writing `owner`). Same strict
+  // check: the atomic takeover must lose nothing.
   const lock = L("race-noowner");
   fs.mkdirSync(lock);
   fs.utimesSync(lock, hourAgo, hourAgo);
@@ -263,8 +262,7 @@ withLock(${JSON.stringify(lock)}, () => {
 }, { waitMs: 30000, pollMs: 10 });`;
   const kids = Array.from({ length: N }, () => runChild(code));
   assert.deepEqual(await Promise.all(kids), Array(N).fill(0));
-  const got = Number(fs.readFileSync(counter, "utf8"));
-  assert.ok(got >= 1 && got <= N, `counter ${got} within [1, ${N}]`);
+  assert.equal(fs.readFileSync(counter, "utf8"), String(N), "no holder's update was lost");
   assert.equal(fs.existsSync(lock), false);
 }
 {
@@ -321,48 +319,35 @@ withLock(${JSON.stringify(lock)}, () => {
   assert.equal(fs.existsSync(lock), false);
 }
 
-// ============================================================ suspected bugs (reported, not fixed)
-//
-// BUG (latent): withLock is synchronous. If fn returns a promise, the
-// finally block removes the lock as soon as fn() *returns the promise*, not
-// when it settles — an async fn would run unprotected while a second caller
-// walks in. Verified live: withLock(lock, () => gate.then(...)) leaves the
-// lock dir gone before the promise resolves. All current callers
-// (constance.mjs withMergeLock) pass sync fns, so this is a footgun, not a
-// live bug; if async fns are ever wanted, withLock must await thenables.
-//
-//   const lock = path.join(root, "async-fn");
-//   let release;
-//   const gate = new Promise((r) => (release = r));
-//   const p = withLock(lock, () => gate.then(() => "done"));
-//   assert.equal(fs.existsSync(lock), false);        // lock already gone
-//   withLock(lock, () => "second entered while first pending");
-//   release();
-//   await p;
-//
-// BUG: the release check `ownerOf(lock) === pid` is strict, but ownerOf()
-// returns a Number. A non-number pid — the string "1234" or 1234n — is
-// written to the owner file yet never matches on cleanup, so the lock is
-// left behind (and, since its recorded numeric pid may be dead, immediately
-// stealable). Verified live: withLock(lock, fn, { pid: "1234" }) leaves the
-// lock dir with owner "1234". Pass only numbers.
-//
-//   const lock = path.join(root, "string-pid");
-//   withLock(lock, () => {}, { pid: "1234" });
-//   assert.equal(fs.existsSync(lock), false);        // currently FAILS: dir remains
-//
-// BUG (race, observed live): the stale-lock takeover is check-then-remove,
-// not atomic. withLock re-reads staleReason and then rmSyncs the lock, but
-// between those two steps another waiter can rm+mkdir+write its own owner —
-// and the first waiter's rmSync then deletes that FRESH lock. Both processes
-// end up inside fn() at once. Observed: 3 children racing to take over an
-// ownerless-old lock produced counter "2" (one read-modify-write lost).
-// The window is microseconds wide but real under contention. A fix needs an
-// atomic takeover (e.g. rename the stale dir aside first, or re-verify the
-// owner/inode immediately before rm and retry on change).
-//
-//   // strict version of the race-noowner test above — fails intermittently:
-//   //   assert.equal(fs.readFileSync(counter, "utf8"), String(N));
+// ============================================================ former bugs, now fixed
+{
+  // withLock refuses a promise-returning fn: the lock is released and the
+  // call throws instead of letting fn's continuation run unprotected. There
+  // is no async variant — every guarded critical section is spawnSync-based.
+  const lock = L("async-fn");
+  let release;
+  const gate = new Promise((r) => (release = r));
+  assert.throws(() => withLock(lock, () => gate.then(() => "done")), /promise|synchronous/);
+  assert.equal(fs.existsSync(lock), false, "the lock is released even though fn's promise never settled");
+  assert.equal(withLock(lock, () => "second entered while first pending"), "second entered while first pending");
+  release();
+}
+{
+  // pid is coerced to the number it names, so the release check still
+  // recognizes the owner for a numeric string or a bigint; a pid that isn't
+  // a positive integer is rejected before the lock is touched.
+  for (const [i, p] of ["1234", 1234n].entries()) {
+    const lock = L(`pid-coerce-${i}`);
+    withLock(lock, () => {}, { pid: p, waitMs: 0 });
+    assert.equal(fs.existsSync(lock), false, `pid ${String(p)} still releases its lock`);
+  }
+  const bad = L("pid-bad");
+  assert.throws(() => withLock(bad, () => 1, { pid: "abc" }), /pid/);
+  assert.equal(fs.existsSync(bad), false, "a bad pid never creates the lock");
+}
+// The takeover TOCTOU itself is covered by the strict race tests above: the
+// stale lock is renamed aside atomically and re-verified before deletion, so
+// two contenders can never both hold `lock`.
 
 // ============================================================ cleanup sweep
 for (const l of locks) fs.rmSync(l, { recursive: true, force: true });
