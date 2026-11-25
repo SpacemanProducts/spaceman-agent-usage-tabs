@@ -6,7 +6,7 @@ is yours; everything else about how she works stays the same.
 
 ## Picking one
 
-The **Brain** chips sit above the Milk slider on her screen: **Claude** or
+The **Brain** chips sit above the Milk slider on her screen: **Claude Code** or
 **Antigravity**. The choice is saved as `constanceBrain` in settings.json
 (`node bin/settings-set.mjs constanceBrain claude` or `... antigravity`; the
 panel's chips do the same thing). A switch takes effect at her next start —
@@ -61,7 +61,7 @@ For Antigravity the bars are the quota pool the chosen model burns — Claude
 and GPT models share one pool, Gemini models share the other — renamed to
 plain **Session**/**Weekly** so the pacing windows line up with Claude's.
 The header Session tile and the leverage meter use the same bars. The Milk
-slider's label becomes **Milk Antigravity** with the same 0/25/100 levels.
+slider's label becomes **Milk Antigravity** and works the same way (0-100 in steps of 5).
 
 One thing is Claude-only: model fallback. If the plan rejects Opus, she
 drops to Sonnet, then Haiku and restarts the goal on a fresh session. agy
