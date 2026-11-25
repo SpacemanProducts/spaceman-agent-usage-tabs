@@ -13,6 +13,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { kiloArgs, costCheck } from "./kilo-free.mjs";
+import { stripAds } from "./freebuff-ads.mjs";
 
 export const RED = 0.85;                               // the panel's red line: a meter above it is near the wall
 export const FRESH_MS = 15 * 60 * 1000;
@@ -28,6 +30,9 @@ export const LAUNCH = {
   devin: { cli: "devin", args: (p) => ["--permission-mode", "dangerous", "--respect-workspace-trust", "false", "--model", "swe-2-flash-medium", "-p", p], skip: "--permission-mode dangerous --respect-workspace-trust false" },
   codex: { cli: "codex", args: (p) => ["exec", "--dangerously-bypass-approvals-and-sandbox", p], skip: "--dangerously-bypass-approvals-and-sandbox" },
   cursor: { cli: "cursor-agent", args: (p) => ["-p", "--yolo", "--trust", p], skip: "--yolo --trust" },
+  // kilo run is already inside its worktree (spawn cwd), so no --dir; the model
+  // is pinned to the free router and costCheck fails the job if it ever bills.
+  kilo: { cli: "kilo", args: (p) => kiloArgs(p, "kilo-auto/free"), skip: "--auto" },
 };
 
 export function launchCommand(id, prompt) {
@@ -82,6 +87,8 @@ export function judge(a, { now = Date.now(), generatedAt = now, sandbox = null }
   const no = (reason) => ({ ...base, reason });
   if (a.id === "claude") return no("Constance herself (the paid plan)");
   if (a.installed === false) return no("not installed");
+  // freebuff's CLI has no headless/prompt mode at all (docs/agents-freebuff-kilo.md).
+  if (a.id === "freebuff") return no("interactive only: no headless mode (see docs/agents-freebuff-kilo.md)");
   if (!LAUNCH[a.id]) return no("no headless launch known");
   // Every worker runs with its prompts off, so only inside the sandbox: one
   // that can't be sandboxed is never available (bin/constance-sandbox.mjs).
@@ -134,4 +141,38 @@ export function accountEnv(agentId, accountId, env = process.env) {
   const abs = path.resolve(String(loginHome).replace(/^~/, home));
   if (abs === path.resolve(home, spec[1])) return {};
   return { [spec[0]]: abs };
+}
+
+// Worker pick order: Devin first while it is available, kilo right behind it
+// whatever the scorecard says (free models only — see KILO_NOTE), everyone
+// else in the order given. Rows are judge() results or bare id strings; a row
+// with available:false never jumps the queue. Stable: equal ranks keep order.
+export function preferOrder(rows) {
+  const list = Array.isArray(rows) ? rows.slice() : [];
+  const idOf = (r) => (typeof r === "string" ? r : r && r.id) || "";
+  const open = (r) => typeof r !== "object" || r === null || r.available !== false;
+  const rank = (r) => {
+    const id = idOf(r);
+    if (open(r) && id === "devin") return 0;
+    if (open(r) && id === "kilo") return 1;
+    return 2;
+  };
+  return list.map((r, i) => ({ r, i })).sort((a, b) => rank(a.r) - rank(b.r) || a.i - b.i).map((x) => x.r);
+}
+
+export const KILO_NOTE = "free models only; use when Devin's copy slots are full or Devin is out";
+
+// kilo bills per token on paid models: fail the job when its --format json
+// stream shows a non-free model or any cost > 0 (bin/kilo-free.mjs costCheck).
+// Only for agent "kilo" — every other agent returns null here by contract.
+export function kiloPaidVerdict(outputText) {
+  const bad = costCheck(outputText);
+  return bad ? { fail: true, note: `kilo used a paid model or reported cost > 0: ${bad.reason}` } : null;
+}
+
+// The text Constance reviews: freebuff output can carry sponsor banners, so it
+// goes through stripAds first (bin/freebuff-ads.mjs); every other agent's text
+// is returned unchanged.
+export function reviewText(agent, text) {
+  return agent === "freebuff" ? stripAds(text) : text;
 }
