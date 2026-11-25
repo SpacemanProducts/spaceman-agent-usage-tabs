@@ -58,7 +58,7 @@ export function liveModels(agentId, { env, stateDir, now = Date.now(), run = def
   const spec = COMMANDS[agentId];
   if (!spec) return null;
   const file = path.join(stateDir, "live-models.json");
-  let cache = {}; try { cache = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch {}
+  let cache = {}; try { const c = JSON.parse(fs.readFileSync(file, "utf8")); if (c && typeof c === "object") cache = c; } catch {}
   const hit = cache[agentId];
   if (hit && now - hit.at < TTL_MS && Array.isArray(hit.models)) return hit.models;
   const raw = run(spec.cmd, env);

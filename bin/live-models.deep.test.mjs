@@ -132,15 +132,14 @@ const writeCache = (dir, obj) => fs.writeFileSync(path.join(dir, "live-models.js
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "live-models.json"), "utf8")).antigravity.models.length, 2);
 }
 
-// BUG: a cache file containing a JSON string or number (e.g. `"x"`, `5`) is
-// truthy, so `cache` becomes that primitive; the success path then throws
-// `TypeError: Cannot create property 'antigravity' on string 'x'` at
-// liveModels.mjs:71. Arrays and null are fine.
-// for (const raw of ['"x"', "5"]) {
-//   const dir = freshDir("top-prim"); writeCache(dir, raw);
-//   const ms = liveModels("antigravity", { stateDir: dir, env: {}, now: 1, run: okRun() });
-//   assert.equal(ms.length, 2);
-// }
+// A cache file containing a JSON string or number (e.g. `"x"`, `5`) is
+// treated as empty: the primitive is not an object, so the run result is
+// cached normally instead of throwing on the assignment.
+for (const raw of ['"x"', "5"]) {
+  const dir = freshDir("top-prim"); writeCache(dir, raw);
+  const ms = liveModels("antigravity", { stateDir: dir, env: {}, now: 1, run: okRun() });
+  assert.equal(ms.length, 2);
+}
 
 // Wrong-typed top-level cache values that survive `|| {}` are treated as empty.
 for (const [name, raw] of [["arr", "[]"], ["null", "null"]]) {
