@@ -9,8 +9,7 @@
 // lookup of its own. Per job rules every path still lives under a mkdtemp dir
 // with HOME/XDG_* pointed there, restored and removed at the end.
 //
-// Suspected bugs are kept as commented-out tests under '// BUG:' lines; the
-// current (throwing) behaviour is asserted where it is a deliberate quirk.
+// Former '// BUG:' findings are now regression tests: flush() must never throw.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -153,20 +152,13 @@ assert.deepEqual(all, ["limits is not a list", "models is not a list", "days is 
   let t = 5_000; let d = createDiagnostics({ logFile, stateFile, now: () => t });
   d.add("grok", "first"); assert.equal(d.flush(), 1);
   assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, "utf8")), { "grok|first": 5000 }, "corrupt state replaced by clean object");
-  // Valid JSON scalar `5`: state[key] reads fine but `state[key] = t` throws
-  // TypeError in strict mode (ESM) — see BUG note below; current behaviour is a throw.
-  // BUG: a state file containing a JSON scalar (5, true, "x") crashes flush():
-  // `JSON.parse(...) || {}` keeps the scalar, then `state[key] = t` throws
-  // "Cannot create property ... on number/boolean/string". collect.mjs calls
-  // diag.flush() unguarded, so one corrupt diag-state.json kills the run's tail.
-  // fs.writeFileSync(stateFile, "5");
-  // d = createDiagnostics({ logFile, stateFile, now: () => t });
-  // d.add("grok", "second");
-  // assert.equal(d.flush(), 1); // currently throws TypeError instead
+  // Valid JSON scalar `5`: treated as empty state (regression: used to throw
+  // TypeError on `state[key] = t`, and collect.mjs calls diag.flush() unguarded).
   fs.writeFileSync(stateFile, "5");
   d = createDiagnostics({ logFile, stateFile, now: () => t });
   d.add("grok", "second");
-  assert.throws(() => d.flush(), TypeError, "scalar state file crashes flush (BUG above)");
+  assert.equal(d.flush(), 1, "scalar state file does not crash flush");
+  assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, "utf8")), { "grok|second": t }, "scalar state replaced by clean object");
   // A JSON array survives: arrays accept arbitrary properties.
   fs.writeFileSync(stateFile, "[1,2]");
   d = createDiagnostics({ logFile, stateFile, now: () => t + 61 * 60e3 });
@@ -187,29 +179,35 @@ assert.deepEqual(all, ["limits is not a list", "models is not a list", "days is 
   assert.equal(d.flush(), 1, "directory stateFile tolerated");
   d.add("grok", "m2"); assert.equal(d.flush(), 2, "no persisted state: nothing rate-limited");
 }
-// logFile that is a directory: read fails (caught) but writeFileSync throws.
+// logFile that is a directory: read fails (caught) and the write fails too —
+// flush() skips the log write quietly instead of throwing EISDIR (regression:
+// collect.mjs calls diag.flush() unguarded).
 {
   const dir = path.join(tmp, "dirlog"); fs.mkdirSync(path.join(dir, "collector.log"), { recursive: true });
   const d = createDiagnostics({ logFile: path.join(dir, "collector.log"), stateFile: path.join(dir, "s.json"), now: () => 1 });
   d.add("grok", "m");
-  // BUG: if logFile is a directory (or otherwise unwritable) writeFileSync throws
-  // EISDIR and flush() propagates it — the readFileSync above is guarded, the
-  // write is not. Same unguarded diag.flush() call site in collect.mjs.
-  assert.throws(() => d.flush(), /EISDIR|illegal operation|is a directory/i, "directory logFile crashes flush (BUG above)");
+  assert.equal(d.flush(), 1, "directory logFile does not crash flush");
+  assert.ok(fs.existsSync(path.join(dir, "s.json")), "state still written when the log write fails");
 }
-// details that JSON.stringify cannot serialize (BigInt) also escape flush().
+// details that JSON.stringify cannot serialize (BigInt) are stringified safely.
 {
   const dir = path.join(tmp, "bigint"); fs.mkdirSync(dir, { recursive: true });
-  const d = createDiagnostics({ logFile: path.join(dir, "collector.log"), stateFile: path.join(dir, "s.json"), now: () => 1 });
+  const logFile = path.join(dir, "collector.log");
+  const d = createDiagnostics({ logFile, stateFile: path.join(dir, "s.json"), now: () => 1 });
   d.add("grok", "m", 1n);
-  assert.throws(() => d.flush(), TypeError, "BigInt details crash JSON.stringify inside flush");
+  assert.equal(d.flush(), 1, "BigInt details do not crash flush");
+  const row = JSON.parse(fs.readFileSync(logFile, "utf8").trim());
+  assert.equal(row.details, "1", "BigInt details serialized as a string");
 }
-// A clock that returns NaN makes new Date(t).toISOString() throw RangeError.
+// A clock that returns NaN falls back to Date.now() instead of throwing.
 {
   const dir = path.join(tmp, "badclock"); fs.mkdirSync(dir, { recursive: true });
-  const d = createDiagnostics({ logFile: path.join(dir, "collector.log"), stateFile: path.join(dir, "s.json"), now: () => NaN });
+  const logFile = path.join(dir, "collector.log");
+  const d = createDiagnostics({ logFile, stateFile: path.join(dir, "s.json"), now: () => NaN });
   d.add("grok", "m");
-  assert.throws(() => d.flush(), RangeError, "invalid now() crashes flush");
+  assert.equal(d.flush(), 1, "NaN now() does not crash flush");
+  const row = JSON.parse(fs.readFileSync(logFile, "utf8").trim());
+  assert.ok(!Number.isNaN(Date.parse(row.at)), "log line still gets a valid timestamp");
 }
 
 // ------------------------------------------------------- rate limiting edges
