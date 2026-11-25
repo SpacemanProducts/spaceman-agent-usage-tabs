@@ -440,5 +440,254 @@ assert.equal(usageFile(fakeHome), path.join(tmp, ".local/state", "omarchy", "age
   assert.equal(refreshNow({ PATH: empty, HOME: tmp }), false);
 }
 
+// ================================================================ round 2: more edges
+
+// ---------------------------------------------------------------- matchJobs, cont.
+
+assert.deepEqual(matchJobs([], [rec("grok", repo, "s", now, 1)], now), {}, "no jobs -> empty map");
+
+// A job with no folder at all (no dir, no worktree, not a copy) can't be matched;
+// the "worktree is gone" wording is a little off but the can't-tell is honest.
+{
+  const j = { id: 1, agent: "grok", status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min };
+  const m = matchJobs([j], [rec("grok", repo, "s", now - 25 * min, 10)], now);
+  assert.equal(m[1].tokens, null);
+  assert.match(m[1].why, /worktree is gone/);
+}
+
+// endOf() trusts the stored finish time even when it lies in the future: a finished
+// job's window can reach past `now`, so a "future" session still matches it.
+{
+  const j = job({ status: "finished", startedAt: now - 30 * min, finishedAt: now + 30 * min });
+  assert.equal(matchJobs([j], [rec("grok", repo, "s", now + 10 * min, 10)], now)[1].tokens, 10,
+    "finishedAt in the future extends the window past now");
+}
+
+// The mirror image: a job launched in the future has an empty window.
+{
+  const j = job({ status: "running", startedAt: now + 10 * min });
+  const m = matchJobs([j], [rec("grok", repo, "s", now + 20 * min, 10)], now);
+  assert.equal(m[1].tokens, null);
+  assert.match(m[1].why, /no session/);
+}
+
+// status "running" always ends the window at now, ignoring any stale finishedAt.
+{
+  const j = job({ status: "running", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  assert.equal(matchJobs([j], [rec("grok", repo, "s", now - 5 * min, 10)], now)[1].tokens, 10,
+    "a running job's window reaches now even with a stale finishedAt");
+}
+
+// Number() coercion cuts both ways: a numeric-string start matches, and the unit
+// check is case-sensitive ("Tokens" is not "tokens" -> treated as credits).
+{
+  const w = job({ id: 2, worktree: wt(2), status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  const str = matchJobs([w], [{ agent: "grok", folder: wt(2), session: "s", start: String(now - 25 * min), amount: 10, unit: "tokens" }], now);
+  assert.equal(str[2].tokens, 10, "a numeric-string start coerces and matches");
+  const j = job({ id: 1, status: "finished", startedAt: now - 30 * min, finishedAt: now - 10 * min });
+  const cap = matchJobs([j], [rec("grok", repo, "s", now - 25 * min, 10, "Tokens")], now);
+  assert.equal(cap[1].tokens, null);
+  assert.match(cap[1].why, /credits/, "unit is case-sensitive");
+}
+
+// Only a rival of the SAME agent in the SAME folder blocks a match: an overlapping
+// job of another agent, or of the same agent in another folder, is no rival.
+{
+  const a = job({ id: 1, status: "finished", startedAt: now - 60 * min, finishedAt: now - 30 * min });
+  const devin = job({ id: 2, agent: "devin", status: "running", startedAt: now - 40 * min });
+  const elsewhere = job({ id: 3, agent: "grok", dir: "/other/folder", status: "running", startedAt: now - 40 * min });
+  const m = matchJobs([a, devin, elsewhere], [rec("grok", repo, "s", now - 35 * min, 100)], now);
+  assert.equal(m[1].tokens, 100, "different agent / different folder rivals don't conflict");
+}
+
+// BUG: a NaN amount slips past the usable-total check — `NaN == null` is false and
+// `NaN < 0` is false — then coerces to 0 in the sum, so the job reports a real
+// token count built on a missing value. The same input is "can't tell" when the
+// field is absent; NaN should be rejected the same way.
+// const nanJob = job({ id: 7, worktree: wt(7), status: "running", startedAt: now - min });
+// const nan = matchJobs([nanJob], [{ agent: "grok", folder: wt(7), session: "s", start: now - 30e3, amount: NaN, unit: "tokens" }], now);
+// assert.equal(nan[7].tokens, null);
+
+// BUG: a +Infinity amount also passes the check (not null, not < 0) and sums to
+// tokens: Infinity. jobTokens then returns Infinity and fmtTokens(Infinity)
+// renders "InfinityT", which the panel would print as "InfinityT tokens". Non-finite
+// amounts should be "can't tell" like missing ones.
+// const infJob = job({ id: 8, worktree: wt(8), status: "running", startedAt: now - min });
+// const inf = matchJobs([infJob], [{ agent: "grok", folder: wt(8), session: "s", start: now - 30e3, amount: Infinity, unit: "tokens" }], now);
+// assert.equal(inf[8].tokens, null);
+
+// ---------------------------------------------------------------- jobTokens / snapshots, cont.
+
+// A kept count must be an object with a finite n; primitives and non-finite n are ignored.
+for (const bad of [42, "5000", { n: Infinity }, { n: -Infinity }, null]) {
+  assert.equal(jobTokens({ id: 1, status: "finished", tokens: bad }, {}), null, `tokens=${JSON.stringify(bad)}`);
+}
+
+// snapshots only compares n: the same total with a different session list is NOT
+// rewritten, so the stored sessions can go stale. (Documented behavior, kept as is.)
+{
+  const j = { id: 1, agent: "grok", dir: repo, worktree: wt(1), status: "running", startedAt: now - min,
+    tokens: { n: 100, sessions: ["old"], at: now - min } };
+  const keep = snapshots([j], { 1: { tokens: 100, sessions: ["new", "list"] } }, now);
+  assert.deepEqual(keep, {}, "unchanged n skips the rewrite even when sessions differ");
+}
+
+// A live count of 0 is still a change worth keeping once.
+{
+  const j = { id: 1, agent: "grok", dir: repo, worktree: wt(1), status: "running", startedAt: now - min };
+  assert.deepEqual(snapshots([j], { 1: { tokens: 0, sessions: ["s"] } }, now),
+    { 1: { n: 0, sessions: ["s"], at: now } });
+}
+
+// snapshots trusts the live map it is handed: matchJobs never emits entries for
+// never-launched jobs, but a hand-built map's entry is kept regardless.
+{
+  const held = { id: 9, agent: "grok", dir: repo, status: "held", startedAt: now - min };
+  assert.deepEqual(snapshots([held], { 9: { tokens: 5, sessions: ["x"] } }, now),
+    { 9: { n: 5, sessions: ["x"], at: now } }, "snapshots does not re-check launched()");
+}
+
+// ---------------------------------------------------------------- fmtTokens, cont.
+
+// Negatives never reach the unit table: they always print as plain rounded integers.
+assert.equal(fmtTokens(-1500), "-1500");
+assert.equal(fmtTokens(-999500), "-999500");
+// Numeric strings format like numbers.
+assert.equal(fmtTokens("2500"), "2.5K");
+assert.equal(fmtTokens("999"), "999");
+
+// BUG: fmtTokens(NaN) throws — no unit is >= NaN, so units[-1] is undefined and the
+// destructure `let [size, suffix] = units[i]` raises TypeError. The function already
+// maps null/undefined to CANT_TELL; non-finite numbers should get the same honest
+// treatment instead of crashing `constance status`.
+// assert.equal(fmtTokens(NaN), CANT_TELL);
+
+// BUG: fmtTokens(Infinity) returns "InfinityT" — it picks the largest unit and the
+// division stays Infinity. Reachable via the Infinity-amount path above; should be
+// CANT_TELL like other non-finite input.
+// assert.equal(fmtTokens(Infinity), CANT_TELL); // currently "InfinityT"
+
+// ---------------------------------------------------------------- tokenMeter, cont.
+
+// Goal matching is strict: job.goal "1" (string) does not match goal.id 1 (number).
+{
+  const jobs = [{ id: 1, goal: "1", agent: "grok", dir: repo, worktree: wt(1), status: "finished",
+    startedAt: now - 30 * min, finishedAt: now - 20 * min, tokens: { n: 10 } }];
+  const m = tokenMeter({ jobs, goal: { id: 1 }, records: [], now });
+  assert.equal(m.goal.total, 0, "string goal id vs number goal.id: no match");
+  assert.equal(m.today.total, 10, "...but it still counts for today");
+}
+
+// A running job without startedAt never launched: no worker row and it doesn't
+// inflate the goal's can't-tell count.
+{
+  const j = { id: 1, goal: "g", agent: "grok", dir: repo, status: "running" };
+  const m = tokenMeter({ jobs: [j], goal: { id: "g" },
+    records: [rec("grok", repo, "s", now - min, 10)], now });
+  assert.deepEqual(m.workers, []);
+  assert.equal(m.goal.total, 0);
+  assert.equal(m.goal.cantTell, 0, "never-launched jobs don't inflate can't-tell");
+}
+
+// The job's own `worker` label beats name(): shown verbatim in workers[].name/text.
+{
+  const j = { id: 1, agent: "devin", worker: "Devin 7", dir: repo, worktree: wt(1), status: "running", startedAt: now - min };
+  const m = tokenMeter({ jobs: [j], records: [rec("devin", wt(1), "s", now - 30e3, 500)], now, name: () => "WRONG" });
+  assert.equal(m.workers[0].name, "Devin 7");
+  assert.equal(m.workers[0].text, "Devin 7  500 tokens");
+}
+
+// "Today" trusts startedAt: a job stamped in the future is still >= startOfDay(now).
+{
+  const j = { id: 1, agent: "grok", dir: repo, worktree: wt(1), status: "finished",
+    startedAt: now + 60 * min, finishedAt: now + 70 * min, tokens: { n: 10 } };
+  const m = tokenMeter({ jobs: [j], records: [], now });
+  assert.equal(m.today.total, 10, "a future startedAt counts as today");
+}
+
+// The meter returns the live match map it computed, for callers that want the `why`s.
+{
+  const j = { id: 1, agent: "grok", dir: repo, worktree: wt(1), status: "running", startedAt: now - min };
+  const m = tokenMeter({ jobs: [j], records: [], now });
+  assert.equal(m.live[1].tokens, null);
+  assert.match(m.live[1].why, /no session/);
+}
+
+// BUG: tokenMeter({ goal: {} }) — a goal object with no `id` — counts EVERY job
+// whose own goal field is unset, because `j.goal === goal.id` is `undefined ===
+// undefined`. Those jobs were never part of any goal, yet they land under
+// "This goal". A goal without an id should match nothing.
+// const stray = tokenMeter({ jobs: [{ id: 1, agent: "grok", dir: repo, worktree: wt(1),
+//   status: "finished", startedAt: now - min, finishedAt: now, tokens: { n: 5 } }],
+//   goal: {}, records: [], now });
+// assert.equal(stray.goal, null); // currently { total: 5, ... }
+
+// ---------------------------------------------------------------- records on disk, cont.
+
+// A UTF-8 BOM makes JSON.parse fail -> empty records, same as any corrupt file.
+{
+  const dir = path.join(tmp, "bom"); fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, "folder-usage.json");
+  fs.writeFileSync(f, "\uFEFF" + JSON.stringify({ records: [1], refreshedAt: 5 }));
+  assert.deepEqual(readRecords(f), { records: [], refreshedAt: 0 }, "BOM'd JSON is unparseable -> empty");
+}
+
+// refreshedAt coerces like the rest: numeric strings work, junk falls back to 0 (stale).
+{
+  const dir = path.join(tmp, "refreshed"); fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, "folder-usage.json");
+  fs.writeFileSync(f, '{"records": [], "refreshedAt": "12345"}');
+  assert.equal(readRecords(f).refreshedAt, 12345);
+  fs.writeFileSync(f, '{"records": [], "refreshedAt": "abc"}');
+  assert.equal(readRecords(f).refreshedAt, 0, "garbage string -> 0 -> always stale");
+}
+
+// ---------------------------------------------------------------- refreshInBackground, cont.
+
+// gap = 0 disables both shortcuts: every call refreshes, and the marker can't
+// throttle either (Math.abs(now - at) < 0 is never true).
+{
+  const dir = path.join(tmp, "zero-gap"); const env = { FOLDER_USAGE_STATE_DIR: dir };
+  const file = usageFile(env);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ refreshedAt: now }));
+  let runs = 0; const run = () => runs++;
+  assert.equal(refreshInBackground({ env, now, gap: 0, run }), true);
+  assert.equal(refreshInBackground({ env, now, gap: 0, run }), true, "gap 0: the marker can't throttle");
+  assert.equal(runs, 2);
+}
+
+// Two calls in the same tick: the second sees the marker the first one wrote.
+{
+  const dir = path.join(tmp, "same-tick"); const env = { FOLDER_USAGE_STATE_DIR: dir };
+  fs.mkdirSync(dir, { recursive: true }); // no usage file: stale
+  let runs = 0; const run = () => runs++;
+  assert.equal(refreshInBackground({ env, now, gap: 60e3, run }), true);
+  assert.equal(refreshInBackground({ env, now, gap: 60e3, run }), false);
+  assert.equal(runs, 1);
+}
+
+// A marker path that is a directory can't be written -> refresh reports false, no throw.
+{
+  const dir = path.join(tmp, "marker-dir"); const env = { FOLDER_USAGE_STATE_DIR: dir };
+  const file = usageFile(env);
+  fs.mkdirSync(file + ".constance-refresh", { recursive: true });
+  assert.equal(refreshInBackground({ env, now, gap: 1000, run: () => {} }), false);
+}
+
+// A marker stamped more than `gap` in the future is ignored (the clock jumped back
+// far): the refresh goes through and rewrites the marker with the current time.
+{
+  const dir = path.join(tmp, "future-marker"); const env = { FOLDER_USAGE_STATE_DIR: dir };
+  const file = usageFile(env); const marker = file + ".constance-refresh";
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ refreshedAt: 0 }));
+  fs.writeFileSync(marker, String(now + 10 * 60e3));
+  let ran = false;
+  assert.equal(refreshInBackground({ env, now, gap: 1000, run: () => { ran = true; } }), true);
+  assert.equal(ran, true);
+  assert.equal(fs.readFileSync(marker, "utf8"), String(now), "marker rewritten to now");
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("constance-tokens.deep: ok");
