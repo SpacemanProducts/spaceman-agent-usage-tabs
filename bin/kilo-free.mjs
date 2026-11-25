@@ -58,7 +58,10 @@ export function pickFreeModel(list) {
     const entry = item && typeof item === "object" ? (item.entry ?? (item.cost ? item : undefined)) : undefined;
     return { id, entry };
   }).filter(Boolean);
-  const auto = items.find((i) => i.id.toLowerCase() === "kilo-auto/free");
+  // Real `kilo models` ids carry the provider prefix: prefer kilo/kilo-auto/free,
+  // but a bare kilo-auto/free in a list still counts as the same auto router.
+  const auto = items.find((i) => i.id.toLowerCase() === "kilo/kilo-auto/free")
+    || items.find((i) => i.id.toLowerCase() === "kilo-auto/free");
   if (auto) return auto.id;
   const free = items.find((i) => isFreeModel(i.id, i.entry));
   return free ? free.id : null;
