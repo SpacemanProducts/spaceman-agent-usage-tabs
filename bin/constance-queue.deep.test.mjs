@@ -10,9 +10,13 @@
 //   - concurrent writes: several processes adding at once must never lose an
 //     update (addTask/removeTask serialize on a lock file) or leave a torn
 //     queue.json or a stray .tmp file.
+//   - top-level JSON scalars, stored entries with missing/odd fields, wrong
+//     argument types for every public function, strict id matching, the lock
+//     file's stale/fresh/held behaviour, and a queue.json that is a directory.
 //
-// Everything runs against mkdtemp dirs; no HOME, network or agent CLI is
-// touched.
+// Everything runs against mkdtemp dirs; HOME and the XDG dirs are pointed at a
+// scratch folder too, so even a default stateDir() call cannot touch the real
+// home. All scratch dirs are removed at the end.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -20,7 +24,13 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { addTask, pendingTasks, peekNext, readyTasks, finishTask, removeTask, queueView, queueFile } from "./constance-queue.mjs";
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "constance-queue-deep-"));
+const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "constance-queue-deep-home-"));
+process.env.HOME = fakeHome;
+process.env.XDG_STATE_HOME = path.join(fakeHome, "state");
+process.env.XDG_CONFIG_HOME = path.join(fakeHome, "config");
+process.env.XDG_CACHE_HOME = path.join(fakeHome, "cache");
+const dirs = [fakeHome];
+const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), "constance-queue-deep-")); dirs.push(d); return d; };
 const proj = (n) => `/home/u/deep-${n}`;
 const ids = (list) => list.map((t) => t.id);
 
@@ -227,4 +237,214 @@ const ids = (list) => list.map((t) => t.id);
   assert.deepEqual(fs.readdirSync(dir).filter((f) => f.includes(".lock")), [], "no stray lock file");
 }
 
+// ============================================================ top-level JSON scalars
+{
+  // queue.json holding a bare scalar (hand edit, truncated write that still
+  // parses) must read as an empty queue, not crash on d.next/d.projects.
+  const dir = tmp(), p = proj("scalar");
+  for (const raw of ["null", "42", "\"text\"", "true", "[]"]) {
+    fs.writeFileSync(queueFile(dir), raw);
+    assert.deepEqual(pendingTasks(p, dir), [], `${raw} reads as empty`);
+    assert.equal(peekNext(p, dir), null);
+    assert.deepEqual(queueView(p, dir), []);
+  }
+  fs.writeFileSync(queueFile(dir), "null");
+  assert.equal(addTask(p, { task: "after null" }, dir).id, 1, "addTask recovers from a null top level");
+}
+
+// ============================================================ stored-entry edge shapes
+{
+  // Entries that ARE objects but miss fields: only status === "pending" counts,
+  // and the view passes holes through rather than inventing text.
+  const dir = tmp(), p = proj("entries");
+  fs.writeFileSync(queueFile(dir), JSON.stringify({ next: 9, projects: { [p]: [
+    { id: 1, status: "pending" },
+    { id: 2, status: "handed", task: "done one" },
+    { id: 3, task: "no status at all" },
+    { id: 4, status: "weird", task: "unknown status" },
+  ] } }));
+  assert.deepEqual(pendingTasks(p, dir).map((t) => t.id), [1], "only exact 'pending' is pending");
+  assert.deepEqual(queueView(p, dir), [{ id: 1, task: undefined, files: [], agent: "" }],
+    "a pending entry with no task/files/agent shows the holes, not placeholders");
+  assert.deepEqual(readyTasks(p, {}, dir).map((t) => t.id), [1], "a field-less pending task is eligible (read-only)");
+  // Handed/unknown-status entries still occupy the file but never resurface.
+  const raw = JSON.parse(fs.readFileSync(queueFile(dir), "utf8"));
+  assert.equal(raw.projects[p].length, 4, "non-pending entries are kept as history, not dropped");
+  assert.equal(raw.next, 9, "next is preserved untouched by reads");
+}
+{
+  // Mutating what pendingTasks returns cannot corrupt the file: every read
+  // re-parses queue.json.
+  const dir = tmp(), p = proj("freshread");
+  const t = addTask(p, { task: "orig" }, dir);
+  pendingTasks(p, dir)[0].task = "mutated";
+  assert.equal(pendingTasks(p, dir)[0].task, "orig", "read results are detached copies");
+  assert.equal(t.task, "orig");
+}
+
+// ============================================================ argument type edges
+{
+  const dir = tmp(), p = proj("argtypes");
+  // files must be an array: a string or null hits .filter and throws TypeError.
+  // The lock's finally still releases, so the next call works.
+  assert.throws(() => addTask(p, { task: "x", files: "a.js" }, dir), TypeError);
+  assert.throws(() => addTask(p, { task: "x", files: null }, dir), TypeError);
+  assert.equal(addTask(p, { task: "after throw" }, dir).task, "after throw", "a thrown addTask leaves no lock behind");
+
+  // Scalars coerce: task/agent go through String(), a falsy title is omitted,
+  // and a string `items` slips through because only .length is checked.
+  const t = addTask(p, { task: 42, agent: { toString: () => "obj" }, title: 0, items: "ab" }, dir);
+  assert.equal(t.task, "42");
+  assert.equal(t.agent, "obj");
+  assert.ok(!("title" in t), "falsy title is omitted, not stored as 0");
+  assert.equal(t.items, "ab", "a string items is stored verbatim (only .length gates it)");
+
+  // readyTasks option types: non-array busyFiles throws TypeError.
+  addTask(p, { task: "y", files: ["f.js"] }, dir);
+  assert.throws(() => readyTasks(p, { busyFiles: "f.js" }, dir), TypeError);
+  assert.throws(() => readyTasks(p, { busyFiles: null }, dir), TypeError);
+  // A non-numeric limit compares false against every length: effectively
+  // unbounded rather than an error.
+  assert.equal(readyTasks(p, { limit: "abc" }, dir).length, 3, "string limit is unbounded");
+  assert.equal(readyTasks(p, { limit: NaN }, dir).length, 3, "NaN limit is unbounded");
+}
+{
+  // File lists may hold non-string truthy entries (hand edit): they are stored
+  // and still participate in busy/claim matching by identity.
+  const dir = tmp(), p = proj("weirdfiles");
+  const t = addTask(p, { task: "numeric file", files: [7, "a.js"] }, dir);
+  assert.deepEqual(t.files, [7, "a.js"], "addTask keeps truthy non-strings");
+  assert.deepEqual(readyTasks(p, { busyFiles: [7] }, dir), [], "a numeric busy entry matches the numeric file");
+  assert.equal(readyTasks(p, { busyFiles: ["7"] }, dir).length, 1, "string '7' does NOT match number 7");
+}
+
+// ============================================================ id matching is strict
+{
+  const dir = tmp(), p = proj("idtypes");
+  const t = addTask(p, { task: "x" }, dir);
+  assert.equal(removeTask(p, String(t.id), dir), false, "a string id does not match the numeric one");
+  finishTask(p, String(t.id), 1, dir);
+  assert.equal(pendingTasks(p, dir).length, 1, "finishTask with a string id is a silent no-op");
+  assert.equal(removeTask(p, t.id + 0.5, dir), false, "a fractional id does not match either");
+  assert.equal(finishTask(p, null, 1, dir), undefined, "null id is a silent no-op");
+}
+
+// ============================================================ finishTask writes even when idle
+{
+  // finishTask is a read-modify-write with no "did anything change" check:
+  // it rewrites queue.json (creating dir + file) even when nothing matched.
+  const dir = tmp(), p = proj("idle-write");
+  assert.equal(finishTask(p, 1, 1, dir), undefined);
+  const raw = JSON.parse(fs.readFileSync(queueFile(dir), "utf8"));
+  assert.deepEqual(raw, { next: 1, projects: {} }, "an idle finishTask still materializes queue.json");
+  // And it does not repair a non-array project value the way addTask does.
+  fs.writeFileSync(queueFile(dir), JSON.stringify({ next: 3, projects: { [p]: "oops" } }));
+  finishTask(p, 1, 1, dir);
+  assert.equal(JSON.parse(fs.readFileSync(queueFile(dir), "utf8")).projects[p], "oops",
+    "finishTask preserves the non-array it could not match");
+}
+
+// ============================================================ the lock file
+{
+  const dir = tmp(), p = proj("stale");
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = queueFile(dir) + ".lock";
+  // A lock older than 10 s is stale: broken and the write proceeds.
+  fs.writeFileSync(lock, String(process.pid));
+  const old = new Date(Date.now() - 20000);
+  fs.utimesSync(lock, old, old);
+  assert.equal(addTask(p, { task: "after stale" }, dir).task, "after stale");
+  assert.ok(!fs.existsSync(lock), "the broken stale lock is removed");
+}
+{
+  // A fresh lock nobody releases makes the writer give up: ~200 retries x
+  // 25 ms then "queue file is locked". The foreign lock is left untouched.
+  // (This one really does sleep ~5 s; that is the designed timeout.)
+  const dir = tmp(), p = proj("held");
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = queueFile(dir) + ".lock";
+  fs.writeFileSync(lock, String(process.pid));
+  assert.throws(() => addTask(p, { task: "blocked" }, dir), /queue file is locked/);
+  assert.equal(fs.readFileSync(lock, "utf8"), String(process.pid), "the foreign lock file is not removed");
+  // removeTask shares the same lock. By now the foreign lock is >10 s old, so
+  // it counts as stale: removeTask breaks it and proceeds (a no-op here).
+  assert.equal(removeTask(p, 1, dir), false, "removeTask waits out the stale window, then runs");
+  assert.ok(!fs.existsSync(lock), "the stale lock is cleaned up by the next writer");
+}
+{
+  // A stray .tmp left by a crashed write is ignored by readers and does not
+  // collide with the next write (the tmp name carries the pid).
+  const dir = tmp(), p = proj("straytmp");
+  addTask(p, { task: "real" }, dir);
+  fs.writeFileSync(queueFile(dir) + ".999999.tmp", "{torn");
+  assert.equal(pendingTasks(p, dir)[0].task, "real", "a stray tmp does not affect reads");
+  addTask(p, { task: "second" }, dir);
+  assert.equal(pendingTasks(p, dir).length, 2, "the next write still lands");
+}
+
+// ============================================================ queue.json that is a directory
+{
+  const dir = tmp(), p = proj("dirfile");
+  fs.mkdirSync(queueFile(dir));
+  assert.deepEqual(pendingTasks(p, dir), [], "a directory at queue.json reads as empty");
+  assert.equal(peekNext(p, dir), null);
+  assert.throws(() => addTask(p, { task: "x" }, dir), /EISDIR/, "the rename onto a directory fails");
+  assert.ok(fs.readdirSync(dir).some((f) => f.endsWith(".tmp")),
+    "the failed rename leaves its .tmp file behind (documented wart)");
+}
+
+// ============================================================ BUG: non-object entries crash every reader
+// A hand-edited or partially-written queue.json can store null/number/string
+// entries inside projects[dir]. projectList only checks the list is an array;
+// then pendingTasks dereferences t.status, queueView/finishTask/removeTask
+// dereference t.id/t.task, and ALL of them throw TypeError — taking down the
+// panel's queue view and `C queue` for that project until the file is repaired
+// by hand. addTask is the only survivor (it appends blindly).
+// Repro (currently throws "Cannot read properties of null"):
+//   fs.writeFileSync(queueFile(dir), JSON.stringify({next:1,projects:{[p]:[null]}}));
+//   pendingTasks(p, dir);            // TypeError
+//   removeTask(p, 1, dir);           // TypeError
+//   finishTask(p, 1, 1, dir);        // TypeError
+//   queueView(p, dir);               // TypeError
+//   readyTasks(p, {}, dir);          // TypeError
+// Expected: non-object entries are skipped, the same way a non-array project
+// value already reads as empty.
+// assert.deepEqual(pendingTasks(p, dir), []);
+// assert.deepEqual(queueView(p, dir), []);
+// assert.equal(removeTask(p, 1, dir), false);
+
+// ============================================================ BUG: bad `next` flows into ids
+// readAll does `Number(d.next) || 1`, which accepts negatives and fractions:
+// a hand-edited {"next": -3} makes the next ids -3, -2, ... and {"next": 1.9}
+// makes them 1.9, 2.9. Ids are compared with === against job fields elsewhere,
+// so fractional/negative ids are a data-integrity wart. Expected: next is
+// coerced to a positive integer (or reset to 1 when it isn't one).
+// Repro:
+//   write queue.json {"next": -3, "projects": {}}
+//   addTask(p, {task:"x"}, dir).id   // currently -3, expected >= 1
+//   write queue.json {"next": 1.9, "projects": {}}
+//   addTask(...).id                  // currently 1.9, expected 1 or 2
+
+// ============================================================ BUG: "__proto__" as projectDir loses tasks
+// data.projects["__proto__"] hits the Object.prototype setter: the "list" is
+// stored AS the prototype, list.push works in memory, but JSON.stringify sees
+// no own property — the task is silently dropped from queue.json while `next`
+// still increments. Repro:
+//   addTask("__proto__", {task:"x"}, dir)   // returns {id:1,...} as if stored
+//   JSON.parse(read queue.json).projects    // {} — the task is gone
+// Expected: project keys that collide with Object.prototype members are
+// rejected or stored under a safe key (real project dirs are absolute paths,
+// so this is only reachable via a hand-rolled caller, but the silent loss is
+// the kind of thing that is miserable to debug).
+
+// ============================================================ BUG: finishTask is not under the lock
+// addTask/removeTask serialize their read-modify-write on queue.json.lock;
+// finishTask does the same read-modify-write with NO lock. A finishTask racing
+// an addTask (or a removeTask) can lose the other's update: the classic
+// lost-update window between readAll and writeAll. Hard to trigger on demand,
+// but the asymmetry is visible in the source — finishTask at
+// bin/constance-queue.mjs:96-101 has no withLock wrapper. Expected: finishTask
+// takes the same lock (or the whole file moves to a single locked update()).
+
+for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 console.log("constance-queue.deep: tests passed");
