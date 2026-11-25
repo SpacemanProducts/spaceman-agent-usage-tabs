@@ -126,18 +126,12 @@ assert.equal(multi.text, "You've hit your limit.", "text is the first hit line, 
 const two = limitWall("You've hit your limit (resets 9pm (UTC)).\nYou've hit your weekly limit · resets 8pm (UTC)", now);
 assert.equal(two.until, Date.UTC(2026, 10, 25, 21), "statedReset reads the first hit line first (9pm UTC past -> tomorrow)");
 
-// Real bug candidate (not fixed per job rules): when the hit line has no reset
-// of its own, limitWall falls back to statedReset(whole text), which takes the
-// leftmost 'resets ...' ANYWHERE in the output — even unrelated earlier lines —
-// and reports stated:true for a time Claude never tied to the wall.
-// Intended behavior, kept as a commented-out test:
-//   const bogus = limitWall("plan resets 5pm (UTC)\nYou've hit your limit.", now);
-//   assert.equal(bogus.stated, false, "BUG: unrelated 'resets' earlier in the output is reported as stated");
-//   assert.equal(bogus.until, now + FALLBACK_WAIT_MS, "BUG: should use the 30 min fallback, not the stray time");
-// Current (buggy) behavior, pinned so the suite stays green:
+// When the hit line has no reset of its own, limitWall only looks at lines
+// from the hit line onward — an unrelated 'resets' earlier in the output is
+// not a time Claude tied to the wall, so the 30 min fallback applies.
 const bogus = limitWall("plan resets 5pm (UTC)\nYou've hit your limit.", now);
-assert.equal(bogus.stated, true, "current behavior: unrelated earlier 'resets' is treated as stated (see commented-out test above)");
-assert.equal(bogus.until, statedReset("plan resets 5pm (UTC)", now));
+assert.equal(bogus.stated, false, "unrelated earlier 'resets' is not reported as stated");
+assert.equal(bogus.until, now + FALLBACK_WAIT_MS, "should use the 30 min fallback, not the stray time");
 
 // A stated clock-only time already past still yields an `until` — either the
 // past instant inside the 60 s grace, or tomorrow beyond it.
