@@ -211,4 +211,127 @@ assert.throws(() => planSpare({ agents: [grok()], available: ["grok"], backlog: 
 assert.deepEqual(planSpare({ agents: [grok()], available: ["grok"], backlog: [{ ...item("a", "chore"), done: "yes" }], now }).picks, []);
 assert.deepEqual(planSpare({ agents: [grok()], available: ["grok"], backlog: [{ ...item("a", "chore"), job: 0 }], now }).picks, []);
 
+// ------------------------------------------------- leftAtReset: more coercion
+// A primitive limit argument has no readable fields: null, like every other
+// unreadable input, rather than a throw.
+assert.equal(leftAtReset("junk", now), null);
+assert.equal(leftAtReset(5, now), null);
+assert.equal(leftAtReset(true, now), null);
+// An Invalid Date object stringifies to "Invalid Date": unparseable, so null.
+assert.equal(leftAtReset({ title: "Other", percent: 0.2, resetsAt: new Date(NaN) }, now), null);
+// percent 0 is a real reading: nothing used, so (flat-projected) everything is
+// left — a fully-unused window with a soon reset IS spare room.
+assert.equal(leftAtReset(lim("Other", 0, H), now), 1);
+assert.equal(spareWindows(agent("x", [lim("Other", 0, H)]), now).length, 1, "0% used, reset soon: the whole window is spare");
+// -0 is not < 0, so it reads as a real 0% reading like +0.
+assert.equal(leftAtReset(lim("Other", -0, H), now), 1);
+// Coercion quirks pinned: booleans and numeric strings both go through Number().
+assert.equal(leftAtReset({ title: "Other", percent: true, resetsAt: iso(now + H) }, now), 0, "percent true coerces to 1: fully used, nothing left");
+assert.equal(leftAtReset({ title: "Other", percent: "0.5", resetsAt: iso(now + H) }, now), 0.5);
+// A Weekly window whose reset is farther out than the 7 d window itself gets
+// the flat projection (elapsed share is negative, so the burn rate can't be
+// carried) — same rule as Session at exactly 5 h, tested above.
+assert.equal(leftAtReset(lim("Weekly", 0.4, 8 * D), now), 0.6, "weekly reset beyond the window length: flat");
+// Infinity percent is not finite: no projection, same as NaN.
+assert.equal(leftAtReset(lim("Other", Infinity, H), now), null);
+
+// ------------------------------------------------- spareWindows: more edges
+// Title matching is case-sensitive: "session" is not "Session", so it falls
+// back to DEFAULT_SOON (6 h) — a 2 h reset counts where "Session" would not.
+assert.equal(spareWindows(agent("x", [lim("session", 0.2, 2 * H)]), now).length, 1,
+  "lowercase 'session' gets DEFAULT_SOON, not SOON.Session");
+assert.equal(spareWindows(agent("x", [lim("SESSION", 0.2, 2 * H)]), now).length, 1);
+assert.equal(spareWindows(agent("x", [lim("session", 0.2, 7 * H)]), now).length, 0, "...but still bounded by DEFAULT_SOON");
+// Junk entries inside the limits array are skipped like nulls.
+assert.deepEqual(spareWindows(agent("x", ["junk", 42, lim("Session", 0.2, 0.5 * H)]), now).map((w) => w.title), ["Session"]);
+// A non-array `limits` that is an object (not just a string) also reads empty.
+assert.deepEqual(spareWindows({ id: "x", limits: { 0: lim("Session", 0.2, 0.5 * H) } }, now), []);
+// Windows with identical resetsAt keep their input order (stable sort).
+const tie = spareWindows(agent("x", [
+  lim("Other", 0.2, H), lim("Session", 0.2, H),
+]), now);
+assert.deepEqual(tie.map((w) => w.title), ["Other", "Session"], "equal resetsAt: input order preserved");
+// The wall check looks at EVERY limit, including ones that could never be
+// spare themselves (reset far out, no percent, unparseable resetsAt).
+assert.equal(spareWindows(agent("x", [
+  lim("Session", 0.2, 0.5 * H),
+  { title: "Weekly", percent: 0.9 }, // no resetsAt: can't project, still walls
+]), now).length, 0, "a near-wall limit with no resetsAt still poisons the agent");
+assert.equal(spareWindows(agent("x", [
+  lim("Session", 0.2, 0.5 * H),
+  { title: "Weekly", percent: "0.9", resetsAt: "garbage" },
+]), now).length, 0, "...and so does one with an unparseable resetsAt");
+// A window exactly at MIN_LEFT via the flat projection is offered; the same
+// window one ms closer to its reset still is (flat doesn't depend on `now`),
+// pinning that MIN_LEFT is the only level gate for unknown titles.
+assert.equal(spareWindows(agent("x", [lim("Other", 0.75, H - 1)]), now).length, 1);
+
+// ------------------------------------------------------------- planSpare: more
+// No arguments at all: defaults make it a well-formed "nothing to do" answer.
+r = planSpare();
+assert.deepEqual(r, { on: true, picks: [], reason: "no agent has room it would lose before a reset" });
+// The off switch is checked before anything else: malformed agents/backlog
+// can't make the disabled path throw.
+r = planSpare({ agents: "junk", available: 5, backlog: {}, settings: { constanceUseItOrLoseIt: false }, now });
+assert.deepEqual(r, { on: false, picks: [], reason: "use it or lose it is off" });
+// `available` only needs to be iterable for `new Set`: a Set works.
+r = planSpare({ agents: [grok()], available: new Set(["grok"]), backlog: [item("a", "chore")], now });
+assert.equal(r.picks[0]?.agent, "grok", "a Set of ids works as available");
+// A bare string is iterable too, but iterates characters: "grok" becomes a
+// set of letters and the agent is silently not served. Pinned as-is.
+r = planSpare({ agents: [grok()], available: "grok", backlog: [item("a", "chore")], now });
+assert.equal(r.reason, "no agent has room it would lose before a reset", "available: 'grok' (string) matches nothing");
+// Null/undefined agent entries are skipped without throwing.
+r = planSpare({ agents: [null, undefined, grok()], available: ["grok"], backlog: [item("a", "chore")], now });
+assert.deepEqual(r.picks.map((p) => p.agent), ["grok"]);
+// Backlog entries that aren't objects, and items whose text isn't a non-blank
+// string, are not open items.
+r = planSpare({ agents: [grok()], available: ["grok"], now, backlog: [
+  null, "junk", 42,
+  { id: "n", kind: "chore", text: 42 },
+  { id: "u", kind: "chore" }, // no text key at all
+  item("ok", "chore"),
+] });
+assert.deepEqual(r.picks[0].items.map((i) => i.id), ["ok"]);
+// Kind matching is exact-case: "Review"/"Design" are not opus kinds, so a
+// worker takes them and Claude gets nothing.
+r = planSpare({ agents: [claude(), grok()], available: ["grok"], perAgent: 10, now,
+  backlog: [item("R", "Review"), item("D", "Design")] });
+assert.deepEqual(r.picks.find((p) => p.agent === "grok")?.items.map((i) => i.id), ["R", "D"],
+  "a worker takes both: capitalized kinds aren't opus work for anyone");
+// perAgent NaN blocks everything (taken.length < NaN is never true);
+// Infinity hands over the agent's whole matching share.
+r = planSpare({ agents: [grok()], available: ["grok"], backlog: threeChores, perAgent: NaN, now });
+assert.deepEqual(r.picks, []);
+r = planSpare({ agents: [grok()], available: ["grok"], backlog: threeChores, perAgent: Infinity, now });
+assert.equal(r.picks[0].items.length, 3);
+// Claude's scan continues past non-opus items until she fills her cap: with
+// perAgent 2 and chores interleaved she still finds both opus items.
+r = planSpare({ agents: [claude()], available: [], perAgent: 2, now,
+  backlog: [item("c1", "chore"), item("v1", "review"), item("c2", "chore"), item("b1", "bug"), item("v2", "review")] });
+assert.deepEqual(r.picks[0].items.map((i) => i.id), ["v1", "b1"], "cap counts taken items, not scanned ones");
+// Distinct backlog entries are never deduplicated by content: two items with
+// the same kind/text/id still both get handed out.
+r = planSpare({ agents: [grok()], available: ["grok"], perAgent: 10, now,
+  backlog: [item("dup", "chore", "same text"), item("dup", "chore", "same text")] });
+assert.equal(r.picks[0].items.length, 2, "no content-based dedup");
+// `job` uses loose == null: undefined counts as untaken (open), while any
+// other falsy-but-present tag ("", false, 0) counts as taken. Pinned to match
+// the comment's "null or absent means untaken" rule.
+r = planSpare({ agents: [grok()], available: ["grok"], now, backlog: [
+  { ...item("u", "chore"), job: undefined },
+  { ...item("e", "chore"), job: "" },
+  { ...item("f", "chore"), job: false },
+] });
+assert.deepEqual(r.picks[0].items.map((i) => i.id), ["u"], "job: undefined is open; '' and false are taken");
+// Omitting `now` uses Date.now(): an 'Other' window flattens its projection so
+// the result doesn't depend on the exact clock reading.
+r = planSpare({
+  agents: [agent("grok", [{ title: "Other", percent: 0.2, resetsAt: iso(Date.now() + 30 * 60e3) }])],
+  available: ["grok"], backlog: [item("a", "chore")] });
+assert.equal(r.picks[0]?.agent, "grok", "default now = Date.now()");
+// Claude at the wall gets nothing even though she never needs `available`.
+r = planSpare({ agents: [agent("claude", [lim("Session", 0.9, 0.5 * H)])], available: [], backlog: [item("rev", "review")], now });
+assert.equal(r.reason, "no agent has room it would lose before a reset", "a walled claude is skipped like anyone");
+
 console.log("constance-spare.deep: tests passed");
