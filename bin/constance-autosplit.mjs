@@ -91,6 +91,6 @@ export function autosplit(goalText, { files = [], scorecard = [], agent = null, 
 // The files claimed by more than one job, sorted. Empty for autosplit's own output.
 export function overlaps(jobs) {
   const count = new Map();
-  for (const j of jobs || []) for (const f of j.files || []) count.set(f, (count.get(f) || 0) + 1);
+  for (const j of jobs || []) for (const f of new Set(j.files || [])) count.set(f, (count.get(f) || 0) + 1);
   return [...count.entries()].filter(([, n]) => n > 1).map(([f]) => f).sort();
 }
