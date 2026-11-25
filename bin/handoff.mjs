@@ -3,6 +3,7 @@
 // read that folder first. The note is rebuilt every time the warning fires, from recent git commits, the working tree and
 // the repo's CLAUDE.md. Nothing is invented: a part with no source says so. Emails and long tokens are scrubbed.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -107,7 +108,16 @@ export function excludeFolder(repo) {
   return true;
 }
 
-export function writeHandoff(repo, trigger, now = Date.now()) {
+// The Omarchy shell watches ~/.config/omarchy/plugins/ with inotify and reloads every plugin (closing open panels) when
+// any file inside a plugin folder is written — a repo living there must never get a handoff note.
+export function insidePluginsDir(repo, env = {}) {
+  const plugins = path.resolve(path.join(env.HOME || os.homedir(), ".config", "omarchy", "plugins"));
+  const root = path.resolve(repo || "");
+  return root === plugins || root.startsWith(plugins + path.sep);
+}
+
+export function writeHandoff(repo, trigger, now = Date.now(), env) {
+  if (insidePluginsDir(repo, env)) return { file: "", addedLine: false };
   const dir = path.join(repo, FOLDER);
   fs.mkdirSync(dir, { recursive: true });
   excludeFolder(repo);
@@ -152,15 +162,15 @@ export function findActiveRepo({ projectsDir, squadDirFile, now = Date.now(), ma
 //   not decided yet                 -> write NOTHING: remember what would be written in `pendingFile` and return "asked"
 //                                      the first time, so the panel can ask. (Allow / Not now / Never are in the panel.)
 // Returns the written path, "asked" (first question), "pending" (already waiting for an answer), or "".
-export function maybeWriteHandoff({ sent, settings, untilReset = () => "", projectsDir, squadDirFile, pendingFile, now = Date.now() }) {
+export function maybeWriteHandoff({ sent, settings, untilReset = () => "", projectsDir, squadDirFile, pendingFile, now = Date.now(), env }) {
   const session = (sent || []).filter((i) => /session/i.test(String(i.limit?.title)));
   const setting = (settings || {}).handoffNote;
   if (!session.length || setting === false) return "";
   const top = session.reduce((a, b) => (b.limit.percent > a.limit.percent ? b : a));
   const repo = findActiveRepo({ projectsDir, squadDirFile, now });
-  if (!repo) return "";
+  if (!repo || insidePluginsDir(repo, env)) return "";
   const trigger = { agent: top.agent.name, percent: top.limit.percent, title: top.limit.title, resetsIn: untilReset(top.limit.resetsAt), level: top.level };
-  if (setting === true) return writeHandoff(repo, trigger, now).file;
+  if (setting === true) return writeHandoff(repo, trigger, now, env).file;
   if (!pendingFile) return "";
   const first = !fs.existsSync(pendingFile);
   fs.mkdirSync(path.dirname(pendingFile), { recursive: true });
@@ -169,9 +179,9 @@ export function maybeWriteHandoff({ sent, settings, untilReset = () => "", proje
 }
 
 // The panel's answer to the question. allow = write the waiting note now; dismiss = forget it (it asks again next time).
-export function answerPending(pendingFile, action) {
+export function answerPending(pendingFile, action, env) {
   let p = null; try { p = JSON.parse(fs.readFileSync(pendingFile, "utf8")); } catch {}
   try { fs.unlinkSync(pendingFile); } catch {}
-  if (action === "allow" && p?.repo && p?.trigger) return writeHandoff(p.repo, p.trigger).file;
+  if (action === "allow" && p?.repo && p?.trigger) return writeHandoff(p.repo, p.trigger, Date.now(), env).file;
   return "";
 }
