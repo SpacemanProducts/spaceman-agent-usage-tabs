@@ -357,30 +357,28 @@ const sess = (agent, percent, title = "Session", level = "warn") => ({ agent: { 
   assert.throws(() => writeHandoff(blocked, trig, NOW), /EEXIST/);
 }
 
-// ---- known bugs (kept as documentation; the module is not changed here) -----------------------------------------
-// BUG: findActiveRepo picks the newest *.jsonl entry by mtime but never checks it is a file. A directory named
-//      "x.jsonl" with a fresh mtime shadows the real transcript: openSync/readSync throws, the catch falls through
-//      to the squad file, and the valid older transcript is never read.
-//   {
-//     const P = path.join(tmp, "bug-proj"); fs.mkdirSync(path.join(P, "d"), { recursive: true });
-//     const f = path.join(P, "d", "real.jsonl");
-//     fs.writeFileSync(f, JSON.stringify({ cwd: repoA }) + "\n");
-//     fs.utimesSync(f, new Date(NOW - 60000), new Date(NOW - 60000));
-//     fs.mkdirSync(path.join(P, "d", "aaa.jsonl")); // directory, newest mtime
-//     // want: the real transcript's repo; got: "" (or the squad fallback)
-//     assert.ok(findActiveRepo({ projectsDir: P, squadDirFile: "/nonexistent", now: NOW }));
-//   }
-// BUG: answerPending("allow") trusts the stored repo path. If the repo was deleted between the ask and the answer,
-//      writeHandoff mkdirSync's the whole path and drops handoff/HANDOFF.md + AGENTS.md into a fresh non-repo
-//      directory. It should verify the path is still a git repo (or at least still exists) before writing.
-//   {
-//     const gone = path.join(tmp, "bug-gone-repo");
-//     const pf = path.join(tmp, "bug-pending.json");
-//     fs.writeFileSync(pf, JSON.stringify({ repo: gone, trigger: trig, at: NOW }));
-//     // want: "" and no directories created; got: a recreated folder tree with a note and AGENTS.md
-//     assert.equal(answerPending(pf, "allow"), "");
-//     assert.ok(!fs.existsSync(gone));
-//   }
+// ---- regressions: bugs found here, fixed in handoff.mjs ---------------------------------------------------------
+// A directory named "*.jsonl" with a fresh mtime must not shadow the real transcript: only regular files count,
+// so the older valid transcript is still read.
+{
+  const P = path.join(tmp, "bug-proj"); fs.mkdirSync(path.join(P, "d"), { recursive: true });
+  const repoBug = initRepo(path.join(tmp, "bug-repo"), "init");
+  const f = path.join(P, "d", "real.jsonl");
+  fs.writeFileSync(f, JSON.stringify({ cwd: repoBug }) + "\n");
+  fs.utimesSync(f, new Date(NOW - 60000), new Date(NOW - 60000));
+  fs.mkdirSync(path.join(P, "d", "aaa.jsonl")); // directory, newest mtime
+  assert.equal(findActiveRepo({ projectsDir: P, squadDirFile: "/nonexistent", now: NOW }), fs.realpathSync(repoBug));
+}
+// answerPending("allow") trusts the stored repo path: if the repo was deleted between the ask and the answer,
+// nothing may be written — the pending handoff is dropped and "" returned.
+{
+  const gone = path.join(tmp, "bug-gone-repo");
+  const pf = path.join(tmp, "bug-pending.json");
+  fs.writeFileSync(pf, JSON.stringify({ repo: gone, trigger: trig, at: NOW }));
+  assert.equal(answerPending(pf, "allow"), "");
+  assert.ok(!fs.existsSync(gone), "no directories recreated");
+  assert.ok(!fs.existsSync(pf), "pending handoff dropped");
+}
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("handoff.deep: all tests passed");
