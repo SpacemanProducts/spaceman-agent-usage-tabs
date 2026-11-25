@@ -230,30 +230,68 @@ function runCorrupt() {
   }
 }
 
-// ------------------------------------------------------------------ known bugs
-// BUG: bin/collect.mjs fromBuiltin() trusts the Omarchy usage record's
-// types. A file that parses as JSON but has wrong types crashes the whole
-// collector (exit 1, no data.json written):
-//   - "recentDays": 5        -> `for (const d of r.recentDays || [])` throws
-//                               TypeError at collect.mjs:233
-//   - "limits": "oops"       -> `(r.limits || []).filter` throws TypeError at
-//                               collect.mjs:236 (any truthy non-array does)
-// Reproduction (kept commented out until fixed): write
-//   {"limits":"oops","recentDays":[{"date":"2026-11-20","messageCount":1}]}
-// to <state>/omarchy/agents/usage/agy.json in the corrupt world and run
-// collect.mjs — it exits 1. The corrupt run above deliberately uses only
-// non-crashing corruptions so the rest of the suite still runs.
-//
-// BUG: a parseable record whose fields are all null/empty still yields
-// `days` = seven zero-token entries and `hasTokens: true` (daysFrom always
-// emits 7 days), so the tab can show "0 used" the source never reported —
-// against the project's honest-data rule. The NULLS variant above exercises
-// the surviving path; this assertion would fail today:
-//
-//   // const agy = data.agents.find((a) => a.id === "antigravity");
-//   // assert.equal(agy.hasTokens, false, "an empty record must not fabricate a zero-usage week");
-//   // assert.deepEqual(agy.days, [], "no recentDays in the record means no day rows");
+// ------------------------------------------------- BUG regressions (fixed)
+// These were '// BUG:' notes against fromBuiltin() in bin/collect.mjs:
+//   1. It trusted the Omarchy usage record's types: "recentDays": 5 crashed
+//      the `for...of` and "limits": "oops" crashed `.filter`, so one
+//      parseable-but-wrong record exited 1 with no data.json at all.
+//   2. A parseable record whose fields are all null/empty still yielded
+//      `days` = seven zero-token entries and `hasTokens: true` — a fabricated
+//      "0 used" the source never reported (honest-data rule).
+// Fixed: wrong-typed fields count as missing, and a record with no real
+// numbers emits no day rows. Only antigravity is guaranteed installed in
+// this fake world (the `agy` stub), so agy.json carries each bad record.
+
+const dayKey = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+
+function runBuiltinRecords() {
+  const { tmp, dirs, env } = makeWorld("builtin-record");
+  try {
+    const file = path.join(dirs.state, "omarchy", "agents", "usage", "agy.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const collect = (record) => {
+      fs.writeFileSync(file, typeof record === "string" ? record : JSON.stringify(record));
+      const r = runCollect(env);
+      assert.equal(r.status, 0, `builtin-record run failed:\n${r.stderr}\n${r.stdout}`);
+      assert.ok(fs.existsSync(path.join(outDirOf(dirs), "data.json")), "builtin-record run wrote data.json");
+      return readData(dirs);
+    };
+    const agy = (data) => data.agents.find((a) => a.id === "antigravity");
+
+    // Every field the wrong type from the bug report: used to exit 1.
+    let data = collect({ limits: "oops", recentDays: 5, modelUsage: "x", tierLabel: 42, ready: null });
+    checkData(data, "wrong-types");
+    assert.deepEqual(agy(data).limits, [], "wrong-typed limits count as missing");
+    assert.deepEqual(agy(data).days, [], "wrong-typed recentDays means no day rows");
+    assert.equal(agy(data).hasTokens, false, "no real numbers: no fabricated zero-usage week");
+
+    // A record with no real numbers at all (the NULLS shape) must not
+    // fabricate a zero-usage week either.
+    data = collect(NULLS);
+    checkData(data, "null-fields");
+    assert.equal(agy(data).hasTokens, false, "an empty record must not fabricate a zero-usage week");
+    assert.deepEqual(agy(data).days, [], "no recentDays in the record means no day rows");
+
+    // Wrong-typed fields count as missing, not the whole record: a valid
+    // recentDays still produces its days while bad limits/models stay empty.
+    data = collect({
+      limits: "oops",
+      recentDays: [{ date: dayKey(Date.now()), messageCount: 3 }],
+      modelUsage: "x",
+      tierLabel: "Pro",
+      ready: true,
+    });
+    checkData(data, "mixed-types");
+    assert.deepEqual(agy(data).limits, [], "bad limits still missing beside good days");
+    assert.equal(agy(data).days.length, 7, "a real recentDays entry still yields the 7-day series");
+    assert.equal(agy(data).today, 3);
+    assert.equal(agy(data).hasTokens, true, "real numbers still show as tokens");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
 
 runMissing();
 runCorrupt();
+runBuiltinRecords();
 console.log("e2e collect missing/corrupt: passed");
