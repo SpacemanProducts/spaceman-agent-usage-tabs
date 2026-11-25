@@ -79,11 +79,90 @@ export function applySetting(current, key, value) {
   return { ...base, [key]: value === "true" };
 }
 
+// Serialize the read-modify-write below: two invocations at once (the panel's
+// slider and a switch, say) must not both read the same settings.json and have
+// the second rename silently drop the first one's key. The lock is a small
+// O_EXCL file next to settings.json holding this process's pid; it is stale
+// only when that pid is dead (same rule as bin/constance-mergelock.mjs: a lock
+// that is merely old is still held). A lock whose pid can't be read yet is
+// given a grace period — the holder creates the file a moment before writing
+// its pid.
+const LOCK_WAIT_MS = 5000;
+const LOCK_POLL_MS = 10;
+const LOCK_NO_PID_MS = 2000;
+
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const pidAlive = (pid) => {
+  if (!(pid > 0)) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+};
+
+// True while the lock at `path` is really held: a live pid, or a file too
+// fresh to have recorded its pid yet. False when it is stale or already gone.
+function lockHeld(path) {
+  let holder = 0;
+  try { holder = Number(fs.readFileSync(path, "utf8").trim()) || 0; } catch { return false; }
+  if (holder > 0) return pidAlive(holder);
+  try { return Date.now() - fs.statSync(path).mtimeMs <= LOCK_NO_PID_MS; } catch { return false; }
+}
+
+function acquireLock(lock) {
+  const until = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      const fd = fs.openSync(lock, "wx", 0o600);
+      try { fs.writeFileSync(fd, String(process.pid)); } finally { fs.closeSync(fd); }
+      return;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      if (lockHeld(lock)) {
+        if (Date.now() > until) throw new Error("settings.json is locked by another settings-set");
+        sleepSync(LOCK_POLL_MS);
+        continue;
+      }
+      // Stale: take it over by renaming the corpse aside first — rename(2)
+      // moves exactly one path, so two waiters can never both believe they
+      // broke the same lock (same trick as constance-mergelock.mjs).
+      const aside = `${lock}.stale-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      try {
+        fs.renameSync(lock, aside);
+      } catch (e2) {
+        if (e2.code === "ENOENT") continue;   // another contender moved it first
+        throw e2;
+      }
+      // The path may have changed hands between the stale check and the
+      // rename: what we moved could be a fresh, live lock. Put it back if
+      // `lock` is still free; otherwise it stays at `aside` as litter —
+      // never deleted, and its owner's release check reads `lock`, so it
+      // won't remove the new holder's lock either way.
+      if (lockHeld(aside)) {
+        if (!fs.existsSync(lock)) { try { fs.renameSync(aside, lock); } catch {} }
+      } else {
+        try { fs.unlinkSync(aside); } catch {}
+      }
+      continue;
+    }
+  }
+}
+
+function releaseLock(lock) {
+  // Only remove our own lock: a stale break could have replaced it already.
+  let holder = 0;
+  try { holder = Number(fs.readFileSync(lock, "utf8").trim()) || 0; } catch { return; }
+  if (holder === process.pid) { try { fs.unlinkSync(lock); } catch {} }
+}
+
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   const dir = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local/state"), "omarchy", "agent-usage-tabs");
   const file = path.join(dir, "settings.json");
-  let current = {}; try { current = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+  const lock = `${file}.lock`;
   try {
+    fs.mkdirSync(dir, { recursive: true });
+    acquireLock(lock);
+  } catch (e) { console.error(e.message); process.exit(1); }
+  let failed = false;
+  try {
+    let current = {}; try { current = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
     const next = process.argv[2] === "hidden" ? applyHidden(current, process.argv[3], process.argv[4])
       : process.argv[2] === "order" ? applyOrder(current, process.argv[3])
       : process.argv[2] === "volume" ? applyVolume(current, process.argv[3])
@@ -91,9 +170,10 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
       : process.argv[2] === "constanceMilk" || process.argv[2] === "milk" ? applyMilk(current, process.argv[3])
       : process.argv[2] === "constanceBrain" || process.argv[2] === "brain" ? applyBrain(current, process.argv[3])
       : applySetting(current, process.argv[2], process.argv[3]);
-    fs.mkdirSync(dir, { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(next) + "\n", { mode: 0o600 });
     fs.renameSync(tmp, file);
-  } catch (e) { console.error(e.message); process.exit(1); }
+  } catch (e) { console.error(e.message); failed = true; }
+  finally { releaseLock(lock); }
+  if (failed) process.exit(1);
 }

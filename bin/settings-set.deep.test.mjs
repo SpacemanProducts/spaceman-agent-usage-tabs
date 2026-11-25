@@ -5,11 +5,10 @@
 // CLI main that does read-modify-write on
 // $XDG_STATE_HOME/omarchy/agent-usage-tabs/settings.json (or ~/.local/state
 // when XDG_STATE_HOME is unset) via a pid-named tmp file + rename. There is no
-// clock or cache; the only timing surface is the multi-process
-// read-modify-write race, which is pinned down commented out under "// BUG:".
+// clock or cache; the multi-process read-modify-write race is serialized by
+// an O_EXCL lock file (settings.json.lock) and pinned down at the bottom.
 //
-// Tests that pin down QUIRKS assert the current behaviour and say so; nothing
-// is fixed - this job is test-only.
+// Tests that pin down QUIRKS assert the current behaviour and say so.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -424,23 +423,24 @@ try {
     });
   }
 
-  // BUG (not fixed, test-only job): the CLI does an unprotected
-  // read-modify-write. Two concurrent invocations can both read the same
-  // settings.json and the second rename silently drops the first one's key -
-  // a lost update with no error. Reproducing it needs both processes to read
-  // before either writes, which is timing-dependent, so this stays commented
-  // out; run it a few times to see the flake.
-  //
-  // {
-  //   resetState();
-  //   const results = await Promise.all([
-  //     runAsync(["resetSound", "true"]),
-  //     runAsync(["autoOpenOnReset", "true"]),
-  //   ]);
-  //   assert.ok(results.every((r) => r.code === 0));
-  //   assert.deepEqual(readSettings(), { resetSound: true, autoOpenOnReset: true },
-  //     "both concurrent writes must survive - currently one is lost");
-  // }
+  // Regression: the CLI serializes its read-modify-write with an O_EXCL lock
+  // file (settings.json.lock) next to settings.json. Two concurrent
+  // invocations used to both read the same file and the second rename
+  // silently dropped the first one's key - a lost update with no error. Run
+  // several rounds: each pair must leave BOTH keys in settings.json and no
+  // lock or tmp litter behind.
+  for (let round = 0; round < 5; round++) {
+    resetState();
+    const results = await Promise.all([
+      runAsync(["resetSound", "true"]),
+      runAsync(["autoOpenOnReset", "true"]),
+    ]);
+    assert.ok(results.every((r) => r.code === 0), `round ${round}: ${JSON.stringify(results.map((r) => r.err))}`);
+    assert.deepEqual(readSettings(), { resetSound: true, autoOpenOnReset: true },
+      `round ${round}: both concurrent writes must survive`);
+    const leftovers = fs.readdirSync(path.dirname(SETTINGS)).filter((f) => f !== "settings.json");
+    assert.deepEqual(leftovers, [], `round ${round}: no lock/tmp litter left`);
+  }
   console.log("settings-set.deep: all tests passed");
 } finally {
   for (const [k, v] of Object.entries(savedEnv)) {
