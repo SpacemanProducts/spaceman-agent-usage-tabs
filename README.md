@@ -277,6 +277,30 @@ Dark and light:
 
 A background loop that works without a goal is planned for later.
 
+### Constance's helper modules
+
+Her work is split into small helpers (`bin/constance-*.mjs`), each with its own test:
+
+- **Model router** (`constance-route`): picks Opus, Sonnet or Haiku for each of her own steps — judgment calls always Opus, the recap
+  always Haiku, the rest follow the Milk Opus slider — and tallies where her session tokens went.
+- **Autosplit** (`constance-autosplit`): turns a goal into ready-to-delegate jobs, one per checklist item with a file list that never
+  overlaps, padding with deeper-test jobs when a goal yields too few.
+- **Repo brief** (`constance-brief`): a cached short summary of a project — layout, how to test, the rules, files never to touch — so a
+  worker's prompt carries just enough context.
+- **Batch review** (`constance-batchreview`): groups merged jobs into batches of five for one review pass instead of one diff at a time.
+- **Spec templates** (`constance-specs`): fills job-spec skeletons (feature, test, bugfix, refactor, docs) that always end in a
+  "Done when:" line.
+- **Backlog refill** (`constance-refill`): turns open backlog items into queued tasks when the ready queue runs low and free slots
+  exist.
+- **Auto-retry** (`constance-retry`): a job that failed on its own gets one automatic redo carrying the tail of its error output, still
+  bound by the second-try rule.
+- **Progress ping** (`constance-progress`): one line on what the free workers burned, what that buys per 1% of her session, and how
+  many copies are running, plus a throttled desktop notification.
+- **Ratio report** (`constance-ratio-report`): after a goal, one honest look at free-agent tokens per point of her session spent, Opus
+  routing, slot idleness and top fixes.
+- **Resume plan** (`constance-resume`): decides whether a goal paused by Claude's own limit resumes after the stated reset, and keeps a
+  ledger of the times she had to ask the owner.
+
 ### The agent catalog
 
 Beyond the eleven agents it reads directly, the plugin has a built-in catalog (`agents-catalog.json`) of CLI agents. An agent is
