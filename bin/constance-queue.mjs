@@ -13,8 +13,25 @@ export function queueFile(dir = stateDir()) {
 function readAll(dir = stateDir()) {
   try {
     const d = JSON.parse(fs.readFileSync(queueFile(dir), "utf8"));
-    return { next: Number(d.next) || 1, projects: d.projects && typeof d.projects === "object" ? d.projects : {} };
-  } catch { return { next: 1, projects: {} }; }
+    const raw = d && typeof d === "object" && d.projects && typeof d.projects === "object" ? d.projects : {};
+    // Null prototype: keys like "__proto__" or "constructor" become own
+    // properties instead of hitting Object.prototype setters/getters.
+    const projects = Object.assign(Object.create(null), raw);
+    // next must be a positive integer; anything else (negative, fractional,
+    // zero, non-numeric) is recomputed as max stored id + 1 so bad ids never
+    // flow into new tasks.
+    let next = Number(d && typeof d === "object" ? d.next : NaN);
+    if (!Number.isInteger(next) || next < 1) {
+      next = 1;
+      for (const list of Object.values(projects)) {
+        if (!Array.isArray(list)) continue;
+        for (const t of list) {
+          if (t && typeof t === "object" && Number.isInteger(t.id) && t.id >= next) next = t.id + 1;
+        }
+      }
+    }
+    return { next, projects };
+  } catch { return { next: 1, projects: Object.create(null) }; }
 }
 
 function writeAll(dir, data) {
@@ -49,6 +66,11 @@ function projectList(data, projectDir) {
   return Array.isArray(list) ? list : null;
 }
 
+// Entries inside the list may themselves be non-objects (null, number, string
+// from a hand edit or torn write): every reader skips them instead of crashing
+// on t.status/t.id.
+const isTask = (t) => t !== null && typeof t === "object";
+
 // Add a ready task for a project. agent is optional: empty means "whoever
 // finishes the current job". Returns the stored task.
 export function addTask(projectDir, { task, files = [], agent = "", items = [], title = "" }, dir = stateDir()) {
@@ -66,7 +88,7 @@ export function addTask(projectDir, { task, files = [], agent = "", items = [], 
 }
 
 export function pendingTasks(projectDir, dir = stateDir()) {
-  return (projectList(readAll(dir), projectDir) || []).filter((t) => t.status === "pending");
+  return (projectList(readAll(dir), projectDir) || []).filter((t) => isTask(t) && t.status === "pending");
 }
 
 // Pending tasks that can start right now, oldest first: a task is skipped when
@@ -94,10 +116,12 @@ export function peekNext(projectDir, dir = stateDir()) {
 }
 
 export function finishTask(projectDir, taskId, jobId, dir = stateDir()) {
-  const data = readAll(dir);
-  const t = (projectList(data, projectDir) || []).find((x) => x.id === taskId);
-  if (t) { t.status = "handed"; t.jobId = jobId; t.handedAt = Date.now(); }
-  writeAll(dir, data);
+  return withLock(dir, () => {
+    const data = readAll(dir);
+    const t = (projectList(data, projectDir) || []).find((x) => isTask(x) && x.id === taskId);
+    if (t) { t.status = "handed"; t.jobId = jobId; t.handedAt = Date.now(); }
+    writeAll(dir, data);
+  });
 }
 
 export function removeTask(projectDir, taskId, dir = stateDir()) {
@@ -105,7 +129,7 @@ export function removeTask(projectDir, taskId, dir = stateDir()) {
     const data = readAll(dir);
     const list = projectList(data, projectDir);
     if (!list) return false;
-    const i = list.findIndex((x) => x.id === taskId);
+    const i = list.findIndex((x) => isTask(x) && x.id === taskId);
     if (i < 0) return false;
     list.splice(i, 1);
     if (!list.length) delete data.projects[projectDir];
