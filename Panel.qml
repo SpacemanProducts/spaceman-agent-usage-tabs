@@ -974,10 +974,10 @@ Panel {
     }
     return rows
   }
-  // "Devin copies: 3 of 10 running · 2 held: machine busy: load 7.1 on 8 cores (starts under 6.4)".
+  // "Devin copies: 3/10 · 2 held: machine busy: load 7.1 on 8 cores (starts under 6.4)".
   function constanceCopiesLine(c) {
     if (!c) return ""
-    var line = constanceAgentName(c.agent) + " copies: " + c.running + " of " + c.limit + " running"
+    var line = constanceAgentName(c.agent) + " copies: " + c.running + "/" + c.limit
     if (c.held > 0) line += " · " + c.held + " held: " + c.heldReason
     return line
   }
@@ -2781,7 +2781,7 @@ Panel {
               visible: !root.constanceActive || root.constanceAddingGoal || root.constanceEditId !== ""
               width: parent.width
               spacing: Style.space(10)
-              PanelSectionHeader { width: parent.width; text: root.constanceEditId !== "" ? "EDIT A QUEUED GOAL" : (root.constanceActive ? "ADD A GOAL TO HER QUEUE" : "GOAL") }
+              PanelSectionHeader { width: parent.width; text: root.constanceEditId !== "" ? "EDIT GOAL" : (root.constanceActive ? "ADD A GOAL" : "GOAL") }
               Rectangle {
                 id: goalBox
                 width: parent.width
@@ -2844,7 +2844,7 @@ Panel {
                     id: goLabel
                     anchors.centerIn: parent
                     textFormat: Text.PlainText
-                    text: constanceStarter.running ? "Starting..." : (root.constanceEditId !== "" ? "Save changes" : (root.constanceActive ? "Add to queue" : "Give it to Constance"))
+                    text: constanceStarter.running ? "Starting..." : (root.constanceEditId !== "" ? "Save changes" : (root.constanceActive ? "Add to queue" : "Start"))
                     color: Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
@@ -3081,7 +3081,7 @@ Panel {
               Item {
                 width: parent.width
                 height: Math.max(queueHeader.implicitHeight, queueActions.height)
-                PanelSectionHeader { id: queueHeader; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "GOAL QUEUE" + (root.constanceGoalQueue.goals.length ? " (" + root.constanceGoalQueue.goals.length + ")" : "") }
+                PanelSectionHeader { id: queueHeader; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "QUEUE" + (root.constanceGoalQueue.goals.length ? " (" + root.constanceGoalQueue.goals.length + ")" : "") }
                 Row {
                   id: queueActions
                   anchors.right: parent.right
@@ -3107,7 +3107,7 @@ Panel {
                 width: parent.width
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                text: "Stopped for you: " + root.constanceGoalQueue.paused + ". Start next when you're ready."
+                text: "Stopped for you: " + root.constanceGoalQueue.paused
                 color: root.amber
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -3117,7 +3117,7 @@ Panel {
                 width: parent.width
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                text: "Nothing queued. Add goals while she works; each starts by itself when the one before ends well."
+                text: "Nothing queued."
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -3262,7 +3262,10 @@ Panel {
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
                       }
+                      // Closed: worker, title and the status word only. Time, tokens, items and
+                      // files open with the card (queued tasks can't open, so theirs stays).
                       Text {
+                        visible: jobCard.open || jobCard.modelData.id === null
                         width: parent.width
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
@@ -3274,7 +3277,7 @@ Panel {
                         font.pixelSize: Style.font.caption
                       }
                       Text {
-                        visible: text !== ""
+                        visible: jobCard.open && text !== ""
                         width: parent.width
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
@@ -3513,7 +3516,7 @@ Panel {
               visible: root.constanceLogOpen && root.constanceLogShown.length === 0
               width: parent.width
               textFormat: Text.PlainText
-              text: (root.constance.log || []).length ? "Nothing matches those filters." : "Nothing yet. Every task she hands out, and what comes back, shows here."
+              text: (root.constance.log || []).length ? "Nothing matches those filters." : "Nothing yet."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -3657,7 +3660,7 @@ Panel {
                 font.pixelSize: Style.font.caption
               }
 
-              PanelSectionHeader { width: parent.width; text: "WAITING ON LIMITS" }
+              PanelSectionHeader { width: parent.width; text: "WAITING" }
               Repeater {
                 model: root.constanceGroups.waiting
                 ConstanceAgentRow { }
