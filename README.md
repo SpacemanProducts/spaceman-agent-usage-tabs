@@ -324,6 +324,20 @@ for remaining credits), and agents with nothing of their own to read (Goose, Cru
 **What each tab can't read is said plainly.** OpenCode (no published limit for its free models), Kimi (not signed in) and Amp (its
 `amp usage` gives a credit balance and dollar costs, which this panel never shows; only its 7-day token total is used) show a short "Can't read: ..." line while they have no meters.
 
+### Freebuff and Kilo Code
+
+Both get a Cook Meter tab, but read only local usage records: **Kilo Code** from its `kilo.db`
+(tokens, requests and cost), **Freebuff** from its run-state credits and tokens. Plan limits and
+reset windows are cloud-only for both, so neither gets meters — each says so in one calm line.
+Both keep file logins, not the keyring, so neither needs `constanceKeyringAgents`.
+
+For Constance, **Kilo Code is a free-only worker**: it runs `kilo run --auto -m kilo-auto/free`,
+up to 2 copies ranked right after Devin, and a run that reports a paid model or any cost over 0
+fails the job. **Freebuff is never delegated to** — its CLI has no headless mode (interactive TUI
+only), so its tab is shown but it can't take work, and its sponsor banners are stripped from the
+text Constance reviews. The research behind both is in
+[docs/agents-freebuff-kilo.md](docs/agents-freebuff-kilo.md).
+
 ### The handoff note
 
 When a **session** meter reaches **90% or more**, the plugin offers to write `handoff/HANDOFF.md` in the active repo: what was being
