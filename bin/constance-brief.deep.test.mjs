@@ -581,4 +581,80 @@ for (const [label, raw] of [
   assert.throws(() => buildBrief(d, { exec: () => { throw new Error("boom"); } }), /boom/, "a throwing exec propagates (no guard)");
 }
 
+// ---------- round 2: leftovers ----------
+
+// CLAUDE.md / rules.md that are DIRECTORIES read as no rules at all.
+{
+  const d = path.join(tmp, "dirrules");
+  fs.mkdirSync(path.join(d, "CLAUDE.md"), { recursive: true });
+  fs.mkdirSync(path.join(d, ".constance", "rules.md"), { recursive: true });
+  assert.deepEqual(rulesLines(d), []);
+  assert.deepEqual(neverTouch(d), [".git/", "settings/credentials files"]);
+}
+// rulesLines on a dir that does not exist at all: every read is caught.
+assert.deepEqual(rulesLines(path.join(tmp, "gone-again")), []);
+assert.deepEqual(neverTouch(path.join(tmp, "gone-again")), [".git/", "settings/credentials files"]);
+// CRLF rules.md splits and trims the same as LF.
+{
+  const d = path.join(tmp, "crlf");
+  fs.mkdirSync(path.join(d, ".constance"), { recursive: true });
+  fs.writeFileSync(path.join(d, ".constance", "rules.md"), "one\r\n two \r\n\r\nthree\r\n");
+  assert.deepEqual(rulesLines(d), ["one", "two", "three"]);
+}
+// neverTouch dedupes a repeated token (Set); the path regex grabs maximal
+// runs, so "mya/b.txtc" is itself one token and IS collected.
+{
+  const d = mkClaude("## Working rules\n\n- Never touch a/b.txt and a/b.txt again; see mya/b.txtc too\n");
+  const nt = neverTouch(d);
+  assert.equal(nt.filter((t) => t === "a/b.txt").length, 1, "duplicate tokens collapse");
+  assert.ok(nt.includes("mya/b.txtc"), "path-looking runs are collected whole, even inside 'words' (quirk)");
+}
+// A heading indented with leading whitespace still opens the section.
+assert.deepEqual(bullets(mkClaude("intro\n   ## Working rules\n\n- indented heading\n")), ["indented heading"]);
+// A bullet of EXACTLY 160 chars is kept whole; 161 is cut.
+{
+  // The length check runs AFTER the marker is stripped, so build to N body chars.
+  const body160 = "z".repeat(160);
+  const got160 = bullets(mkClaude(`## Working rules\n\n- ${body160}\n`))[0];
+  assert.equal(got160.length, 160, "a 160-char bullet is not truncated");
+  const got161 = bullets(mkClaude(`## Working rules\n\n- ${"z".repeat(161)}\n`))[0];
+  assert.ok(got161.length < 161, "a 161-char bullet is cut");
+}
+// A dir containing ONLY hidden files has an empty layout.
+{
+  const d = path.join(tmp, "onlyhidden");
+  fs.mkdirSync(d);
+  fs.writeFileSync(path.join(d, ".env"), "x\n");
+  fs.mkdirSync(path.join(d, ".git"));
+  const b = buildBrief(d);
+  assert.match(b, /Layout: \(empty\)/);
+  assert.match(b, /Files: 0/, "the walk skips every hidden entry");
+}
+// basename with spaces/unicode survives into the title line.
+{
+  const d = path.join(tmp, "my projé");
+  fs.mkdirSync(d);
+  assert.match(buildBrief(d), /^# my projé$/m);
+}
+// A deeply nested nonexistent cacheDir is created recursively.
+{
+  const d = path.join(tmp, "deepcache-proj");
+  fs.mkdirSync(d);
+  const cd = path.join(tmp, "a", "b", "c", "d");
+  const b = briefFor(d, { cacheDir: cd, now: T0 });
+  assert.equal(typeof b, "string");
+  assert.ok(fs.existsSync(path.join(cd, cacheName(d))), "nested cacheDir was created");
+}
+// Sequential calls are the only "concurrency" this sync module has: the second
+// call is served from the file the first wrote, byte-identical.
+{
+  const d = path.join(tmp, "seq");
+  fs.mkdirSync(d);
+  const cd = fs.mkdtempSync(path.join(tmp, "seq-cache-"));
+  const a = briefFor(d, { cacheDir: cd, now: T0 });
+  const b = briefFor(d, { cacheDir: cd, now: T0 + 500 });
+  assert.equal(a, b);
+  assert.equal(fs.readdirSync(cd).filter((f) => f.endsWith(".json")).length, 1, "still exactly one cache file");
+}
+
 console.log("constance-brief.deep: ok");
