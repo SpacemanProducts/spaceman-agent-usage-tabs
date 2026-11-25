@@ -42,7 +42,7 @@ export function editGoal(dir, id, { text, dir: folder } = {}) {
   return change(dir, (q) => {
     const g = q.goals.find((x) => x.id === id);
     if (!g) throw new Error(`No queued goal ${id}.`);
-    if (text !== undefined) { const t = String(text).trim(); if (!t) throw new Error("A goal can't be empty."); g.text = t; }
+    if (text !== undefined && text !== null) { const t = String(text).trim(); if (!t) throw new Error("A goal can't be empty."); g.text = t; }
     if (folder) g.dir = folder;
     return g;
   });
@@ -54,7 +54,8 @@ export function moveGoal(dir, id, to) {
     const i = q.goals.findIndex((g) => g.id === id);
     if (i < 0) throw new Error(`No queued goal ${id}.`);
     const n = q.goals.length;
-    let j = to === "up" ? i - 1 : to === "down" ? i + 1 : to === "top" ? 0 : Number(to);
+    let j = to === "up" ? i - 1 : to === "down" ? i + 1 : to === "top" ? 0
+      : typeof to === "number" || (typeof to === "string" && to.trim() !== "") ? Number(to) : NaN;
     if (!Number.isInteger(j)) throw new Error("Move it up, down, top or to a position.");
     j = Math.max(0, Math.min(n - 1, j));
     const [g] = q.goals.splice(i, 1); q.goals.splice(j, 0, g);

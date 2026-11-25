@@ -270,26 +270,35 @@ assert.deepEqual(needsOwner({ id: "g", text: "x", status: "paused" }, [J(1, "con
   ["job 1 hit a merge conflict"], "paused goals still report job problems");
 assert.deepEqual(needsOwner({ id: "g", text: "x", status: "running" }, []), [], "running goal: nothing yet");
 
-// ---- Known issues found while writing these tests (constance-goalqueue.mjs is NOT
-// modified by this job; uncomment to reproduce each one) -------------------------------
-//
-// 1. moveGoal treats "", null, false and [] as position 0: Number("") === 0, so an empty
-//    or missing move target silently moves the goal to the TOP instead of throwing
-//    "Move it up, down, top or to a position." Reachable from the CLI as
-//    `C goals move <id> ""`.
-// moveGoal(dir, solo.id, ""); // currently moves to index 0; should throw like "sideways"
-//
-// 2. editGoal(dir, id, { text: null }) writes the literal string "null" as the goal text:
-//    the guard is `text !== undefined`, and String(null).trim() === "null" is truthy.
-// editGoal(dir, solo.id, { text: null }); // currently sets text to "null"; null should be
-//                                        // rejected or ignored like undefined
-//
-// 3. needsOwner matches jobs with strict `j.goal === goal.id`, but checklist() counts a
-//    job with NO `goal` field as belonging to the goal (`!j.goal || j.goal === goal.id`).
-//    A conflict/open/finished job lacking `goal` is invisible to needsOwner' direct checks
-//    (and, untagged on a multi-item goal, to the checklist too), so the queue can move on
-//    past a real problem. Every job created by constance.mjs sets `goal`, so this is
-//    latent — but the two filters disagree.
+// ---- Regression tests: bugs found while writing these tests, now fixed ---------------
+// 1. moveGoal used to treat "", null, false and [] as position 0 (Number("") === 0), so an
+//    empty or missing move target silently moved the goal to the TOP. It now throws like
+//    any other bad target. Reachable from the CLI as `C goals move <id> ""`.
+fresh();
+const mv = addGoal(dir, { text: "mv", dir: "/mv" });
+for (const bad of ["", "   ", null, false, [], {}]) {
+  assert.throws(() => moveGoal(dir, mv.id, bad), /up, down/, `to=${JSON.stringify(bad)}`);
+}
+assert.deepEqual(readGoalQueue(dir).goals.map((g) => g.id), [mv.id], "rejected moves change nothing");
+// Sanity: the still-valid targets keep working on the same goal.
+moveGoal(dir, mv.id, "top");
+moveGoal(dir, mv.id, 0);
+assert.deepEqual(readGoalQueue(dir).goals.map((g) => g.id), [mv.id]);
+// 2. editGoal(dir, id, { text: null }) used to write the literal string "null" as the goal
+//    text. null is now ignored like undefined: a partial update that changes nothing.
+const beforeNull = fs.readFileSync(qfile, "utf8");
+editGoal(dir, mv.id, { text: null });
+assert.equal(readGoalQueue(dir).goals[0].text, "mv", "text: null leaves the text alone");
+assert.equal(fs.readFileSync(qfile, "utf8"), beforeNull, "a null-text edit changes nothing on disk");
+editGoal(dir, mv.id, { text: null, dir: "/mv2" });
+assert.equal(readGoalQueue(dir).goals[0].dir, "/mv2", "null text does not block a dir edit");
+assert.throws(() => editGoal(dir, mv.id, { text: "" }), /empty/, "empty string still rejected");
+// 3. LEFT AS-IS (documented disagreement, not clearly wrong): needsOwner matches jobs with
+//    strict `j.goal === goal.id`, while checklist() also counts a job with NO `goal` field
+//    (`!j.goal || j.goal === goal.id`). The active tests above pin goal-less jobs as NOT
+//    counting in needsOwner' own filters (see the "foreign and goal-less jobs" case), every
+//    job constance.mjs creates sets `goal`, and the two filters disagreeing is latent — so
+//    the strict match stays:
 // needsOwner({ id: "g", text: "1. a\n2. b", status: "done" }, [{ id: 9, status: "conflict" }], { practice: true });
 // // currently returns [] — arguably should report "job 9 hit a merge conflict"
 
