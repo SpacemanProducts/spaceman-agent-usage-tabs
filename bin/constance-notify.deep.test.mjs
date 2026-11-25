@@ -164,11 +164,13 @@ assert.deepEqual(notificationsIn(undefined), []);
   assert.equal(evs[1].summary, 'Devin finished');
 }
 
-// BUG 3 (commented out): a STRING arg containing the Member= signature resets
-// the parser's collection, so the notification is dropped entirely.
-// const evil = notificationsIn(full('Ghostty', '', 'see Interface=org.freedesktop.Notifications  Member=Notify here', 'Grok finished'));
-// assert.equal(evil.length, 1, 'a STRING value must never be read as a header line');
-// assert.equal(evil[0].summary, 'see Interface=org.freedesktop.Notifications  Member=Notify here');
+// A STRING arg containing the Member= signature must not reset the parser's
+// collection — notification text is data, never a header.
+{
+  const evil = notificationsIn(full('Ghostty', '', 'see Interface=org.freedesktop.Notifications  Member=Notify here', 'Grok finished'));
+  assert.equal(evil.length, 1, 'a STRING value must never be read as a header line');
+  assert.equal(evil[0].summary, 'see Interface=org.freedesktop.Notifications  Member=Notify here');
+}
 
 // ---------- agentInText / agentApp / allowedSender ----------
 
@@ -317,14 +319,16 @@ for (const status of ['queued', 'held', 'accepted', 'merged', 'failed', 'Running
   assert.equal(m.dir, undefined);
 }
 
-// BUG 6 (commented out): byDir uses String.includes, so a job whose dir is a
-// prefix of another's steals the match when it appears first in the array.
-// const prefixJobs = [
-//   { id: 40, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 },
-//   { id: 41, agent: 'grok', status: 'running', dir: repoB, startedAt: 2 },
-// ];
-// const pm = matchJob(`Grok finished in ${repoB}`, prefixJobs);
-// assert.equal(pm.job, 41, 'the longer, exact dir should win over a prefix dir');
+// byDir requires a whole path token: a job whose dir is a prefix of another's
+// must not steal the match for the longer path.
+{
+  const prefixJobs = [
+    { id: 40, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 },
+    { id: 41, agent: 'grok', status: 'running', dir: repoB, startedAt: 2 },
+  ];
+  const pm = matchJob(`Grok finished in ${repoB}`, prefixJobs);
+  assert.equal(pm.job, 41, 'the longer, exact dir should win over a prefix dir');
+}
 
 // ---------- inspectJobDir ----------
 
@@ -399,11 +403,10 @@ assert.equal(logSaysFinished('   \n  '), false);
 // clip() can split a surrogate pair at the boundary, leaving a lone surrogate.
 {
   const sig = jobFinishSignal({ id: 1, agent: 'grok', summary: 'a'.repeat(118) + '\u{1F600}' + 'b' }, { source: 'exit' });
-  // 'a'*118 + emoji(2 units) + 'b' = 121 UTF-16 units -> slice(0,119) keeps
-  // 118 a's + the emoji's HIGH surrogate only.
-  // BUG (commented out): desired behaviour keeps the pair intact or drops it.
-  // assert.equal(/^[\uD800-\uDBFF]$/.test(sig.summary[118] || ''), false, 'no lone surrogate');
-  assert.equal(sig.summary.length, 120);
+  // 'a'*118 + emoji(2 units) + 'b' = 121 UTF-16 units -> the cut would keep
+  // 118 a's + the emoji's HIGH surrogate only; clip must drop the half pair.
+  assert.equal(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(sig.summary), false, 'no lone surrogate');
+  assert.ok(sig.summary.length <= 120);
 }
 // runDir that does not exist still produces an inspection string, no throw.
 {
@@ -479,20 +482,25 @@ const freshDir = () => fs.mkdtempSync(path.join(root, 'h-'));
     { jobs: [{ id: 1, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 }], storeDir: d });
   assert.equal(ev.summary, '42');
 }
-// A dirless running job crashes handleNotification via inspectJobDir.
-// BUG 2 (commented out):
-// const dCrash = freshDir();
-// const evCrash = handleNotification({ app: 'Ghostty', summary: 'Grok finished', body: '' },
-//   { jobs: [{ id: 30, agent: 'grok', status: 'running', startedAt: 1 }], storeDir: dCrash });
-// assert.equal(evCrash.kind, 'agent-done');
+// A dirless running job must not crash handleNotification: inspectJobDir
+// reports "no run dir" instead of throwing inside path.join.
+{
+  const dCrash = freshDir();
+  const evCrash = handleNotification({ app: 'Ghostty', summary: 'Grok finished', body: '' },
+    { jobs: [{ id: 30, agent: 'grok', status: 'running', startedAt: 1 }], storeDir: dCrash });
+  assert.equal(evCrash.kind, 'agent-done');
+  assert.equal(evCrash.inspection, 'no run dir');
+}
 
-// BUG 1 (commented out): an empty summary makes ev.summary fall back to the
-// BODY, storing notification text the privacy comment says is never kept.
-// const dBody = freshDir();
-// const evBody = handleNotification({ app: 'Ghostty', summary: '', body: 'Grok finished SECRET DETAILS' },
-//   { jobs: [{ id: 1, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 }], storeDir: dBody });
-// assert.ok(!/SECRET DETAILS/.test(JSON.stringify(evBody)), 'body text must not be stored as summary');
-// assert.ok(!/SECRET DETAILS/.test(fs.readFileSync(notifyFile(dBody), 'utf8')));
+// An empty summary must never fall back to the body: the body is matched on
+// but is never stored, on the event or on disk.
+{
+  const dBody = freshDir();
+  const evBody = handleNotification({ app: 'Ghostty', summary: '', body: 'Grok finished SECRET DETAILS' },
+    { jobs: [{ id: 1, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 }], storeDir: dBody });
+  assert.ok(!/SECRET DETAILS/.test(JSON.stringify(evBody)), 'body text must not be stored as summary');
+  assert.ok(!/SECRET DETAILS/.test(fs.readFileSync(notifyFile(dBody), 'utf8')));
+}
 
 // ---------- recordSignal / recentSignals ----------
 
@@ -533,28 +541,25 @@ const freshDir = () => fs.mkdtempSync(path.join(root, 'h-'));
   assert.equal(recentSignals(d, 2).length, 2);
   assert.equal(recentSignals(d, 2)[0].n, 3);
   assert.equal(recentSignals(d, 99).length, 5, 'n larger than the file returns all');
-  // BUG 4 (commented out): slice(-0) === slice(0), so n=0 returns EVERYTHING.
-  // assert.deepEqual(recentSignals(d, 0), [], 'n=0 should return no signals');
+  assert.deepEqual(recentSignals(d, 0), [], 'n=0 should return no signals');
 }
-// BUG 5 (commented out): one corrupt line makes JSON.parse throw inside the
-// map, the catch returns [] for the WHOLE file — all signals lost, dedupe
-// silently disabled for subsequent writes.
-// {
-//   const d = freshDir();
-//   recordSignal(d, { at: 1, agent: 'grok', kind: 'agent-done', job: 1 });
-//   fs.appendFileSync(notifyFile(d), 'this is not json\n');
-//   recordSignal(d, { at: 2, agent: 'grok', kind: 'agent-done', job: 1 });
-//   const sigs = recentSignals(d).filter(Boolean);
-//   assert.equal(sigs.length, 1, 'the good line survives a corrupt neighbour');
-//   assert.equal(sigs.filter((s) => s.job === 1).length, 1, 'dedupe still sees the old signal');
-// }
-// BUG 7 (commented out): recordSignal(storeDir, null) writes a literal
-// "null" line and reports success.
-// {
-//   const d = freshDir();
-//   assert.equal(recordSignal(d, null), false, 'a null event is not a signal');
-//   assert.deepEqual(recentSignals(d), []);
-// }
+// One corrupt line must not hide every signal: bad lines are skipped, the
+// good ones still parse, and dedupe still sees them.
+{
+  const d = freshDir();
+  recordSignal(d, { at: 1, agent: 'grok', kind: 'agent-done', job: 1 });
+  fs.appendFileSync(notifyFile(d), 'this is not json\n');
+  recordSignal(d, { at: 2, agent: 'grok', kind: 'agent-done', job: 1 });
+  const sigs = recentSignals(d).filter(Boolean);
+  assert.equal(sigs.length, 1, 'the good line survives a corrupt neighbour');
+  assert.equal(sigs.filter((s) => s.job === 1).length, 1, 'dedupe still sees the old signal');
+}
+// A null event is not a signal: nothing is written, nothing is reported.
+{
+  const d = freshDir();
+  assert.equal(recordSignal(d, null), false, 'a null event is not a signal');
+  assert.deepEqual(recentSignals(d), []);
+}
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log('constance-notify.deep: tests passed');
