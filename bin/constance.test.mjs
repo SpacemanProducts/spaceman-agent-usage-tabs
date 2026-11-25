@@ -79,7 +79,9 @@ before=$(git rev-parse HEAD)
 echo "devin $name" > "$name"; git add "$name"; git commit -qm "devin: $name" || true
 if grep -q "sneaky copy" <<<"$p"; then echo cover > cover.txt; git add cover.txt; git commit -qm "devin: cover outside its list" || true; fi
 after=$(git rev-parse HEAD); c=""; [[ "$after" != "$before" ]] && c="$after"
-echo "{\\"summary\\": \\"added \${name%.*} in $here\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]}" > "$f"
+# The "selfmerge" marker makes it report its tests passed, so the job can self-merge.
+t=""; grep -q selfmerge <<<"$p" && t=', "tests": "pass"'
+echo "{\\"summary\\": \\"added \${name%.*} in $here\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]$t}" > "$f"
 `, { mode: 0o755 });
 // Fake Constance: delegate (one read-only investigation, then the fix), wait, review, report.
 // Records its arguments.
@@ -980,6 +982,121 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 30
   const pj = stored.jobs.find((j) => j.id === tj.id);
   assert.match(pj.prompt, /write the file \/tmp\/\.constance\/done-\d+\.json/, "the prompt points inside the sandbox tmp");
   assert.ok(!fs.readdirSync(path.join(repo, ".constance")).some((f) => f.startsWith("done-")), "no done file in the project folder");
+}
+
+// Self-merge: a copy that reports its tests passed, stays inside its files and
+// passes the guard merges itself the moment it finishes — before any review.
+// `reviews` lists it for her background review; send-back reverts the merge,
+// accept only confirms it.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files sm1.txt --task "add sm1 selfmerge" >> "${root}/sm.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/sm-wait1.json"
+$C reviews > "${root}/sm-reviews1.json"
+id1=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sm-wait1.json")
+$C review "$id1" send-back --note "revert it" >> "${root}/sm.out" 2>&1
+$C delegate --agent devin --files sm2.txt --task "add sm2 selfmerge" >> "${root}/sm.out" 2>&1
+$C wait --timeout 60 > "${root}/sm-wait2.json"
+id2=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sm-wait2.json")
+$C review "$id2" accept --note "fine" >> "${root}/sm.out" 2>&1
+echo "SM report: done."
+`, { mode: 0o755 });
+writeData();
+const porcelainBeforeSm = git("status", "--porcelain");
+assert.equal(run("start", "--dir", repo, "--goal", "selfmerge goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the selfmerge goal finishes: " + JSON.stringify(status().goal));
+{
+  const sm = status();
+  const w1 = JSON.parse(fs.readFileSync(path.join(root, "sm-wait1.json"), "utf8"));
+  const rev1 = JSON.parse(fs.readFileSync(path.join(root, "sm-reviews1.json"), "utf8"));
+  const j1 = sm.jobs.find((j) => j.id === w1.review.id), j2 = sm.jobs.find((j) => j.files.includes("sm2.txt") && j.goal === sm.goal.id);
+  assert.ok(j1 && j2, "both selfmerge jobs ran");
+  assert.equal(j1.files[0], "sm1.txt");
+  assert.equal(rev1.length, 1, "reviews lists the pending self-merge: " + JSON.stringify(rev1));
+  assert.equal(rev1[0].job, j1.id); assert.equal(rev1[0].branch, j1.branch);
+  assert.equal(j1.status, "sent back", "send-back on a merged job marks it sent back: " + j1.status);
+  assert.ok(j1.revertedAt, "the revert is recorded on the job");
+  assert.equal(j2.status, "accepted", "accept on a merged job confirms it: " + j2.status);
+  assert.ok(!fs.existsSync(path.join(repo, "sm1.txt")), "the reverted merge took its file back out");
+  assert.ok(fs.existsSync(path.join(repo, "sm2.txt")), "the confirmed merge stayed");
+  const pend = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "reviews.json"), "utf8"));
+  assert.equal(pend.pending.length, 0, "no review left pending");
+  assert.deepEqual(pend.reviewed.map((r) => r.verdict).sort(), ["ok", "reverted"], "both reviews recorded");
+  assert.ok(sm.log.some((l) => l.kind === "merge" && /self-merged constance\/job-/.test(l.text)), "self-merges are in the log");
+  assert.ok(sm.log.some((l) => l.kind === "revert" && l.job === j1.id), "the revert is in the log");
+  assert.equal(git("branch", "--list", "constance/*").trim(), "", "self-merged branches are deleted");
+  assert.equal(git("status", "--porcelain"), porcelainBeforeSm, "the repo is left as it was found");
+}
+
+// Self-merge never fires on a guard violation: the sneaky copy reports its
+// tests passed but committed outside its list, so it stays "finished" for the
+// normal review and never enters the pending-review list.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files gv1.txt --task "sneaky copy selfmerge" >> "${root}/gv.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/gv-wait.json"
+$C jobs > "${root}/gv-jobs.json"
+id=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.files.includes("gv1.txt")).id)' "${root}/gv-jobs.json")
+$C review "$id" accept --note "ok" >> "${root}/gv.out" 2>&1
+echo "GV report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "selfmerge guard").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the selfmerge guard goal finishes: " + JSON.stringify(status().goal));
+{
+  const mid = JSON.parse(fs.readFileSync(path.join(root, "gv-jobs.json"), "utf8"));
+  const gj = mid.jobs.find((j) => j.files.includes("gv1.txt"));
+  assert.equal(gj.status, "finished", "a guard violation never self-merges: " + gj.status);
+  const gv = status();
+  const gj2 = gv.jobs.find((j) => j.id === gj.id);
+  assert.ok(gj2.guardViolation?.some((v) => v.includes("cover.txt")), "the violation is flagged: " + JSON.stringify(gj2.guardViolation));
+  assert.equal(gj2.status, "accepted", "the normal review path still merges it");
+  assert.ok(!gv.log.some((l) => l.kind === "merge" && /self-merged/.test(l.text) && l.job === gj.id), "no self-merge for it");
+  const pend = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "reviews.json"), "utf8"));
+  assert.ok(!pend.pending.some((p) => p.job === gj.id) && !pend.reviewed.some((p) => p.job === gj.id), "it never entered the review list");
+}
+
+// Slot filling: a queued task that names its agent starts as soon as a copy
+// slot is free — no review needed. sf1 self-merges; sf2 and sf3 are handed to
+// Devin 2 and Devin 3 while sf1 still waits for its background review.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files sf1.txt --task "add sf1 selfmerge" >> "${root}/sf.out" 2>&1
+$C queue --task "add sf2" --files sf2.txt --agent devin >> "${root}/sf.out" 2>&1
+$C queue --task "add sf3" --files sf3.txt --agent devin >> "${root}/sf.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/sf-wait1.json"
+$C jobs > "${root}/sf-jobs-mid.json"
+id1=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait1.json")
+$C review "$id1" accept --note "ok" >> "${root}/sf.out" 2>&1
+$C wait --timeout 60 > "${root}/sf-wait2.json"
+id2=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait2.json")
+$C review "$id2" accept --note "ok" >> "${root}/sf.out" 2>&1
+$C wait --timeout 60 > "${root}/sf-wait3.json"
+id3=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait3.json")
+$C review "$id3" accept --note "ok" >> "${root}/sf.out" 2>&1
+echo "SF report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "slot fill goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 120000), "the slot fill goal finishes: " + JSON.stringify(status().goal));
+{
+  const mid = JSON.parse(fs.readFileSync(path.join(root, "sf-jobs-mid.json"), "utf8"));
+  const sf1 = mid.jobs.find((j) => j.files.includes("sf1.txt"));
+  const handed = mid.jobs.filter((j) => ["sf2.txt", "sf3.txt"].some((f) => j.files.includes(f)));
+  assert.equal(sf1.status, "merged", "sf1 self-merged before any review: " + sf1.status);
+  assert.equal(handed.length, 2, "both queued tasks were handed out while sf1 awaited review: " + JSON.stringify(mid.jobs.map((j) => [j.id, j.task, j.status])));
+  assert.deepEqual(handed.map((j) => j.task).sort(), ["add sf2", "add sf3"]);
+  const sf = status();
+  const all = sf.jobs.filter((j) => j.goal === sf.goal.id);
+  assert.ok(all.every((j) => j.status === "accepted"), "all three reviewed: " + JSON.stringify(all.map((j) => [j.id, j.status])));
+  for (const f of ["sf1.txt", "sf2.txt", "sf3.txt"]) assert.ok(fs.existsSync(path.join(repo, f)), f + " merged");
+  assert.equal(sf.queue.length, 0, "the queue drained itself");
 }
 
 // Every finished or stopped job removed its own sandbox /tmp.

@@ -15,6 +15,7 @@
 //   signals                     recent agent-finished notifications she heard
 //   wait [--timeout S]          block until a job finishes; prints the next one to review, oldest first
 //   review ID accept|send-back --note TEXT        record her verdict
+//   reviews                     self-merged jobs still waiting for her background review
 //   check N [--note TEXT]       tick checklist item N that she did herself
 //   needs-owner TEXT            the goal ends needing the owner: the goal queue stops instead of moving on
 //   job ID                      one job in full (prompt, report, review, its log lines) for the panel's card
@@ -39,7 +40,8 @@ import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } 
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
 import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
 import { NotifyParser, handleNotification, recentSignals, recordSignal, jobFinishSignal, logSaysFinished } from "./constance-notify.mjs";
-import { addTask, peekNext, finishTask, removeTask, queueView } from "./constance-queue.mjs";
+import { addTask, peekNext, finishTask, removeTask, queueView, readyTasks } from "./constance-queue.mjs";
+import { selfMerge, addPending, pendingReviews, markReviewed, revertMerge } from "./constance-selfmerge.mjs";
 import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
 import { logText } from "./constance-logtext.mjs";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
@@ -167,8 +169,9 @@ function sweep() {
     }
     return changed;
   });
-  for (const j of changed) { guardFinished(j); dropJobTmp(j); }
+  for (const j of changed) { guardFinished(j); dropJobTmp(j); maybeSelfMerge(j); }
   for (const { j, source } of signals) recordSignal(store.dir, jobFinishSignal(j, { source, runDir: jobDoneDir(j) }));
+  fillSlots();
   return changed;
 }
 
@@ -247,12 +250,113 @@ function excludeDoneFiles(dir) {
   if (!txt.split("\n").includes(".constance/")) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, (txt && !txt.endsWith("\n") ? "\n" : "") + ".constance/\n"); }
 }
 
+// ---------------------------------------------------------------- self-merge and slot filling
+// A finished copy whose guard is clean, whose branch only touches its allowed
+// files and whose own report says its tests passed merges itself at once
+// (constance-selfmerge.mjs runs the repo's whole suite first, then merges,
+// with one rebase-and-retry on conflict). The merge lands in reviews.json for
+// Constance's background review — accept confirms it, send-back reverts it.
+// A flagged conflict is marked "conflict" and keeps its worktree, exactly like
+// a review-time one; anything else stays "finished" for the normal review.
+// constanceSelfMerge: false turns it all off. Best-effort only: a failure is
+// logged and the sweep moves on, never blocked.
+const reviewsFile = () => path.join(store.dir, "reviews.json");
+const selfMergeOn = () => readSettings().constanceSelfMerge !== false;
+
+// The agent's own word that its tests passed: a done-file `tests` field that
+// says so, or report text naming passing tests. Silence counts as false.
+function ownTestsPassed(done) {
+  if (!done) return false;
+  const t = done.tests;
+  if (t === true || /^(pass|passed|ok|green|success)$/i.test(String(t ?? ""))) return true;
+  const text = `${done.summary || ""}\n${done.report || ""}`;
+  return /\btests?\b[^.\n]{0,80}?\b(pass|passed|green|succeed)/i.test(text) || /\b(pass|passed|green)\b[^.\n]{0,80}?\btests?\b/i.test(text);
+}
+
+// Every file the copy's branch changed against the repo's current branch must
+// sit inside the job's allowed list (its files plus .constance/, same as the
+// guard's). Unreadable git means no.
+function branchDiffOk(j) {
+  const base = spawnSync("git", ["-C", j.dir, "merge-base", "HEAD", j.branch], { encoding: "utf8" });
+  if (base.status !== 0) return false;
+  const d = spawnSync("git", ["-C", j.dir, "diff", "--name-only", `${base.stdout.trim()}..${j.branch}`], { encoding: "utf8" });
+  if (d.status !== 0) return false;
+  const allowed = [...(j.files || []), ".constance/"];
+  return d.stdout.split("\n").filter(Boolean).every((p) => coversPath(allowed, p));
+}
+
+function maybeSelfMerge(j) {
+  try {
+    if (!selfMergeOn() || !j.worktree || !j.branch) return;
+    const fresh = store.read().jobs.find((k) => k.id === j.id);
+    // guardChecked with no guardViolation is the guard's clean bill; without it
+    // there is no proof the run stayed inside its list, so no self-merge.
+    if (!fresh || fresh.status !== "finished" || fresh.selfMergeTried || fresh.guardViolation?.length || !fresh.guardChecked) return;
+    let done = null;
+    try { done = JSON.parse(fs.readFileSync(jobDoneFile(fresh), "utf8")); } catch {}
+    if (!ownTestsPassed(done)) return;   // normal review handles it
+    const checks = { ownTests: true, guard: true, diff: branchDiffOk(fresh) };
+    if (!checks.diff) return;
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.selfMergeTried = true; });
+    const m = withMergeLock(() => selfMerge({ repo: fresh.dir, worktree: fresh.worktree, branch: fresh.branch, checks }));
+    if (m.merged) {
+      keepTokens(true);
+      const did = dropWorktree(fresh.dir, fresh.worktree, fresh.branch, { deleteBranch: true, merged: true });
+      store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "merged"; x.mergedAt = Date.now(); x.mergeCommit = m.commit || ""; x.worktree = ""; x.cleaned = did.join("; "); } });
+      addPending(reviewsFile(), { job: j.id, commit: fresh.commit, branch: fresh.branch });
+      store.log({ kind: "merge", job: j.id, agent: fresh.agent, worker: fresh.worker, text: `self-merged ${fresh.branch}${m.commit ? ` (${String(m.commit).slice(0, 9)})` : ""}; ${did.join("; ")}` });
+      return;
+    }
+    if (m.conflict || m.flagged) {
+      store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "conflict"; x.mergeError = m.reason || ""; } });
+      store.log({ kind: "merge", job: j.id, agent: fresh.agent, worker: fresh.worker, text: `self-merge ${m.conflict ? "conflict" : "failed"} on ${fresh.branch}: ${(m.reason || "").slice(-300)}` });
+      return;
+    }
+    store.log({ kind: "note", job: j.id, agent: fresh.agent, worker: fresh.worker, text: `self-merge didn't land ${fresh.branch}: ${m.reason || "unknown"}` });
+  } catch (e) {
+    store.log({ kind: "note", job: j.id, agent: j.agent, text: `self-merge skipped for job ${j.id}: ${e.message}` });
+  }
+}
+
+// A self-merged job is already in the repo: wherever an accepted job counts
+// (checklist ticks, goal history, the goal-end checks) a merged one counts the
+// same — her later review only confirms it or reverts it.
+const asAccepted = (jobs) => jobs.map((j) => (j.status === "merged" ? { ...j, status: "accepted" } : j));
+
+// Queued tasks never wait for a review: after every sweep (and on status and
+// the driver's heartbeat) a ready task that names its agent goes straight to
+// handOut while that agent has room. Agent-less tasks still go through
+// autoNext when a job is accepted. A refused handoff is retried on the next
+// sweep but logged only once per process.
+const fillMissed = new Set();
+function fillSlots() {
+  try {
+    const s = store.read(), g = s.goal;
+    if (!g || g.status !== "running") return;
+    const dir = g.dir;
+    const busyFiles = s.jobs.filter((j) => ["held", "waiting", "running"].includes(j.status)).flatMap((j) => j.files || []);
+    let slots = 0;
+    for (const agent of Object.keys(PUBLISHED_MAX)) slots += Math.max(0, limitOf(agent) - copySlots(s, agent, dir).length);
+    if (!slots) return;
+    for (const t of readyTasks(dir, { busyFiles, limit: slots }, store.dir)) {
+      if (!t.agent) continue;
+      try {
+        const r = handOut({ agent: t.agent, task: t.task, files: t.files || [], items: parseItemArg(t.items || []), title: t.title || "" });
+        finishTask(dir, t.id, r.job.id, store.dir);
+        store.log({ kind: "note", text: `Ready queue: "${t.task.slice(0, 80)}" went to ${t.agent} automatically as job ${r.job.id} (a copy slot was free).` });
+      } catch (e) {
+        if (!fillMissed.has(t.id)) { fillMissed.add(t.id); store.log({ kind: "note", text: `Ready queue: "${t.task.slice(0, 80)}" stays queued — ${e.message}` }); }
+      }
+    }
+  } catch {}
+}
+
 // Copies of one agent that still hold their slot: held (waiting for room on the
 // machine), waiting/running, finished and awaiting review (the branch isn't
-// merged yet), or conflicted (left for the owner). Accepted, sent-back and
-// stopped jobs free their number.
+// merged yet), merged and awaiting its background review, or conflicted (left
+// for the owner). Accepted, sent-back and stopped jobs free their number.
 function copySlots(s, agent, dir) {
-  return s.jobs.filter((j) => j.agent === agent && j.dir === dir && j.copy && ["held", "waiting", "running", "finished", "conflict"].includes(j.status));
+  return s.jobs.filter((j) => j.agent === agent && j.dir === dir && j.copy && ["held", "waiting", "running", "finished", "merged", "conflict"].includes(j.status));
 }
 function claimCopy(s, agent, dir, limit, prefer = 0) {
   const used = new Set(copySlots(s, agent, dir).map((j) => j.copy));
@@ -525,11 +629,14 @@ async function waitJob() {
     for (const j of sweep()) store.log({ kind: "returned", job: j.id, agent: j.agent, worker: j.worker, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
     releaseHeld();
     const s = store.read();
-    const next = reviewQueue(s.jobs)[0];
+    // Finished jobs and self-merged ones waiting for their background review,
+    // oldest finish first.
+    const next = [...reviewQueue(s.jobs), ...s.jobs.filter((j) => j.status === "merged")]
+      .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0) || a.id - b.id)[0];
     if (next) {
       const files = changedFiles(next.dir, next.commit);
-      // Earlier finished or accepted jobs in this goal that changed the same files: check against them first.
-      const earlier = s.jobs.filter((j) => j.id !== next.id && j.goal === next.goal && ["finished", "accepted"].includes(j.status) && (j.finishedAt || 0) <= (next.finishedAt || 0))
+      // Earlier finished, merged or accepted jobs in this goal that changed the same files: check against them first.
+      const earlier = s.jobs.filter((j) => j.id !== next.id && j.goal === next.goal && ["finished", "merged", "accepted"].includes(j.status) && (j.finishedAt || 0) <= (next.finishedAt || 0))
         .map((j) => ({ id: j.id, agent: j.agent, commit: j.commit, shared: overlaps(changedFiles(j.dir, j.commit), files) })).filter((x) => x.shared.length);
       let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
       return out({ review: { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
@@ -608,6 +715,7 @@ function review() {
   sweep();
   const found = store.read().jobs.find((x) => x.id === id);
   if (!found) fail(`No job ${id}.`);
+  if (found.status === "merged") return reviewMerged(found, verdict, note);
   if (found.status !== "finished") fail(`Job ${id} is ${found.status}; only a finished job can be reviewed.`);
   const j = store.update((s) => { const j = s.jobs.find((x) => x.id === id); if (j) { j.status = verdict === "accept" ? "accepted" : "sent back"; j.reviewNote = note; j.reviewedAt = Date.now(); } return j; });
   store.log({ kind: "review", job: id, agent: j.agent, worker: j.worker, verdict, text: note });
@@ -625,6 +733,31 @@ function review() {
   score(j, verdict);
   const extra = verdict === "accept" ? autoNext(j) : `${cleaned}${(() => { const a = sendBackAdvice(store.read().jobs, j); return a ? ` ${a}` : ""; })()}`;
   out(`Job ${id} ${j.status}.${extra}`);
+}
+
+// The background review of a self-merged job: accept only confirms the merge
+// (the work is already in and its slot frees), send-back reverts the merge
+// commit — never a reset, and a failed revert leaves everything as it was.
+function reviewMerged(j, verdict, note) {
+  store.log({ kind: "review", job: j.id, agent: j.agent, worker: j.worker, verdict, text: note });
+  if (verdict === "accept") {
+    markReviewed(reviewsFile(), j.id, "ok");
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "accepted"; x.reviewNote = note; x.reviewedAt = Date.now(); } });
+    score(j, "accept");
+    out(`Job ${j.id} accepted; its self-merge of ${j.branch || "the branch"} is confirmed.${autoNext(j)}`);
+    return;
+  }
+  const target = j.mergeCommit || j.commit;
+  const rv = withMergeLock(() => revertMerge(j.dir, target));
+  if (!rv.ok) {
+    out(`Job ${j.id} send-back failed: reverting ${String(target).slice(0, 9)} didn't apply (${(rv.output || "").trim().slice(-300)}). It stays merged and pending; nothing was forced.`);
+    return;
+  }
+  markReviewed(reviewsFile(), j.id, "reverted");
+  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "sent back"; x.revertedAt = Date.now(); x.reviewNote = note; x.reviewedAt = Date.now(); } });
+  store.log({ kind: "revert", job: j.id, agent: j.agent, worker: j.worker, text: `reverted the self-merge of ${j.branch || "the branch"}${note ? `: ${note}` : ""}` });
+  score(j, "send-back");
+  out(`Job ${j.id} sent back; its self-merge was reverted.`);
 }
 
 // ---------------------------------------------------------------- the goal and the driver
@@ -709,7 +842,7 @@ function recordHistory(fresh = true) {
   const s = store.read();
   if (!s.goal || ["running", "paused"].includes(s.goal.status)) return null;
   if (readHistory().some((r) => r.id === s.goal.id)) return null;
-  const rec = goalRecord(s.goal, s.jobs, matchJobs(s.jobs, records));
+  const rec = goalRecord(s.goal, asAccepted(s.jobs), matchJobs(s.jobs, records));
   fs.appendFileSync(historyFile(), JSON.stringify(rec) + "\n");
   return rec;
 }
@@ -724,7 +857,12 @@ function tellOwner(title, body) {
 function afterGoal() {
   const s = store.read(), g = s.goal;
   if (!g || ["running", "paused"].includes(g.status)) return false;
-  const why = needsOwner(g, s.jobs, { practice: practiceMode() });
+  const why = needsOwner(g, asAccepted(s.jobs), { practice: practiceMode() });
+  // A self-merged job still owes its background review: ending the goal with
+  // one pending would orphan the revert path, so it stops the queue like an
+  // unreviewed finished job does.
+  const unreviewedMerged = s.jobs.filter((j) => j.goal === g.id && j.status === "merged").map((j) => j.id);
+  if (unreviewedMerged.length) why.push(`job${unreviewedMerged.length > 1 ? "s" : ""} ${unreviewedMerged.join(", ")} merged and still waiting for review`);
   if (why.length) {
     const text = why.join("; ");
     store.update((x) => { if (x.goal && x.goal.id === g.id) x.goal.needsOwner = text.charAt(0).toUpperCase() + text.slice(1) + "."; });
@@ -983,8 +1121,8 @@ async function watch() {
 function openWork(s) {
   const g = s.goal;
   if (!g) return "";
-  const items = checklist(g, s.jobs).items.filter((i) => i.state !== "done").map((i) => i.n);
-  const jobs = s.jobs.filter((j) => (!j.goal || j.goal === g.id) && ["waiting", "held", "running", "finished"].includes(j.status));
+  const items = checklist(g, asAccepted(s.jobs)).items.filter((i) => i.state !== "done").map((i) => i.n);
+  const jobs = s.jobs.filter((j) => (!j.goal || j.goal === g.id) && ["waiting", "held", "running", "finished", "merged"].includes(j.status));
   const parts = [];
   if (items.length) parts.push(`items ${items.join(", ")} are still open`);
   if (jobs.length) parts.push(`jobs ${jobs.map((j) => j.id).join(", ")} are open`);
@@ -1023,7 +1161,7 @@ async function drive() {
         const st = store.read().goal;
         if (!st || st.status === "stopped") return;
         if (!killed && pace(claudeOf(readData())).mode === "stop") { killGroup(g.brainPid); killed = true; }
-        try { releaseHeld(); } catch {}
+        try { releaseHeld(); fillSlots(); } catch {}
         await sleep(5000);
       }
       const st = store.read().goal;
@@ -1047,7 +1185,7 @@ async function drive() {
     const watch = setInterval(() => {
       const st = store.read().goal;
       if (!st || st.status === "stopped") { killGroup(brain.pid); return; }
-      try { releaseHeld(); } catch {}
+      try { releaseHeld(); fillSlots(); } catch {}
       if (pace(claudeOf(readData())).mode === "stop") { pausedByUs = true; killGroup(brain.pid); }
     }, 30e3);
     const code = await new Promise((r) => brain.on("exit", (c) => r(c)));
@@ -1162,9 +1300,10 @@ function boardView(s, d, records) {
   const live = matchJobs(s.jobs, records);
   const gq = readGoalQueue(store.dir);
   return {
-    checklist: checklist(s.goal, s.jobs),
+    checklist: checklist(s.goal, asAccepted(s.jobs)),
     cards: cards({ jobs: s.jobs, goal: s.goal, queue: s.goal && ["running", "paused"].includes(s.goal.status) ? queueView(s.goal.dir, store.dir) : [], live, names: name }),
-    now: nowLine({ goal: s.goal, jobs: s.jobs, names: name, goalQueue: gq.goals, queuePaused: gq.paused }),
+    // A merged job still waits for her review, so the Now line counts it with the finished ones.
+    now: nowLine({ goal: s.goal, jobs: s.jobs.map((j) => (j.status === "merged" ? { ...j, status: "finished" } : j)), names: name, goalQueue: gq.goals, queuePaused: gq.paused }),
     history: history({ records: readHistory(), log: store.readLog(5000), goal: s.goal, jobs: s.jobs, live }),
     goalQueue: gq,
     scorecard: scorecardView(name, s.goal?.dir),
@@ -1185,6 +1324,7 @@ function scorecardView(name, dir) {
 
 function status() {
   const records = keepTokens();
+  fillSlots();
   const s = store.read(), d = readData();
   out({ goal: s.goal, board: boardView(s, d, records), tokens: tokensView(s, d, records), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) });
@@ -1219,6 +1359,7 @@ if (process.argv[1] === SELF) {
   else if (cmd === "delegate") delegate();
   else if (cmd === "wait") await waitJob();
   else if (cmd === "review") review();
+  else if (cmd === "reviews") out(pendingReviews(reviewsFile()));
   else if (cmd === "note") { store.log({ kind: "note", text: process.argv.slice(3).join(" ") }); out("noted"); }
   else if (cmd === "lesson") {
     const text = process.argv.slice(3).join(" ").trim();
@@ -1239,5 +1380,5 @@ if (process.argv[1] === SELF) {
     out("noted: the goal queue waits for the owner after this goal");
   }
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|agents|scorecard|pace|jobs|job|delegate|wait|review|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|stop|recover");
+  else fail("Usage: constance.mjs start|status|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|stop|recover");
 }
