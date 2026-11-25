@@ -30,10 +30,9 @@ try {
   assert.equal(resumePlan(true).action, "none");
   assert.equal(resumePlan([]).action, "none", "an array has no .status");
   assert.equal(resumePlan({}).action, "none");
-  // BUG: resumePlan(null) throws "Cannot destructure property 'wall' of 'null'" —
-  // the = {} default only covers undefined. A caller passing a nullish options
-  // object crashes the tick instead of getting { action: "none" }.
-  // assert.throws(() => resumePlan(null), TypeError); // BUG: should return action "none"
+  // Regression: resumePlan(null) must answer "none", not throw — the old
+  // destructuring default only covered undefined and crashed the tick.
+  assert.equal(resumePlan(null).action, "none", "null options answer none, not a crash");
 
   // ---- goalStatus wrong types: only {status:"paused"} + a wall pauseReason counts.
   for (const bad of [0, false, [], {}, { status: "Paused" }, { status: "paused " }, { status: 1 }, { status: ["paused"] }])
@@ -85,14 +84,14 @@ try {
   assert.equal(P({ now: 0 }).action, "wait", "now=0 is far before the wall");
   assert.equal(P({ now: -1e15 }).action, "wait", "negative now still waits");
   assert.equal(P({ now: UNTIL + RESUME_GRACE_MS + 5 }).action, "resume");
-  assert.equal(P({ now: Infinity }).action, "resume", "infinite now is past every wall");
+  assert.equal(P({ now: Infinity }).action, "none", "non-finite now is an unreadable clock, never a resume");
+  assert.equal(P({ now: -Infinity }).action, "none", "-Infinity now is unreadable too");
   assert.equal(P({ now: "5000" }).action, "wait", "numeric-string now coerces in the < compare");
-  assert.equal(P({ now: "not a number" }).action, "resume", "NaN now: 'NaN < ready' is false -> resume");
-  assert.equal(P({ now: {} }).action, "resume", "object now stringifies to NaN -> resume");
-  // BUG: a NaN/garbage clock answers "resume" — she restarts straight into the
-  // wall the plan exists to avoid. resumePlan should treat a non-finite `now`
-  // as unreadable and answer "none" (or "wait"), never "resume".
-  // assert.equal(P({ now: NaN }).action, "none"); // BUG: currently "resume"
+  assert.equal(P({ now: "not a number" }).action, "none", "NaN now: an unreadable clock never resumes");
+  assert.equal(P({ now: {} }).action, "none", "object now stringifies to NaN -> none");
+  // Regression: a NaN/garbage clock must never answer "resume" — she would
+  // restart straight into the wall the plan exists to avoid.
+  assert.equal(P({ now: NaN }).action, "none");
 
   // ---- until at/below epoch: the grace arithmetic still applies.
   assert.equal(P({ wall: { until: 0 }, now: 0 }).action, "wait", "until=0, now=0: grace not yet served");
