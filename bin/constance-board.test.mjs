@@ -81,4 +81,22 @@ assert.equal(h[1].took, 2e6);
 assert.equal(history({ goal: { ...goal, status: "running" } }).length, 0, "a running goal isn't history yet");
 
 assert.equal(took(40e3), "40s"); assert.equal(took(12 * 60e3), "12m"); assert.equal(took(125 * 60e3), "2h 5m"); assert.equal(took(26 * 3600e3), "1d 2h"); assert.equal(took(null), "");
+
+// Leverage rides along on goal records and history rows; each row gets a one-line summary.
+const lev = { tokens: 12.5e6, spentPct: 5, perPct: 2.5e6, perSession: 2.5e8, vsTarget: 0.5, label: "2.5M per 1% (target 5M)" };
+assert.equal(goalRecord({ ...ended, leverage: lev }, jobs).leverage, lev, "a goal's leverage is kept on its record");
+assert.equal(goalRecord(ended, jobs).leverage, null, "no leverage on the goal: null, not missing");
+const h2 = history({ records: [
+  { id: "a", text: "With leverage", startedAt: 1, finishedAt: 121e3, status: "done", jobs: 2, itemsDone: 1, itemsTotal: 3, leverage: lev },
+  { id: "b", text: "No leverage", startedAt: 10, finishedAt: 130e3, status: "done", jobs: 1, itemsDone: 0, itemsTotal: 1 },
+  { id: "c", text: "Unmeasured", startedAt: 20, finishedAt: 140e3, status: "done", jobs: 3, itemsDone: 2, itemsTotal: 4, leverage: { perPct: null, label: "not enough Opus spent to measure yet" } },
+], log: [], goal: null });
+assert.equal(h2[0].summary, "2/4 items · 3 jobs · 2m", "perPct null: no label in the summary");
+assert.equal(h2[1].summary, "0/1 items · 1 job · 2m");
+assert.equal(h2[1].leverage, null);
+assert.equal(h2[2].summary, "1/3 items · 2 jobs · 2m · 2.5M per 1% (target 5M)", "measured leverage: label appended");
+assert.equal(h2[2].leverage, lev);
+const h3 = history({ records: [], log, goal: null });
+assert.equal(h3.find((r) => r.text === "Old goal").summary, "2 jobs · 2h 46m", "log-rebuilt goals have no item counts to show");
+assert.equal(h3.find((r) => r.text === "Practice goal").summary, "1 job · 33m");
 console.log("constance-board: ok");
