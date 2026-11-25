@@ -40,7 +40,7 @@ import { fileURLToPath } from "node:url";
 import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.mjs";
 import { copyLimit, roomForCopy, readMachine, PUBLISHED_MAX } from "./constance-ramp.mjs";
 import { pace, canResume, keptGoing } from "./constance-pace.mjs";
-import { limitWall, writeWall, wallFile, clock } from "./constance-wall.mjs";
+import { writeWall, wallFile, clock } from "./constance-wall.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps, settling, inHand } from "./constance-jobs.mjs";
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
@@ -73,6 +73,8 @@ import { briefFor } from "./constance-brief.mjs";
 import { progressLine, tick as progressTick } from "./constance-progress.mjs";
 import { resumePlan, logAsk } from "./constance-resume.mjs";
 import { routeModel, logRoute } from "./constance-route.mjs";
+import { pickBrain, topModel, brainLimits, brainCommand, brainWall, milkLabel } from "./constance-brain.mjs";
+import { buildSummary } from "./constance-summary.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -106,7 +108,25 @@ function freshData() {
   }
   return d;
 }
-const claudeOf = (d) => (d.agents || []).find((a) => a.id === "claude");
+// Her planning brain (constance-brain.mjs): Claude Code by default, or Antigravity's
+// `agy` when the owner picked it and opted it into the sandboxed keyring. brainOf()/paceNow()
+// hand pace() the brain's own limits — for agy that's only the quota pool her chosen model
+// burns, renamed to plain Session/Weekly so the pacing windows line up with Claude's.
+const brainNow = () => pickBrain(readSettings());
+const agyOf = (d) => (d.agents || []).find((a) => a.id === "antigravity");
+const brainTop = (d, b) => (b.id === "antigravity" ? topModel(agyOf(d), readSettings()) : null);
+const brainName = (b) => (b && b.id === "antigravity" ? "Antigravity" : "Claude");
+const brainCli = (id) => (id === "antigravity" ? "agy" : "claude");
+// The model one brain run spawns with: agy's picked model id, else her Claude model.
+function brainModel(d, b) {
+  if (b.id === "antigravity") return brainTop(d, b)?.id || "";
+  return store.read().goal?.model || "opus";
+}
+function brainOf(d) { const b = brainNow(); return brainLimits(d, b.id, brainTop(d, b)); }
+function paceNow(d) {
+  const b = brainNow();
+  return pace(brainLimits(d, b.id, brainTop(d, b)), Date.now(), undefined, { name: brainName(b) });
+}
 
 // Agents the owner lets reach the desktop keyring from inside the sandbox
 // (settings.json constanceKeyringAgents; none by default — see constance-sandbox.mjs).
@@ -120,7 +140,13 @@ function boxProblem(id) {
   if (!bwrapWorks()) return "bubblewrap (bwrap) is missing or can't run here";
   return sandboxProblem(id, keyringAgents());
 }
-const judged = (d) => judgeAll(d, Date.now(), { sandbox: boxProblem });
+const judged = (d) => {
+  const list = judgeAll(d, Date.now(), { sandbox: boxProblem });
+  // While agy is her brain it never doubles as a worker.
+  if (brainNow().id === "antigravity")
+    for (const a of list) if (a.id === "antigravity") { a.available = false; a.reason = "it is her brain right now"; }
+  return list;
+};
 
 // Practice mode (the panel's switch, on by default for now): a dry run. She still plans the goal and
 // picks agents, but delegate() only writes each handoff's agent, reason and full prompt into the log —
@@ -1441,7 +1467,8 @@ async function drive() {
   for (;;) {
     const g = store.read().goal;
     if (!g || !["running", "paused"].includes(g.status)) return;
-    const p = pace(claudeOf(freshData()));
+    const dNow = freshData();
+    const p = paceNow(dNow);
     // A goal paused by Claude's own limit wall follows wall.json, not the
     // readings: resumePlan waits out the stated reset plus a grace, then
     // resumes her — no owner ask and no fresh reading required. The raw file
@@ -1463,8 +1490,8 @@ async function drive() {
       // Resume only on a reading that is current: a cached or unreadable one can't prove the
       // limit is gone (Keep going is the owner's own call and doesn't need one).
       const kept = keptGoing(p);
-      if (!canResume(p, claudeOf(readData()))) {
-        const why = "Waiting for a current reading of Claude's limits before picking the goal up again.";
+      if (!canResume(p, brainOf(readData()))) {
+        const why = `Waiting for a current reading of ${brainName(brainNow())}'s limits before picking the goal up again.`;
         if (g.pauseReason !== why) { store.update((s) => { s.goal.pauseReason = why; }); store.log({ kind: "paused", text: why }); }
         pausedLogged = true;
         await sleep(60e3); continue;
@@ -1473,46 +1500,69 @@ async function drive() {
       store.log({ kind: "resumed", text: kept ? "You chose Keep going; picking the goal up again." : "Back under her limits; picking the goal up again." });
       pausedLogged = false;
     }
-    // After a restart the previous Claude run may still be going: adopt it rather than start a second one.
-    if (alive(g.brainPid, "claude")) {
+    // After a restart the previous brain run may still be going: adopt it rather than start a second one.
+    const cli = brainCli(g.brainId);
+    if (alive(g.brainPid, cli)) {
       let killed = false;
-      while (alive(g.brainPid, "claude")) {
+      while (alive(g.brainPid, cli)) {
         const st = store.read().goal;
         if (!st || st.status === "stopped") return;
-        if (!killed && pace(claudeOf(readData())).mode === "stop") { killGroup(g.brainPid); killed = true; }
+        if (!killed && paceNow(readData()).mode === "stop") { killGroup(g.brainPid); killed = true; }
         try { releaseHeld(); fillSlots(); heartbeat(); } catch {}
         await sleep(5000);
       }
       const st = store.read().goal;
       if (!st || st.status !== "running" || killed) continue;
     }
-    const resume = g.started;
+    // The brain is picked fresh at every start: the owner can flip
+    // settings.constanceBrain between runs. Wanted-but-not-allowed is told to
+    // the owner once per goal, then she quietly stays on Claude Code.
+    const b = brainNow();
+    if (b.wanted === "antigravity" && !b.ok && !g.brainNoteLogged) {
+      store.update((s) => { if (s.goal) s.goal.brainNoteLogged = true; });
+      store.log({ kind: "note", text: b.why });
+    }
+    const model = brainModel(dNow, b);
     // Fresh lessons and this project's own rules go into the first message of
-    // every goal (advice only — her core rules above never change). A nudge
-    // resume carries its own short message instead of the generic one.
-    const prompt = resume
-      ? nudge || "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal."
-      : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + "\n" + milkPrompt(readMilk(readSettings())) + rulesBlock(readProjectRules(g.dir));
+    // every goal (advice only — her core rules above never change). agy has no
+    // resume, so an already-started goal always gets the full first prompt plus
+    // the interrupted note (a nudge's own text rides along when there is one);
+    // a brain switch back to Claude can't --resume the other CLI's session, so
+    // it starts a fresh one the same way. A Claude nudge resume carries its own
+    // short message instead of the generic one.
+    const firstPrompt = `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + "\n" + milkPrompt(readMilk(readSettings())) + rulesBlock(readProjectRules(g.dir));
+    const interrupted = "You were interrupted (a restart, a pause for your limits, or an error). Run `C status` and `C jobs` to see where things stand, then carry on with the goal.";
+    let session = g.session, resumeRun = !!g.started, prompt;
+    if (b.id === "antigravity") {
+      prompt = g.started ? `${firstPrompt}\n\n${interrupted}${nudge ? `\n\n${nudge}` : ""}` : firstPrompt;
+      resumeRun = false;
+    } else if (g.brainId && g.brainId !== b.id) {
+      session = randomUUID();
+      prompt = `${firstPrompt}\n\n${interrupted}`;
+      resumeRun = false;
+    } else if (g.started) {
+      prompt = nudge || "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal.";
+    } else {
+      prompt = firstPrompt;
+    }
     nudge = null;
-    const args = ["-p", "--model", g.model || "opus", "--dangerously-skip-permissions", "--output-format", "text", "--append-system-prompt", ROLE(g.dir),
-      ...(resume ? ["--resume", g.session] : ["--session-id", g.session]), prompt];
+    const { cmd, args } = brainCommand({ brain: b.id, model, role: ROLE(g.dir), prompt, session, resume: resumeRun });
     const reportPath = path.join(store.dir, `report-${g.id}.txt`);
     const fd = fs.openSync(reportPath, "w");
-    const brain = spawn("claude", args, { cwd: g.dir, env: ENV, detached: true, stdio: ["ignore", fd, fd] });
-    store.update((s) => { s.goal.started = true; s.goal.brainPid = brain.pid; });
+    const brain = spawn(cmd, args, { cwd: g.dir, env: ENV, detached: true, stdio: ["ignore", fd, fd] });
+    store.update((s) => { s.goal.started = true; s.goal.brainPid = brain.pid; s.goal.brainId = b.id; s.goal.brainModel = model; if (session !== s.goal.session) s.goal.session = session; });
     // Every start for planning leaves a route line: the step, the model she
     // actually runs on, and the router's reason (constance-route.mjs).
     try {
-      const rm = g.model || "opus";
-      store.log({ kind: "route", step: "plan", model: rm, text: routeModel("plan", { milk: readMilk(readSettings()) }).why });
-      logRoute(path.join(store.dir, "routes.jsonl"), { step: "plan", model: rm, job: g.id });
+      store.log({ kind: "route", step: "plan", model, text: routeModel("plan", { milk: readMilk(readSettings()) }).why });
+      logRoute(path.join(store.dir, "routes.jsonl"), { step: "plan", model, job: g.id });
     } catch {}
     let pausedByUs = false;
     const watch = setInterval(() => {
       const st = store.read().goal;
       if (!st || st.status === "stopped") { killGroup(brain.pid); return; }
       try { releaseHeld(); fillSlots(); heartbeat(); } catch {}
-      if (pace(claudeOf(readData())).mode === "stop") { pausedByUs = true; killGroup(brain.pid); }
+      if (paceNow(readData()).mode === "stop") { pausedByUs = true; killGroup(brain.pid); }
     }, 30e3);
     const code = await new Promise((r) => brain.on("exit", (c) => r(c)));
     clearInterval(watch);
@@ -1530,7 +1580,7 @@ async function drive() {
         const n = (s.goal.nudges || 0) + 1;
         store.update((x) => { if (x.goal) x.goal.nudges = n; });
         nudge = `The goal is not finished: ${open}. Keep going: delegate or wait, don't ask.`;
-        store.log({ kind: "note", text: `Claude exited cleanly but the goal is unfinished (${open}); resumed her, nudge ${n} of 3.` });
+        store.log({ kind: "note", text: `${brainName(b)} exited cleanly but the goal is unfinished (${open}); resumed her, nudge ${n} of 3.` });
         continue;
       }
       store.update((s) => { s.goal.status = "done"; s.goal.finishedAt = Date.now(); s.goal.report = report.slice(-4000); });
@@ -1538,15 +1588,16 @@ async function drive() {
       if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
     }
-    // Claude said it hit its limit ("You've hit your 5-hour limit · resets 5:50pm (America/New_York)"):
-    // a pause until the time it stated, never a failure. pace() reads wall.json and stops her until then.
-    const wall = limitWall(report);
+    // Her brain said it hit its limit (Claude's "You've hit your 5-hour limit · resets 5:50pm
+    // (America/New_York)", or agy's quota text): a pause until the time it stated, never a
+    // failure. pace() reads wall.json and stops her until then.
+    const wall = brainWall(b.id, report, Date.now(), brainOf(freshData()).limits);
     if (wall && (code !== 0 || report.length < 400)) {
       writeWall(store.dir, wall);
       // The pause reason must name the wall even when its stated reset already
       // passed (the readings then show "on pace"): resumePlan only follows
-      // wall.json for a pause whose reason starts "Claude said it hit its limit".
-      const wallReason = `Claude said it hit its limit; paused until ${clock(wall.until)}.`;
+      // wall.json for a pause whose reason starts "<Brain> said it hit its limit".
+      const wallReason = `${brainName(b)} said it hit its limit; paused until ${clock(wall.until)}.`;
       store.update((s) => { if (s.goal) { s.goal.status = "paused"; s.goal.pauseReason = wallReason; } });
       store.log({ kind: "paused", text: wallReason });
       pausedLogged = true;
@@ -1556,7 +1607,7 @@ async function drive() {
     // and restart the goal fresh — a rejected run leaves no session, so --resume can't be used. This
     // doesn't count as a failure.
     const cur = store.read().goal;
-    const next = cur && cur.status === "running" ? nextModel(cur.model || "opus", report) : null;
+    const next = cur && cur.status === "running" && b.id === "claude" ? nextModel(cur.model || "opus", report) : null;
     if (next) {
       store.update((s) => { if (s.goal) { s.goal.model = next; s.goal.session = randomUUID(); s.goal.started = false; } });
       store.log({ kind: "model", text: `${modelName(cur.model || "opus")} isn't allowed on this Claude plan; Constance switched to ${modelName(next)} and started the goal over.` });
@@ -1564,14 +1615,14 @@ async function drive() {
     }
     if (++failures >= 3) {
       const last = report.split("\n").map((l) => l.trim()).filter(Boolean).at(-1) || "";
-      const reason = `Claude exited with code ${code} three times: ${last ? last.slice(0, 200) : "no output"}`;
+      const reason = `${brainName(b)} exited with code ${code} three times: ${last ? last.slice(0, 200) : "no output"}`;
       store.update((s) => { s.goal.status = "failed"; s.goal.finishedAt = Date.now(); s.goal.failReason = reason; });
       store.log({ kind: "failed", text: reason });
       // A failed goal is a note, not a stop: afterGoal() starts the next queued goal.
       if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
     }
-    store.log({ kind: "note", text: `Claude exited with code ${code}; retrying in a minute.` });
+    store.log({ kind: "note", text: `${brainName(b)} exited with code ${code}; retrying in a minute.` });
     await sleep(60e3);
   }
 }
@@ -1593,7 +1644,7 @@ function stopAll() {
   if (halted.size) keepTokens(true);
   for (const j of s.jobs) if (j.status === "stopped") { if (halted.has(j.id)) guardFinished(j); dropJobTmp(j); if (j.worktree) dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true }); }
   const g = s.goal;
-  if (g && alive(g.brainPid, "claude")) killGroup(g.brainPid);
+  if (g && alive(g.brainPid, brainCli(g.brainId))) killGroup(g.brainPid);
   if (g && alive(g.driverPid, "constance.mjs")) killGroup(g.driverPid);
   if (isWatcher(watcherPid())) killGroup(watcherPid());
   store.log({ kind: "stopped", text: "Stop pressed: Constance and every job halted." });
@@ -1721,7 +1772,7 @@ function sampleCopiesRunning() {
 
 // Her Session window's used share right now, in percent (null when unreadable).
 function sessionPctNow() {
-  const w = (pace(claudeOf(readData()))?.windows || []).find((x) => x.title === "Session");
+  const w = (paceNow(readData())?.windows || []).find((x) => x.title === "Session");
   return Number.isFinite(w?.used) ? w.used * 100 : null;
 }
 
@@ -1747,7 +1798,7 @@ function statusPayload() {
   const records = keepTokens();
   fillSlots();
   const s = store.read(), d = readData();
-  const p = pace(claudeOf(d));
+  const p = paceNow(d);
   sampleLeverage(p);
   const tv = tokensView(s, d, records);
   const pargs = progressArgs(s, p, tv);
@@ -1755,7 +1806,13 @@ function statusPayload() {
   const pline = pargs ? progressLine({ ...pargs, target: TARGET_PER_PCT }) : "";
   if (pline) board.now += ` · ${pline}`;
   lastProgressArgs = pargs;
-  return { goal: s.goal, board, progress: { line: pline }, tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p,
+  // The brain picker the panel shows: the live pick (wanted vs ok), the model it
+  // would run on (agy's top model name, else her Claude model) and its milk label.
+  const b = brainNow();
+  const brain = { id: b.id, name: b.name, wanted: b.wanted, ok: b.ok, why: b.why || "",
+    model: b.id === "antigravity" ? (brainTop(d, b)?.name || "") : modelName(s.goal?.model || "opus"),
+    milkLabel: milkLabel(b.id) };
+  return { goal: s.goal, board, progress: { line: pline }, tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p, brain,
     leverage: leverageView(s, tv.goal?.total ?? null), milk: milkPolicy(readMilk(readSettings())), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
 }
@@ -1781,7 +1838,7 @@ if (process.argv[1] === SELF) {
       return `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}${sc}`;
     }).join("\n"));
   }
-  else if (cmd === "pace") out(pace(claudeOf(freshData())));
+  else if (cmd === "pace") out(paceNow(freshData()));
   else if (cmd === "jobs") { sweep(); releaseHeld(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], copies: copiesView(s), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
   else if (cmd === "queue") queueCmd();
   else if (cmd === "backlog") backlogCmd();
@@ -1790,6 +1847,22 @@ if (process.argv[1] === SELF) {
   else if (cmd === "signals") out(recentSignals(store.dir, 20));
   // The whole log as plain text (the panel's Copy all): every entry, practice prompts in full.
   else if (cmd === "log") { const names = Object.fromEntries((readData().agents || []).map((a) => [a.id, a.name || a.id])); process.stdout.write(logText(store.readLog(Infinity), (id) => names[id] || id)); }
+  // `summary`: the panel's "Copy summary" — a plain-text board snapshot
+  // (constance-summary.mjs), capped at 80 lines.
+  else if (cmd === "summary") {
+    const s = store.read(), d = readData();
+    const records = keepTokens();
+    const tv = tokensView(s, d, records);
+    out(buildSummary({
+      current: s.goal || null,
+      items: checklist(s.goal, asAccepted(s.jobs)).items,
+      history: readHistory(),
+      queue: readGoalQueue(store.dir).goals,
+      jobs: s.jobs,
+      leverage: leverageView(s, tv.goal?.total ?? null),
+      log: store.readLog(Infinity),
+    }));
+  }
   else if (cmd === "watch") await watch();
   // Internal: the detached half of a self-merge (spawned by maybeSelfMerge).
   else if (cmd === "selfmerge") runSelfMerge(Number(process.argv[3]));
@@ -1826,5 +1899,5 @@ if (process.argv[1] === SELF) {
   else if (cmd === "split") splitCmd();
   else if (cmd === "spec") specCmd();
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|selfmerge|route|batchreview|split|spec|stop|recover");
+  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|summary|watch|selfmerge|route|batchreview|split|spec|stop|recover");
 }
