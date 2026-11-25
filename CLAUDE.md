@@ -207,6 +207,23 @@ keeps the developer in flow:
   The sweep's "finished" update also sets `settling` (`settling`/`inHand` in `bin/constance-jobs.mjs`, ignored
   after 60 s), cleared once the guard and the self-merge decision are done; `wait` skips such jobs and
   `review` refuses them, so she is never handed a job a self-merge is about to take.
+  Since 1.51.0: the second wiring pass connects the helpers in `bin/constance.mjs` — after each sweep
+  `refillQueue` turns open backlog items into ready tasks when the queue is under 3 and copy slots are
+  free (`refills.json` marks the take with the job id only when it starts); a copy that failed on its own
+  gets one auto-retry on a fresh copy with the error tail before review (`again`-linked, never twice, a
+  refused handoff falls back to normal review); `C batchreview [--apply FILE]` reviews up to five
+  self-merged jobs in one pass; `afterGoal` saves the ratio report to `history.jsonl` (`kind:"ratio"`,
+  filtered out of goal records) with 1–3 lesson lines; `C split`/`C spec`/`C route` autosplit a goal,
+  fill a spec template and name a step's model; the heartbeat sends the progress ping and follows
+  `resumePlan` for wall-paused goals. Deep tests hardened the helpers: the guard lets an allowed dir cover
+  its files, checks renames both sides (`--name-status`, `-z` porcelain, `--untracked-files=all`) and
+  reports rewritten history instead of passing clean; the sandbox refuses dangerous `extraRw` and always
+  ro-binds `.git/config`; the merge lock's takeover is atomic and sync-only; selfmerge's reviews
+  read-modify-write is locked and a half-merge (staged, no MERGE_HEAD) cleans the index/tree; wall keeps
+  the stated reset when the "resets" line precedes the hit line; ramp fails closed on malformed
+  machine/ramp (no NaN admits); tokens, scorecard, queue (locked writes), pace, backlog, agents
+  (`judge()` treats malformed input as unavailable, never a crash), notify (never stores a body) and
+  spare/goalqueue all take bad input without crashing or leaking.
 
 ## Working rules
 
