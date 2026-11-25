@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { checklist } from "./constance-checklist.mjs";
 
 const fileOf = (dir) => path.join(dir, "goal-queue.json");
+const lockOf = (dir) => fileOf(dir) + ".lock";
 
 export function readGoalQueue(dir) {
   try {
@@ -18,14 +19,64 @@ export function readGoalQueue(dir) {
   } catch { return { goals: [], paused: "" }; }
 }
 
+// change() is read-modify-write across processes (the driver, the panel's C commands,
+// goal-queue edits), so it runs under a small lock file next to goal-queue.json: an
+// O_EXCL create holding this pid, a short poll while a live holder finishes, and a
+// stale break only when the recorded pid is dead. An empty lock file gets the same
+// grace mergelock gives an ownerless dir — the pid write lands a tick after the create.
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const pidAlive = (pid) => {
+  if (!(pid > 0)) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+};
+const LOCK_STALE_MS = 30000;
+const lockStale = (file, now = Date.now()) => {
+  let pid = 0, mtime = 0;
+  try {
+    pid = Number(fs.readFileSync(file, "utf8").trim()) || 0;
+    mtime = fs.statSync(file).mtimeMs;
+  } catch { return true; } // unreadable/gone: safe to break
+  if (pid > 0) return !pidAlive(pid);
+  return now - mtime > LOCK_STALE_MS;
+};
+function withQueueLock(dir, fn, { waitMs = 10000, pollMs = 25 } = {}) {
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = lockOf(dir), until = Date.now() + waitMs;
+  for (;;) {
+    let fd;
+    try {
+      fd = fs.openSync(lock, "wx");
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      break;
+    } catch (e) {
+      try { if (fd !== undefined) fs.closeSync(fd); } catch {}
+      if (e.code !== "EEXIST") throw e;
+      if (lockStale(lock)) { try { fs.rmSync(lock, { force: true }); } catch {} continue; }
+      if (Date.now() > until) throw new Error("another queue change is still running");
+      sleepSync(pollMs);
+    }
+  }
+  try { return fn(); } finally {
+    try {
+      if (Number(fs.readFileSync(lock, "utf8").trim()) === process.pid) fs.rmSync(lock, { force: true });
+    } catch {}
+  }
+}
+
 function save(dir, q) {
   fs.mkdirSync(dir, { recursive: true });
   const f = fileOf(dir), tmp = f + "." + process.pid + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(q, null, 2) + "\n");
-  fs.renameSync(tmp, f);
+  try {
+    fs.renameSync(tmp, f);
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+    throw e;
+  }
   return q;
 }
-const change = (dir, fn) => { const q = readGoalQueue(dir); const r = fn(q); save(dir, q); return r; };
+const change = (dir, fn) => withQueueLock(dir, () => { const q = readGoalQueue(dir); const r = fn(q); save(dir, q); return r; });
 
 export function addGoal(dir, { text, dir: folder }, now = Date.now()) {
   const t = String(text || "").trim();

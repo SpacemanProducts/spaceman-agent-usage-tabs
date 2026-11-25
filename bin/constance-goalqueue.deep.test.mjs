@@ -3,6 +3,7 @@
 // Everything runs against a mktemp state dir with a fake HOME; nothing touches the bus,
 // the network or real agents. constance-goalqueue.mjs itself is not modified here.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -398,11 +399,8 @@ fs.mkdirSync(qfile);
 assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" }, "EISDIR on read is swallowed like any read error");
 assert.throws(() => addGoal(dir, { text: "x", dir: "/x" }), /EISDIR|ENOTDIR/, "rename onto a directory fails");
 assert.ok(fs.statSync(qfile).isDirectory(), "the directory itself is untouched");
-assert.equal(fs.readdirSync(dir).filter((f) => f.includes(".tmp")).length, 1,
-  "the failed save leaves its .tmp file behind");
-// BUG: save() writes goal-queue.json.<pid>.tmp then renames it; when the rename fails (target is a
-// directory, or any IO error) the tmp file is orphaned in the state dir — every failed write leaks
-// one file. Pinned above; not fixed here.
+assert.equal(fs.readdirSync(dir).filter((f) => f.includes(".tmp")).length, 0,
+  "a failed save removes its .tmp file instead of leaking it");
 fs.rmSync(qfile, { recursive: true });
 fresh();
 
@@ -461,16 +459,32 @@ assert.deepEqual(queueStops(G("1. a\n2. b"), [
 ]), { stop: [], notes: ["item 2 of the checklist not done"] },
   "isPractice() excludes practice-summary jobs from the merged check");
 
-// BUG: change() is read-modify-write with no inter-process lock. Two processes calling
-// addGoal/takeNext at the same time lose updates: each reads the same file, writes its own
-// version, and the last rename wins. Reproduced 2026-11-25: two `node child.mjs <state> A|B`
-// processes doing 30 addGoal() calls each on an ~8 MB queue file (40 goals x 200 KB text)
-// produced 70 goals instead of the expected 100 (A:13 B:17 — 30 updates silently lost).
-// Disabled test sketch — enable once a fix lands (e.g. an inter-process lock like
-// constance-mergelock.mjs, or append-only journaling):
-//   const state = fs.mkdtempSync(...); seed goal-queue.json with 40 fat goals;
-//   spawn two children each running `for (i<30) addGoal(state, {text: tag+i, dir:"/p"})`;
-//   await both; assert.equal(readGoalQueue(state).goals.length, 100); // FAILS today
+// ---- Regression: change() is serialized across processes by a lock file ---------------------
+// Two processes doing read-modify-write on goal-queue.json used to lose updates: each read the
+// same file and the last rename won (reproduced 2026-11-25: 30 addGoal() calls each on an ~8 MB
+// queue produced 70 goals instead of 100). change() now runs under goal-queue.json.lock.
+{
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), "constance-gq-race-"));
+  const fat = "x".repeat(200 * 1024);
+  const seed = { goals: [], paused: "" };
+  for (let i = 0; i < 40; i++) seed.goals.push({ id: `s${i}`, text: `seed${i}${fat}`, dir: "/p" });
+  fs.writeFileSync(path.join(state, "goal-queue.json"), JSON.stringify(seed));
+  const child = path.join(dir, "gq-child.mjs");
+  fs.writeFileSync(child, `import { addGoal } from ${JSON.stringify(new URL("./constance-goalqueue.mjs", import.meta.url).href)};\n` +
+    `const [state, tag] = process.argv.slice(2);\n` +
+    `for (let i = 0; i < 30; i++) addGoal(state, { text: tag + i + "y".repeat(1024), dir: "/p" });\n`);
+  const run = (tag) => new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [child, state, tag], { stdio: ["ignore", "ignore", "pipe"] });
+    let err = "";
+    p.stderr.on("data", (d) => { err += d; });
+    p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`child ${tag} exited ${code}: ${err}`))));
+  });
+  await Promise.all([run("A"), run("B")]);
+  assert.equal(readGoalQueue(state).goals.length, 100, "no goal is lost when two processes add at once");
+  assert.equal(fs.readdirSync(state).filter((f) => f.includes(".lock")).length, 0, "no lock file left behind");
+  fs.rmSync(child);
+  fs.rmSync(state, { recursive: true, force: true });
+}
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log("constance-goalqueue.deep: ok");
