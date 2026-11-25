@@ -37,7 +37,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.mjs";
+import { judgeAll, launchCommand, accountEnv, LAUNCH, preferOrder, KILO_NOTE, kiloPaidVerdict, reviewText } from "./constance-agents.mjs";
 import { copyLimit, roomForCopy, readMachine, PUBLISHED_MAX } from "./constance-ramp.mjs";
 import { pace, canResume, keptGoing } from "./constance-pace.mjs";
 import { writeWall, wallFile, clock } from "./constance-wall.mjs";
@@ -214,7 +214,7 @@ function sweep() {
         if (fs.existsSync(f)) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
       }
       if (!done && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
-      if (done) { j.status = "finished"; j.settling = Date.now(); j.summary = String(done.summary || ""); j.commit = String(done.commit || ""); if (done.tests !== undefined) j.tests = done.tests; changed.push(j); signals.push({ j, source }); }
+      if (done) { j.status = "finished"; j.settling = Date.now(); j.summary = reviewText(j.agent, String(done.summary || "")); j.commit = String(done.commit || ""); if (done.tests !== undefined) j.tests = done.tests; changed.push(j); signals.push({ j, source }); }
       // Still running, but its own log says it finished: record the signal
       // (deduped in notify.jsonl) without touching its status.
       else if (j.log && logSaysFinished(tailFile(j.log))) signals.push({ j, source: "log" });
@@ -225,7 +225,11 @@ function sweep() {
   // the guard and the self-merge decision are done; maybeSelfMerge swaps it
   // for selfMerging in one update, and it is cleared here otherwise.
   for (const j of changed) {
-    try { guardFinished(j); dropJobTmp(j); autoRetry(j); maybeSelfMerge(j); }
+    try {
+      // A kilo run that billed fails on the spot: no guard, retry or self-merge.
+      if (kiloPaidFail(j)) { dropJobTmp(j); continue; }
+      guardFinished(j); dropJobTmp(j); autoRetry(j); maybeSelfMerge(j);
+    }
     finally { store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) delete x.settling; }); }
   }
   // Whoever's sweep sees the finish logs the return — status polls can beat `wait` to it.
@@ -241,6 +245,21 @@ const normRel = (p) => String(p).replace(/^\.\//, "").replace(/\/+$/, "");
 function coversPath(files, p) {
   const b = normRel(p);
   return files.some((f) => { const a = normRel(f); return a === b || a === "." || b === a + "/" || a.startsWith(b + "/"); });
+}
+
+// A finished kilo job's own --format json stream is its log: kiloPaidVerdict
+// fails it when the run shows a paid model or any cost > 0 (kilo bills per
+// token, so this is checked before the guard and self-merge ever see it).
+// Returns the verdict, or null when the job isn't kilo or came back clean.
+function kiloPaidFail(j) {
+  if (j.agent !== "kilo") return null;
+  let text = "";
+  try { text = fs.readFileSync(j.log, "utf8"); } catch { text = tailFile(j.log, 65536); }
+  const v = kiloPaidVerdict(text);
+  if (!v) return null;
+  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x && x.status === "finished") { x.status = "failed"; x.reviewNote = v.note; } });
+  store.log({ kind: "note", job: j.id, agent: j.agent, worker: j.worker, text: `Job ${j.id} failed: ${v.note}` });
+  return v;
 }
 
 // After a delegated run ends, check it stayed inside its guardrails: only its
@@ -854,9 +873,9 @@ async function waitJob() {
       const earlier = s.jobs.filter((j) => j.id !== next.id && j.goal === next.goal && ["finished", "merged", "accepted"].includes(j.status) && (j.finishedAt || 0) <= (next.finishedAt || 0))
         .map((j) => ({ id: j.id, agent: j.agent, commit: j.commit, shared: overlaps(changedFiles(j.dir, j.commit), files) })).filter((x) => x.shared.length);
       let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
-      return out({ review: { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
+      return out({ review: { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: reviewText(next.agent, next.summary), commit: next.commit, changedFiles: files,
         guardViolation: next.guardViolation || null,
-        checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
+        checkAgainst: earlier, logTail: reviewText(next.agent, tail), queue: queueView(next.dir, store.dir) }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     const held = s.jobs.filter((j) => j.status === "held").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, heldReason: j.heldReason || "" }));
@@ -1342,7 +1361,7 @@ function jobCmd() {
   const s = store.read(), j = s.jobs.find((x) => x.id === id);
   if (!j) fail(`No job ${id}.`);
   const { guardBefore, ...rest } = j;
-  out({ ...rest, log: store.readLog(2000).filter((e) => e.job === id && e.kind !== "practice").slice(-20) });
+  out({ ...rest, summary: reviewText(j.agent, rest.summary || ""), log: store.readLog(2000).filter((e) => e.job === id && e.kind !== "practice").slice(-20) });
 }
 
 function spawnDriver() {
@@ -1830,12 +1849,14 @@ if (process.argv[1] === SELF) {
   else if (cmd === "agents") {
     const d = freshData(), guards = store.read().guards || {}, card = readScorecard(store.dir), rows = scoreRows(card);
     const all = judged(d), order = rankAgents(all.filter((a) => a.available).map((a) => a.id), card);
-    // Available agents first, best scorecard first; each with its record and a size hint.
-    const sorted = [...order.map((id) => all.find((a) => a.id === id)), ...all.filter((a) => !a.available)];
+    // Available agents first, best scorecard first — except Devin leads while
+    // it is available and kilo sits right behind it (preferOrder); each with
+    // its record and a size hint.
+    const sorted = preferOrder([...order.map((id) => all.find((a) => a.id === id)), ...all.filter((a) => !a.available)]);
     out(sorted.map((a) => {
       const row = rows.find((r) => r.agent === a.id), h = sizeHint(row);
       const sc = a.available ? `  [${row ? scoreLine(row) : "no reviewed jobs yet"}; ${h.note}: up to ${h.maxFiles} file${h.maxFiles === 1 ? "" : "s"} a job]` : "";
-      return `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}${sc}`;
+      return `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}${sc}${a.id === "kilo" ? `  (${KILO_NOTE})` : ""}`;
     }).join("\n"));
   }
   else if (cmd === "pace") out(paceNow(freshData()));
