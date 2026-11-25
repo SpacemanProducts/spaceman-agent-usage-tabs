@@ -137,9 +137,9 @@ export function findActiveRepo({ projectsDir, squadDirFile, now = Date.now(), ma
     let best = null;
     for (const d of fs.readdirSync(projectsDir, { withFileTypes: true })) {
       if (!d.isDirectory()) continue;
-      for (const f of fs.readdirSync(path.join(projectsDir, d.name))) {
-        if (!f.endsWith(".jsonl")) continue;
-        const p = path.join(projectsDir, d.name, f), m = fs.statSync(p).mtimeMs;
+      for (const f of fs.readdirSync(path.join(projectsDir, d.name), { withFileTypes: true })) {
+        if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
+        const p = path.join(projectsDir, d.name, f.name), m = fs.statSync(p).mtimeMs;
         if (!best || m > best.m) best = { p, m };
       }
     }
@@ -184,6 +184,9 @@ export function maybeWriteHandoff({ sent, settings, untilReset = () => "", proje
 export function answerPending(pendingFile, action, env) {
   let p = null; try { p = JSON.parse(fs.readFileSync(pendingFile, "utf8")); } catch {}
   try { fs.unlinkSync(pendingFile); } catch {}
-  if (action === "allow" && p?.repo && p?.trigger) return writeHandoff(p.repo, p.trigger, Date.now(), env).file;
+  if (action === "allow" && p?.repo && p?.trigger) {
+    try { if (!fs.statSync(p.repo).isDirectory()) return ""; } catch { return ""; }
+    return writeHandoff(p.repo, p.trigger, Date.now(), env).file;
+  }
   return "";
 }
