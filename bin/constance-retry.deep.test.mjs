@@ -20,26 +20,25 @@ const AB = ["a.txt", "b.txt"];
 // ---- sameFiles: coercion inside fileSet.
 {
   // Entries are String()-coerced then trimmed: numbers and numeric strings
-  // are the same path; only blank strings drop out (see below for the rest).
+  // are the same path; blank strings drop out.
   assert.equal(sameFiles([5], ["5"]), true, "number 5 and string '5' are the same path");
-  // Only blank strings drop out: null/undefined/false stringify to literal
-  // path names "null"/"undefined"/"false" rather than being filtered.
-  assert.equal(sameFiles([null], ["null"]), true, "null becomes the path 'null'");
-  assert.equal(sameFiles([undefined], ["undefined"]), true);
-  assert.equal(sameFiles([false], ["false"]), true);
-  assert.equal(sameFiles([null, " a.txt ", ""], ["a.txt"]), false, "the 'null' entry makes the sets differ");
+  // null/undefined/false entries are dropped, not stringified into paths.
+  assert.equal(sameFiles([null], ["null"]), false, "null is dropped, not the path 'null'");
+  assert.equal(sameFiles([undefined], ["undefined"]), false);
+  assert.equal(sameFiles([false], ["false"]), false);
+  assert.equal(sameFiles([null, " a.txt ", ""], ["a.txt"]), true, "the null entry drops out and the rest still match");
   // Whitespace-only strings are filtered too, so they can't fake a match.
   assert.equal(sameFiles(["   "], ["a.txt"]), false);
   assert.equal(sameFiles(["   "], []), false);
-  // BUG: two unrelated corrupt records that both carry files:[null] collide
-  // as 'the same work' — chain() would link them and count toward the
-  // second-try limit. null entries should be dropped, not stringified.
-  // assert.equal(sameFiles([null, null], [null]), false, "null entries are not a real file set");
-  // Non-array inputs are a contract violation: fileSet calls .map on them.
-  assert.throws(() => sameFiles("a.txt", ["a.txt"]), TypeError);
-  assert.throws(() => sameFiles(5, ["5"]), TypeError);
-  assert.throws(() => sameFiles({}, ["a.txt"]), TypeError, "a plain object has no .map");
-  // …but falsy non-arrays degrade to 'no files' via the || [] fallback.
+  // Two unrelated corrupt records that both carry files:[null] must not
+  // collide as 'the same work' — chain() would link them and count toward
+  // the second-try limit.
+  assert.equal(sameFiles([null, null], [null]), false, "null entries are not a real file set");
+  // Non-array inputs count as 'no files' instead of crashing on .map.
+  assert.equal(sameFiles("a.txt", ["a.txt"]), false, "a string files field is no files");
+  assert.equal(sameFiles(5, ["5"]), false);
+  assert.equal(sameFiles({}, ["a.txt"]), false, "a plain object has no file list");
+  // Falsy non-arrays degrade the same way.
   assert.equal(sameFiles(null, ["a.txt"]), false);
   assert.equal(sameFiles(undefined, ["a.txt"]), false);
   assert.equal(sameFiles(null, null), false);
@@ -80,12 +79,14 @@ const AB = ["a.txt", "b.txt"];
   // A three-job againOf loop terminates and reports all sent-back members.
   const tri = [sentBack(1, AB, 3), sentBack(2, AB, 1), sentBack(3, AB, 2)];
   assert.deepEqual(chain(tri, { files: ["nope"], againOf: 2 }), [1, 2, 3]);
-  // Non-array jobs / null entries are contract violations and throw.
+  // Non-array jobs is a contract violation and throws; null entries inside
+  // the array are skipped so one corrupt record can't take down the walk.
   assert.throws(() => chain(null, {}), TypeError);
   assert.throws(() => chain(undefined, {}), TypeError);
-  assert.throws(() => chain([null], {}), TypeError, "a null job record crashes the id map");
-  assert.throws(() => chain([{ id: 1, status: "sent back", files: "a.txt" }], { files: ["a.txt"] }), TypeError,
-    "a corrupt record whose files is a string crashes sameFiles");
+  assert.deepEqual(chain([null], {}), [], "a null job record is skipped");
+  assert.deepEqual(chain([null, sentBack(1, AB)], { files: AB }), [1], "null entries don't break the walk");
+  assert.deepEqual(chain([{ id: 1, status: "sent back", files: "a.txt" }], { files: ["a.txt"] }), [],
+    "a corrupt record whose files is a string counts as no files, so nothing matches");
 }
 
 // ---- secondTry: split must be a strict subset of EVERY chain job.
@@ -230,19 +231,16 @@ const AB = ["a.txt", "b.txt"];
   const retriedStr = { ...retried, againOf: "50" };
   assert.equal(shouldAutoRetry(crashed, [crashed, retriedStr]), true,
     "string '50' !== number 50: the auto-retry is not recognised");
-  // history entries that are null crash the chain walk.
-  // BUG: shouldAutoRetry(job, [null]) throws inside chain()'s jobs.map — a
-  // single corrupt record in the jobs array takes down the whole sweep.
-  // assert.equal(shouldAutoRetry({ ...base, summary: "(the agent exited)" }, [null]), true);
-  assert.throws(() => shouldAutoRetry({ ...base, summary: "(the agent exited)" }, [null]), TypeError);
+  // history entries that are null are skipped by chain() — one corrupt
+  // record in the jobs array must not take down the whole sweep.
+  assert.equal(shouldAutoRetry({ ...base, summary: "(the agent exited)" }, [null]), true);
   // A failed job with NO files at all is still retried: secondTry treats an
   // empty file set as read-only and never blocks.
   const noFiles = { id: 52, agent: "devin", status: "finished", summary: "(the agent exited)", tests: false };
   assert.equal(shouldAutoRetry(noFiles, [noFiles]), true, "file-less failures are auto-retried");
-  // A failed job whose files field is a non-array crashes the same way.
-  // BUG: files: "a.txt" in a stored record makes shouldAutoRetry throw.
-  // assert.equal(shouldAutoRetry({ ...noFiles, files: "a.txt" }, []), true);
-  assert.throws(() => shouldAutoRetry({ ...noFiles, files: "a.txt" }, []), TypeError);
+  // A failed job whose files field is a non-array counts as no files and is
+  // still retried (secondTry treats an empty file set as read-only).
+  assert.equal(shouldAutoRetry({ ...noFiles, files: "a.txt" }, []), true);
 }
 
 fs.rmSync(dir, { recursive: true, force: true });
