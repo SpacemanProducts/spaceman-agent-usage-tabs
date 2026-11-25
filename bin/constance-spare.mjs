@@ -20,7 +20,8 @@ export const MIN_LEFT = 0.25;
 export function leftAtReset(limit, now = Date.now()) {
   const used = Number(limit?.percent);
   const resetsAt = new Date(String(limit?.resetsAt || "")).getTime();
-  if (!Number.isFinite(used) || !Number.isFinite(resetsAt) || resetsAt <= now) return null;
+  // A negative percent is impossible data, same as NaN: it can't support a projection.
+  if (!Number.isFinite(used) || used < 0 || !Number.isFinite(resetsAt) || resetsAt <= now) return null;
   const msUntilReset = resetsAt - now;
   const len = WINDOWS[limit.title];
   const elapsedMs = len ? len - msUntilReset : 0;
@@ -32,7 +33,7 @@ export function leftAtReset(limit, now = Date.now()) {
 // reset — the room that would go to waste. An agent with any limit at 85% or more is near a
 // wall and gets nothing at all.
 export function spareWindows(agent, now = Date.now()) {
-  const limits = agent?.limits || [];
+  const limits = Array.isArray(agent?.limits) ? agent.limits : [];
   if (limits.some((l) => Number(l?.percent) >= 0.85)) return [];
   return limits
     .map((l) => {
@@ -51,7 +52,10 @@ export function useItOrLoseItOn(settings) { return settings?.constanceUseItOrLos
 // design. Everything else goes to the free agents.
 export const OPUS_KINDS = ["review", "bug", "design"];
 
-const openItems = (backlog) => (backlog || []).filter((b) => b && b.done !== true && !b.job && typeof b.text === "string" && b.text.trim() !== "");
+// Same open/done rules as constance-backlog.mjs's openItems: any truthy `done`
+// is done, and only a missing job tag (null or absent) means untaken — a job
+// of 0 or any other value counts as taken.
+const openItems = (backlog) => (backlog || []).filter((b) => b && !b.done && b.job == null && typeof b.text === "string" && b.text.trim() !== "");
 const opusItem = (b) => OPUS_KINDS.includes(b.kind);
 
 // Decides which backlog items go to which agent's soon-resetting spare room. Agents are served

@@ -8,11 +8,10 @@
 // boundaries and malformed limits -> useItOrLoseItOn truthiness ->
 // planSpare ordering, caps, kinds and malformed inputs.
 //
-// Two real bugs were found and are pinned as commented-out tests at the
-// bottom (non-array agent.limits crashes; a negative percent reports more
-// than 100% left). A third inconsistency (truthy non-true `done` still
-// counts as open here while constance-backlog.mjs treats any truthy done
-// as done) is noted there too.
+// Three real bugs were found here, pinned as commented-out tests and now
+// fixed and enabled below (negative percent reads as no projection;
+// non-array agent.limits reads as no windows; openItems matches
+// constance-backlog.mjs's done/job rules).
 import assert from "node:assert/strict";
 import { leftAtReset, spareWindows, useItOrLoseItOn, planSpare, SOON, DEFAULT_SOON, MIN_LEFT, OPUS_KINDS } from "./constance-spare.mjs";
 
@@ -54,12 +53,14 @@ for (const p of [0, 0.001, 0.5, 0.999, 1]) {
   const l = leftAtReset(lim("Other", p, H), now);
   assert.ok(l >= 0 && l <= 1, `percent ${p} -> left ${l}`);
 }
-// BUG (pinned, not fixed): a finite negative percent projects negative use,
-// so `left` comes back above 1 — an impossible "more than everything left" —
-// and spareWindows then offers the agent spare room with left = 1.5.
-// leftAtReset should clamp the projection to [0, 1] like it clamps the top.
-// assert.equal(leftAtReset({ title: "Other", percent: -0.5, resetsAt: iso(now + H) }, now), 0.5);
-// assert.deepEqual(spareWindows(agent("x", [{ title: "Other", percent: -0.5, resetsAt: iso(now + H) }]), now), []);
+// A finite negative percent is impossible data, same as NaN or -Infinity:
+// it can't support a projection, so leftAtReset reads it as no reading
+// (null) and the agent is never offered spare room on it. (The originally
+// pinned expectations — left 0.5 AND no window — couldn't both hold: with
+// left 0.5 the window passes the MIN_LEFT/SOON filters. Null is the honest
+// answer and matches how the other impossible percents behave.)
+assert.equal(leftAtReset({ title: "Other", percent: -0.5, resetsAt: iso(now + H) }, now), null);
+assert.deepEqual(spareWindows(agent("x", [{ title: "Other", percent: -0.5, resetsAt: iso(now + H) }]), now), []);
 
 // ------------------------------------------------- spareWindows: boundaries
 // SOON is inclusive on both ends of each title's allowance.
@@ -97,13 +98,12 @@ assert.equal(spareWindows({ limits: [lim("Session", 0.2, 0.5 * H)] }, now)[0].ag
 // Several spare windows on one agent come back soonest-reset first.
 const multi = spareWindows(agent("x", [lim("Weekly", 0.2, 20 * H), lim("Other", 0.2, H), lim("Session", 0.2, 0.5 * H)]), now);
 assert.deepEqual(multi.map((w) => w.title), ["Session", "Other", "Weekly"]);
-// BUG (pinned, not fixed): a truthy non-array `limits` throws
-// "limits.some is not a function". constance-pace.mjs was hardened against
-// exactly this ("a non-array limits value reads as no windows"); sparePlan's
-// limitsOf() can hand a string through when a.limits is one, and `C spare`
-// calls sparePlan unguarded, so one malformed agent record kills the command.
-// assert.deepEqual(spareWindows({ id: "x", limits: "junk" }, now), []);
-// assert.deepEqual(planSpare({ agents: [{ id: "x", limits: "junk" }], available: ["x"], backlog: [item("a", "chore")], now }).picks, []);
+// A truthy non-array `limits` reads as no windows, like constance-pace.mjs's
+// hardened `Array.isArray` check: sparePlan's limitsOf() can hand a string
+// through when a.limits is one, and `C spare` calls planSpare unguarded, so
+// one malformed agent record must not kill the command.
+assert.deepEqual(spareWindows({ id: "x", limits: "junk" }, now), []);
+assert.deepEqual(planSpare({ agents: [{ id: "x", limits: "junk" }], available: ["x"], backlog: [item("a", "chore")], now }).picks, []);
 
 // ------------------------------------------------- useItOrLoseItOn truthiness
 // Only the literal `false` turns it off; every other falsy value stays on.
@@ -204,14 +204,11 @@ assert.throws(() => planSpare({ agents: [grok()], available: ["grok"], backlog: 
 // runs before the candidate check, so the 'no agent' reason is unreachable on
 // that path. Internal callers always pass arrays, so this is malformed-input only.
 
-// BUG (pinned, not fixed): openItems uses `b.done !== true`, so any truthy
-// done marker that isn't the literal `true` — done: 1, done: "yes", a
-// timestamp — still counts as open work and can be handed out again.
-// constance-backlog.mjs's own openItems uses `!x.done` (any truthy done is
-// done), so the two disagree on the same record. Same story for `job`:
-// `!b.job` treats job: 0 as untaken while the backlog module's `x.job ===
-// null` treats only null as untaken.
-// assert.deepEqual(planSpare({ agents: [grok()], available: ["grok"], backlog: [{ ...item("a", "chore"), done: "yes" }], now }).picks, []);
-// assert.deepEqual(planSpare({ agents: [grok()], available: ["grok"], backlog: [{ ...item("a", "chore"), job: 0 }], now }).picks, []);
+// openItems now matches constance-backlog.mjs's own openItems: any truthy
+// `done` marker counts as done (so done: "yes" or a timestamp can't be
+// handed out again), and only a missing job tag means untaken (job: 0 or
+// any other value counts as taken).
+assert.deepEqual(planSpare({ agents: [grok()], available: ["grok"], backlog: [{ ...item("a", "chore"), done: "yes" }], now }).picks, []);
+assert.deepEqual(planSpare({ agents: [grok()], available: ["grok"], backlog: [{ ...item("a", "chore"), job: 0 }], now }).picks, []);
 
 console.log("constance-spare.deep: tests passed");
