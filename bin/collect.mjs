@@ -41,6 +41,8 @@ import { readKimiUsage } from "./kimi-usage.mjs";
 import { readQwenUsage } from "./qwen-usage.mjs";
 import { readDshUsage } from "./dsh-usage.mjs";
 import { readMcodeUsage } from "./mcode-usage.mjs";
+import { readKiloUsage } from "./kilo-usage.mjs";
+import { readFreebuffUsage } from "./freebuff-usage.mjs";
 
 const HOME = os.homedir();
 const STATE = path.join(process.env.XDG_STATE_HOME || path.join(HOME, ".local/state"), "omarchy");
@@ -70,6 +72,8 @@ const AGENTS = [
   { id: "kiro", name: "Kiro", bins: ["kiro-cli"] },
   { id: "devin", name: "Devin", bins: ["devin"], builtin: "devin" },
   { id: "amp", name: "Amp", bins: ["amp"] },
+  { id: "kilo", name: "Kilo Code", bins: ["kilo"] },
+  { id: "freebuff", name: "Freebuff", bins: ["freebuff"] },
 ];
 
 // The catalog agents (agents-catalog.json) get a tab too, found by their binaries, with a note for how they report usage.
@@ -107,6 +111,41 @@ function modelRows(usageByModel) {
 }
 
 function daysFrom(map) { return lastDays(7).map((date) => ({ date, tokens: map[date] || 0 })); }
+
+// ------------------------------------------------- Kilo Code and Freebuff
+// Both keep local usage but report no plan-limit percentages, so their tabs
+// stay gray: the reader's numbers become the one calm status line (the same
+// place Amp's token total goes) plus a plain "can't read" note — never
+// meters. Pure so the collector and its test share one mapping.
+const fmtCount = (n) => {
+  n = Number(n) || 0;
+  if (n >= 1e6) return `${+(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${+(n / 1e3).toFixed(1)}K`;
+  return String(Math.round(n));
+};
+const fmtMoney = (c) => (c >= 0.01 ? `$${c.toFixed(2)}` : c > 0 ? `$${c.toFixed(3)}` : "");
+const kiloBucket = (b = {}) => [
+  `${fmtCount(b.tokens)} tokens`,
+  b.requests === null || b.requests === undefined ? "" : `${b.requests} request${b.requests === 1 ? "" : "s"}`,
+  fmtMoney(b.cost),
+].filter(Boolean).join(" · ");
+const freebuffBucket = (b = {}) => [
+  `${b.chats || 0} chat${b.chats === 1 ? "" : "s"}`,
+  b.credits === null || b.credits === undefined ? "" : `${+Number(b.credits).toFixed(2)} credits`,
+  b.tokens === null || b.tokens === undefined ? "" : `${fmtCount(b.tokens)} tokens`,
+].filter(Boolean).join(" · ");
+export function localUsageFields(id, u) {
+  const out = { status: "", cantRead: "" };
+  if (id === "kilo") out.cantRead = "Can't read: Kilo's plan limits or reset windows — its local database (kilo.db) records usage only.";
+  else if (id === "freebuff") out.cantRead = "Can't read: Freebuff's plan limits or reset windows — they are cloud-only; its local run state records usage only.";
+  else return out;
+  if (!u || u.available !== true) { out.status = String(u?.status || "local data not available"); return out; }
+  const line = id === "kilo"
+    ? `Today: ${kiloBucket(u.today)} · last 24h: ${kiloBucket(u.last24h)}`
+    : `Today: ${freebuffBucket(u.today)} · last 24h: ${freebuffBucket(u.last24h)}`;
+  out.status = line;
+  return out;
+}
 
 // ------------------------------------------------------------------ Claude
 function claudeTranscripts() {
@@ -286,6 +325,12 @@ for (const a of AGENTS) {
     const m = planInfo("amp", { env: ENV, stateDir: OUT_DIR, onUnexpected });
     out.signedIn = !!m;
     if (m) { if (m.note) out.planNote = m.note; out.status = ""; const u = readAmpUsage({ env: ENV }); if (u.status) out.status = u.status; }   // `amp usage --details`: the token total only
+  }
+  // Kilo and Freebuff: local usage readers, no plan-limit percentages — the
+  // calm usage line and the "can't read" note, never meters.
+  if (a.id === "kilo" || a.id === "freebuff") {
+    const u = a.id === "kilo" ? readKiloUsage({ home: HOME, env: ENV }) : readFreebuffUsage({ home: HOME, env: ENV });
+    Object.assign(out, localUsageFields(a.id, u));
   }
   if (a.id === "opencode") out.signedIn = null; // free models need no login
   if (a.id === "opencode" && (live || []).some((m) => /free/i.test(m.id)) && plans.opencode?.freeNote) out.planNote = plans.opencode.freeNote;
