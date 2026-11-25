@@ -1,4 +1,6 @@
-// Constance's own pacing on the owner's Claude plan. Adaptive, not a fixed budget: for the session
+// Constance's own pacing on the owner's plan. The windows come from the picked brain's own
+// limits (constance-brain.mjs brainLimits()): Claude's Session/Weekly, or Antigravity's pool
+// bars renamed to Session/Weekly. Adaptive, not a fixed budget: for the session
 // (5 h) and weekly (7 d) windows it compares how much is used with how much of the window has gone.
 //   burn = used / elapsed share. Above 1 she is spending faster than the time allows.
 // Modes, from the worse of the two windows:
@@ -59,15 +61,15 @@ const keepGoingFor = (w, kg, now) =>
   !!kg && w.title === kg.title && sameReset(w.resetsAt, kg.resetsAt) &&
   (kg.resetsAt !== null ? now < kg.resetsAt : now - kg.at < (WINDOWS[w.title] || 0));
 
-export function pace(claude, now = Date.now(), dir = stateDir()) {
-  const ws = (Array.isArray(claude?.limits) ? claude.limits : []).map((l) => windowPace(l, now)).filter(Boolean);
-  // Claude itself said the limit is hit (constance-wall.mjs): that beats any reading.
+export function pace(limitsAgent, now = Date.now(), dir = stateDir(), { name = "Claude" } = {}) {
+  const ws = (Array.isArray(limitsAgent?.limits) ? limitsAgent.limits : []).map((l) => windowPace(l, now)).filter(Boolean);
+  // The brain itself said the limit is hit (constance-wall.mjs): that beats any reading.
   const wall = readWall(dir, now);
-  if (wall) return { mode: "stop", hard: true, windows: ws, until: wall.until, title: "Claude's limit",
-    reason: `Claude said it hit its limit; paused until ${wall.stated ? clock(wall.until) : `${clock(wall.until)} (no reset time given), then the readings decide`}.` };
+  if (wall) return { mode: "stop", hard: true, windows: ws, until: wall.until, title: `${name}'s limit`,
+    reason: `${name} said it hit its limit; paused until ${wall.stated ? clock(wall.until) : `${clock(wall.until)} (no reset time given), then the readings decide`}.` };
   const hard = ws.find((w) => w.used >= HARD_AT);
   if (hard) return { mode: "stop", hard: true, windows: ws, until: hard.resetsAt, title: hard.title, reason: `${hard.title} at 100%: the limit is hit, paused until it resets.` };
-  if (ws.length === 0) return { mode: "delegate", windows: [], reason: "Claude's own limits can't be read, so she plays it safe and delegates." };
+  if (ws.length === 0) return { mode: "delegate", windows: [], reason: `${name}'s own limits can't be read, so she plays it safe and delegates.` };
   const kg = readKeepGoing(dir, now);
   const stopAt = (w) => (keepGoingFor(w, kg, now) ? Infinity : w.nearReset ? NEAR_END_AT : STOP_AT);
   const stop = ws.find((w) => w.used >= stopAt(w));
