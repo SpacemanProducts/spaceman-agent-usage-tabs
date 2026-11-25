@@ -13,7 +13,8 @@ export const RESUME_GRACE_MS = 60e3;
 
 // The pace() reason a wall pause carries (constance-pace.mjs). Matching it is how
 // we know the pause is the wall's and not a readings stop or a Keep going hold.
-const WALL_REASON = /^Claude said it hit its limit/;
+// Her brain is Claude Code or Antigravity (constance-brain.mjs); either name starts the reason.
+const WALL_REASON = /^(Claude|Antigravity) said it hit its limit/;
 
 // { wall, now, goalStatus } -> { action: "wait"|"resume"|"none", until, why }.
 // wall is the parsed wall.json ({ until, stated, text, at }) or null; goalStatus

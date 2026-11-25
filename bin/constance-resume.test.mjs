@@ -72,3 +72,8 @@ assert.equal(askReport(path.join(dir, "nested", "deep", "asks.jsonl")).asked, 1,
 
 fs.rmSync(dir, { recursive: true });
 console.log("constance-resume: tests passed");
+
+// Antigravity as her brain: its wall pause resumes the same way; other reasons still don't.
+assert.equal(resumePlan({ wall: { until: 1000 }, now: 1000 + 61e3, goalStatus: { status: "paused", pauseReason: "Antigravity said it hit its limit; paused until 10:50 PM." } }).action, "resume");
+assert.equal(resumePlan({ wall: { until: 1000 }, now: 1000 + 61e3, goalStatus: { status: "paused", pauseReason: "Grok said it hit its limit" } }).action, "none");
+console.log("constance-resume: antigravity wall ok");
