@@ -138,6 +138,77 @@ const commitOn = (repo, file, text, msg) => commitFile(repo, file, text, msg);
   assert.equal(fs.readFileSync(path.join(c.worktree, "a.txt"), "utf8"), "copy\n", "the aborted rebase restored the copy's file");
 }
 
+// The first suite runs outside the merge lock; the rebase and the merge run inside it.
+{
+  const repo = makeRepo("lockorder");
+  const c = makeCopy(repo, 9, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
+  const events = [];
+  let held = false;
+  const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL,
+    suite: () => { events.push(held ? "suite-locked" : "suite"); return okSuite(); },
+    merge: (rp, br) => { events.push(held ? "merge-locked" : "merge"); return mergeBranch(rp, br); },
+    lock: (fn) => { held = true; try { return fn(); } finally { held = false; } } });
+  assert.equal(r.merged, true);
+  assert.deepEqual(events, ["suite", "merge-locked"], "suite outside the lock, merge inside it");
+}
+
+// Main moved on (no conflict): the copy is rebased first, the suite runs again
+// on the rebased tree under the lock, and main gets both changes.
+{
+  const repo = makeRepo("moved");
+  const c = makeCopy(repo, 10, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
+  commitOn(repo, "m.txt", "m\n", "main moved");
+  const seen = [];
+  const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL,
+    suite: (wt) => { seen.push(fs.existsSync(path.join(wt, "m.txt"))); return okSuite(); } });
+  assert.equal(r.merged, true, JSON.stringify(r)); assert.equal(r.retried, true);
+  assert.deepEqual(seen, [false, true], "the second suite saw main's new work");
+  assert.equal(fs.readFileSync(path.join(repo, "m.txt"), "utf8"), "m\n");
+  assert.equal(fs.readFileSync(path.join(repo, "b.txt"), "utf8"), "b\n");
+  const main = git(repo, "rev-parse", "HEAD^1").trim();
+  assert.equal(git(repo, "rev-parse", "HEAD^2^").trim(), main, "the copy's branch sat on main's tip when merged");
+  assert.match(git(repo, "log", "-1", "--format=%P").trim(), /^\S+ \S+$/, "a real merge commit, so a send-back can revert it whole");
+}
+
+// The suite fails on the rebased tree: flagged, nothing merged.
+{
+  const repo = makeRepo("movedfail");
+  const c = makeCopy(repo, 11, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
+  commitOn(repo, "m.txt", "m\n", "main moved");
+  let n = 0;
+  const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL,
+    suite: () => (++n === 1 ? okSuite() : { ok: false, failed: ["y.test.mjs"], output: "" }) });
+  assert.equal(r.merged, false); assert.equal(r.flagged, true);
+  assert.equal(r.reason, "suite failed after rebase"); assert.deepEqual(r.failed, ["y.test.mjs"]);
+  assert.equal(fs.existsSync(path.join(repo, "b.txt")), false, "nothing merged");
+}
+
+// Two copies from the same base self-merge one after the other: the second is
+// rebased onto the first's merge, so both changes are in main.
+{
+  const repo = makeRepo("pair");
+  const a = makeCopy(repo, 12, (wt) => commitFile(wt, "p1.txt", "1\n", "copy p1"));
+  const b = makeCopy(repo, 13, (wt) => commitFile(wt, "p2.txt", "2\n", "copy p2"));
+  assert.equal(selfMerge({ repo, worktree: a.worktree, branch: a.branch, checks: ALL, suite: okSuite }).merged, true);
+  const rb = selfMerge({ repo, worktree: b.worktree, branch: b.branch, checks: ALL, suite: okSuite });
+  assert.equal(rb.merged, true); assert.equal(rb.retried, true, "the second copy was rebased onto the first's merge");
+  assert.ok(fs.existsSync(path.join(repo, "p1.txt")) && fs.existsSync(path.join(repo, "p2.txt")), "neither copy's change was lost");
+  assert.equal(git(repo, "status", "--porcelain").trim(), "", "repo clean");
+}
+
+// A copy with several commits, on a main that never moved (a fast-forward was
+// possible): the self-merge still makes a merge commit, and reverting it takes
+// out all of the copy's commits, not just the last.
+{
+  const repo = makeRepo("multirevert");
+  const c = makeCopy(repo, 14, (wt) => { commitFile(wt, "q1.txt", "1\n", "copy q1"); commitFile(wt, "q2.txt", "2\n", "copy q2"); });
+  const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL, suite: okSuite });
+  assert.equal(r.merged, true); assert.equal(r.retried, false);
+  assert.equal(git(repo, "log", "-1", "--format=%P").trim().split(" ").length, 2, "a merge commit, not a fast-forward");
+  assert.equal(revertMerge(repo, r.commit).ok, true);
+  assert.ok(!fs.existsSync(path.join(repo, "q1.txt")) && !fs.existsSync(path.join(repo, "q2.txt")), "the revert took out every commit of the copy");
+}
+
 // The pending-review list: add, list, mark with a verdict; unknown jobs are a no-op.
 {
   const file = path.join(root, "reviews.json");

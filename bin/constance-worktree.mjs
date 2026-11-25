@@ -45,9 +45,9 @@ export function createWorktree(repo, id) {
 
 // Merge the copy's branch into the repo's current branch. Never forces: a
 // conflict is aborted and reported so Constance can stop and tell the owner.
-export function mergeBranch(repo, branch) {
+export function mergeBranch(repo, branch, { noFf = false } = {}) {
   const before = git(repo, "rev-parse", "HEAD");
-  const r = git(repo, "merge", "--no-edit", branch);
+  const r = git(repo, "merge", "--no-edit", ...(noFf ? ["--no-ff"] : []), branch);
   if (r.status === 0) {
     const head = git(repo, "rev-parse", "HEAD");
     return { ok: true, commit: head.status === 0 ? head.stdout.trim() : "", fastForward: before.status === 0 && head.status === 0 && head.stdout.trim() !== before.stdout.trim() ? false : true };
