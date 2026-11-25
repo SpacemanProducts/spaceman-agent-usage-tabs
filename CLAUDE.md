@@ -120,7 +120,7 @@ keeps the developer in flow:
   Since 1.42.0 every worker runs in bubblewrap (`bin/constance-sandbox.mjs`, test
   `constance-sandbox.test.mjs`): writable = project, the agent's own config/login folders
   (`PROFILES`), a per-job /tmp. The home folder is an empty tmpfs with only the toolchains
-  bound back read-only. There is no bus, ssh-agent or display, and `.git/config` and
+  bound back read-only. There is no bus, ssh-agent or display (Qt is pinned to `QT_QPA_PLATFORM=offscreen`, there and in the self-merge suite, so `qml6` runs headless instead of aborting), and `.git/config` and
   `.git/hooks` are read-only. `judge()` refuses any agent that can't be sandboxed, and
   without bwrap none launch. Keyring-login agents (copilot, cursor, antigravity) need the
   owner's opt-in via `constanceKeyringAgents` in settings.json, because the filtered bus

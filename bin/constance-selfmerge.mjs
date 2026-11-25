@@ -16,8 +16,10 @@ const git = (dir, ...args) => spawnSync("git", ["-C", dir, ...args], { encoding:
 
 // Run every bin/*.test.mjs in dir under node with cwd dir, each with HOME
 // pointed at a fresh temp folder that is removed afterwards, so the suite
-// never sees the real home. ok only when every file exits 0; output keeps the
-// last 2000 chars of what the tests printed.
+// never sees the real home, and with Qt pinned offscreen so a test that runs
+// qml6 or another Qt tool stays headless instead of aborting or opening a
+// window on the owner's desktop. ok only when every file exits 0; output keeps
+// the last 2000 chars of what the tests printed.
 export function runSuite(dir, { env = process.env } = {}) {
   const bin = path.join(dir, "bin");
   const files = fs.existsSync(bin) ? fs.readdirSync(bin).filter((f) => f.endsWith(".test.mjs")).sort() : [];
@@ -26,7 +28,7 @@ export function runSuite(dir, { env = process.env } = {}) {
   const failed = [];
   try {
     for (const f of files) {
-      const r = spawnSync(process.execPath, [path.join(bin, f)], { cwd: dir, encoding: "utf8", env: { ...env, HOME: home } });
+      const r = spawnSync(process.execPath, [path.join(bin, f)], { cwd: dir, encoding: "utf8", env: { ...env, HOME: home, QT_QPA_PLATFORM: "offscreen" } });
       chunks.push(r.stdout || "", r.stderr || "");
       if (r.status !== 0 || r.error) failed.push(f);
     }

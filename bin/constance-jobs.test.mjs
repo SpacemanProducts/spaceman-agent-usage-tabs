@@ -22,6 +22,7 @@ assert.ok(lines.findIndex((l) => l.startsWith("Task (job 7")) > 1, "the task com
 assert.match(p, /Only edit these files: Panel\.qml/);
 assert.match(p, /Everything else is off-limits/);
 assert.match(p, /tests and build/);
+assert.ok(lines.includes("To check QML, use `QT_QPA_PLATFORM=offscreen qml6 <file>`."), "the prompt says how to check QML headless");
 assert.match(p, /commit only your own work in its own commit/);
 assert.match(p, /never `git add -A`/);
 assert.match(p, /Do not push or deploy unless the task explicitly says to/);

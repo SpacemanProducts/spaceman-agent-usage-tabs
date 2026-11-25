@@ -233,6 +233,11 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   assert.equal(sandboxEnv(dirty, "grok", true).DBUS_SESSION_BUS_ADDRESS, `unix:path=/run/user/${uid}/bus`, "withBus points at the proxy socket");
   assert.equal(sandboxEnv(dirty, "cursor").DISPLAY, ":99", "cursor's profile re-adds its dead DISPLAY");
   assert.ok(!("DISPLAY" in sandboxEnv(dirty, "grok")), "other agents get no display");
+  // Qt runs offscreen inside, overriding the session's wayland;xcb, for every agent.
+  for (const id of [...Object.keys(PROFILES), ""]) {
+    assert.equal(sandboxEnv({ ...dirty, QT_QPA_PLATFORM: "wayland;xcb" }, id).QT_QPA_PLATFORM, "offscreen", `${id || "no agent"}: Qt pinned offscreen`);
+    assert.equal(sandboxEnv(dirty, id, true).QT_QPA_PLATFORM, "offscreen", `${id || "no agent"}: offscreen with the bus too`);
+  }
 }
 
 // ============================================================ 6. error paths

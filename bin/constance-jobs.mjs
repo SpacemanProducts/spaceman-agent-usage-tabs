@@ -88,6 +88,7 @@ export function handoffPrompt({ id, dir, task, files = [], account = null, workt
       ? `This is a read-only job: change nothing, create nothing, delete nothing.`
       : `Only edit these files: ${files.join(", ")}. Everything else is off-limits; if the task needs other files, say so in your report instead of editing them.`,
     `Run the project's tests and build, if it has them, and make sure they pass.`,
+    `To check QML, use \`QT_QPA_PLATFORM=offscreen qml6 <file>\`.`,
     ...(readOnly ? [] : [`When you are done, commit only your own work${branch ? ` on branch ${branch}` : ""} in its own commit: \`git add\` the files you changed by name (never \`git add -A\` or \`git add .\`), then \`git commit\` with a short message.`]),
     `Do not push or deploy${branch ? " or merge" : ""} unless the task explicitly says to.`,
     ``,

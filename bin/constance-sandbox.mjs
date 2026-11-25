@@ -182,9 +182,12 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
 }
 
 // The environment inside: no bus (unless the keyring proxy is given), no
-// ssh-agent, no display, temp in /tmp.
+// ssh-agent, no display, temp in /tmp. Qt is pinned to its offscreen platform:
+// the owner's session exports QT_QPA_PLATFORM=wayland;xcb, and with no display
+// socket inside, qml6 (even `qml6 --help`) and other Qt tools abort with
+// SIGABRT and leave a core dump instead of running headless.
 export function sandboxEnv(env = process.env, agent = "", withBus = false) {
-  const e = { ...env, TMPDIR: "/tmp" };
+  const e = { ...env, TMPDIR: "/tmp", QT_QPA_PLATFORM: "offscreen" };
   for (const k of ["DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO", "WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"]) delete e[k];
   if (withBus) e.DBUS_SESSION_BUS_ADDRESS = `unix:path=/run/user/${typeof process.getuid === "function" ? process.getuid() : 1000}/bus`;
   return { ...e, ...(PROFILES[agent]?.env || {}) };
