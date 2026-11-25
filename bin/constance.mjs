@@ -121,6 +121,13 @@ function practiceMode() {
 // queue and reviews all talk about one place.
 const runDir = (j) => j.worktree || j.dir;
 
+// Where a job's done file is read from: a copy's worktree, or the job's own
+// sandbox tmp for a job that works in the project folder itself (inside the
+// sandbox that tmp is /tmp — see handOut; a done file inside the project would
+// count as a plugin change and reload the owner's shell).
+const jobDoneFile = (j) => doneFile(j.worktree || j.tmp || runDir(j), j.id);
+const jobDoneDir = (j) => j.worktree || j.tmp || runDir(j);
+
 // A job's sandbox /tmp is only ever the folder handOut made for it; it goes when the job ends.
 function dropJobTmp(j) {
   const t = String(j.tmp || "");
@@ -146,7 +153,7 @@ function sweep() {
     const changed = [];
     for (const j of s.jobs) {
       if (j.status !== "running") continue;
-      const f = doneFile(runDir(j), j.id);
+      const f = jobDoneFile(j);
       let done = null, source = "";
       try { done = JSON.parse(fs.readFileSync(f, "utf8")); j.finishedAt = fs.statSync(f).mtimeMs; source = "done-file"; }
       catch {
@@ -161,7 +168,7 @@ function sweep() {
     return changed;
   });
   for (const j of changed) { guardFinished(j); dropJobTmp(j); }
-  for (const { j, source } of signals) recordSignal(store.dir, jobFinishSignal(j, { source, runDir: runDir(j) }));
+  for (const { j, source } of signals) recordSignal(store.dir, jobFinishSignal(j, { source, runDir: jobDoneDir(j) }));
   return changed;
 }
 
@@ -324,9 +331,15 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
     const asCopy = limit > 1 && files.length > 0;
     if (asCopy && practice) { j.practiceWorktree = worktreeFor(id); j.practiceBranch = branchFor(id); }
     const wt = j.worktree || j.practiceWorktree, br = j.branch || j.practiceBranch;
-    j.prompt = asCopy
-      ? handoffPrompt({ id, dir, task, files, account, worktree: wt, branch: br, mainDir: dir }, extra)
-      : handoffPrompt(j, extra);
+    // Copies share the repo's one stash, so their prompts forbid it. And a job
+    // that works in the project folder itself can't write its done file there
+    // (inside the sandbox its temp folder is /tmp, which is where the prompt
+    // must point — a done file in the project would reload the owner's shell).
+    const promptExtra = asCopy ? `${extra}\nNever use git stash: other copies share it.` : extra;
+    const built = asCopy
+      ? handoffPrompt({ id, dir, task, files, account, worktree: wt, branch: br, mainDir: dir }, promptExtra)
+      : handoffPrompt(j, promptExtra);
+    j.prompt = asCopy ? built : built.split(doneFile(dir, id)).join(doneFile("/tmp", id));
     s.jobs.push(j);
     return j;
   });
@@ -361,8 +374,6 @@ function launchJob(job, accountLabel = job.account?.label || "") {
   }
   const rd = runDir(job);
   excludeDoneFiles(rd);
-  fs.mkdirSync(path.join(rd, ".constance"), { recursive: true });
-  try { fs.rmSync(doneFile(rd, job.id)); } catch {}
   // Snapshot the world before the run: the post-run guard checks the diff and
   // these lists against it.
   const before = guardSnapshot(ENV, rd);
@@ -379,6 +390,12 @@ function launchJob(job, accountLabel = job.account?.label || "") {
   try {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `constance-job-${job.id}-`));
     store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.tmp = tmp; });
+    // The done file goes in a copy's worktree, or in the job's own sandbox tmp
+    // for a project-folder job (inside the sandbox that tmp is /tmp, which is
+    // what the prompt tells the agent): never inside the project itself.
+    const doneDir = job.worktree ? rd : tmp;
+    fs.mkdirSync(path.join(doneDir, ".constance"), { recursive: true });
+    try { fs.rmSync(doneFile(doneDir, job.id)); } catch {}
     box = sandboxLaunch(launchCommand(agent, job.prompt), { agent, dir: rd, tmp, env: { ...ENV, ...acctEnv }, extraRw: Object.values(acctEnv), keyringAgents: keyringAgents() });
   } catch (e) {
     fs.closeSync(fd);
@@ -452,7 +469,7 @@ function delegate() {
     out(`Job ${job.id} for ${who} is held: ${job.heldReason}. Its files are reserved and it starts by itself as soon as the machine has room; don't delegate it again. Run \`wait\`.`);
     return;
   }
-  out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."}${job.worker ? ` ${job.worker} works in its own worktree on ${job.branch}.` : ""} It writes ${doneFile(runDir(job), job.id)} when done; run \`wait\`.`);
+  out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."}${job.worker ? ` ${job.worker} works in its own worktree on ${job.branch}.` : ""} It writes ${jobDoneFile(job)} when done; run \`wait\`.`);
 }
 
 // After a job is accepted, the next queued task for its project goes to the
@@ -617,7 +634,7 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - \`C pace\`: your own session/weekly pacing. Obey its mode. "normal": keep hard, risky or architectural work, delegate routine well-defined low-risk pieces. "delegate": you are burning your limits too fast, so delegate editing and testing too and keep only planning and review. You never run out of your own limits; the driver pauses you at 90% and resumes after the reset.
 - \`C agents\`: who is available right now (under their limits, signed in, readable, free), best scorecard first, each with its record (jobs, accepted, sent back, average tokens and time) and how big a job suits it. Re-check right before every handoff; availability changes as limits reset. No agent is the default: spread work over whoever has spare capacity, and size each task to its agent's record. Never use an agent that isn't listed as available, and never anything that costs money.
 - The goal's checklist: \`C status\` shows the goal split into numbered items (board.checklist), which the owner watches tick. Tag every handoff with the item it is for, \`--item N\` (or \`--item 1,3\`), and give it \`--title "fixing the guard"\`: a few plain words, starting with a verb in -ing form, shown to the owner as "Devin 2 is fixing the guard". An item ticks when one of its jobs is merged and none is still open. When you finish an item yourself, \`C check N --note "..."\`.
-- If the goal ends with something only the owner can settle (a decision, a merge conflict, a failure you couldn't fix, an item you had to leave), run \`C needs-owner "one plain sentence"\` before your report. The owner's next queued goal then waits for them instead of starting.
+- \`C needs-owner "one plain sentence"\` is only for what truly needs the owner: a decision only they can make, a merge conflict, or a failure that two tries could not fix — never an ordinary failure you can retry or delegate again. Run it before your report; the owner's next queued goal then waits for them instead of starting.
 - \`C delegate --agent ID --files a,b --item N --title "..." --task "..."\`: hand off one small, clear task — the smaller and more self-contained, the better; give weaker agents smaller pieces. List every file it may edit; two editing jobs may never share files, and you must not edit a running job's files yourself. For read-only work (investigating a cause, summarizing a file) omit \`--files\`. The tool adds the folder check, git rules, tests/build and done file to the prompt, so the task text itself only needs to say what to do.
 - Devin may run as several copies at once (up to ${limitOf("devin")}): each editing job gets its own worktree and branch, shows up as Devin 1..${limitOf("devin")}, and merges into the project only after you accept it. Give copies tasks whose files never overlap; if a merge ever conflicts the job is marked and left for the owner — report it, don't force it. Copies ramp up as the machine allows: a delegate may come back "held" — its files are reserved and it starts by itself when the load and free memory allow, so never delegate it again; just keep going and \`wait\`.
 - Second-try rule: when a job comes back wrong, a redo goes out with \`--again ID\` (the job it redoes). Work sent back twice is never resent as it was: split it into smaller jobs with fewer files each, or do it yourself. \`delegate\` refuses a third try with the same files.
@@ -631,6 +648,7 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - \`C queue --task "..." [--files a,b] [--agent ID]\`: while planning, keep a short queue of ready tasks for this project so free agents never sit idle. When you accept a job, the next queued task is handed to the same agent automatically. \`C queue\` lists what is pending, \`C queue rm ID\` drops one.
 - \`C signals\`: recent "agent finished" notifications heard from the desktop. One matched to your job means check it; one for an agent with no job is the owner's own run — noted, never touched.
 - \`C lesson "..."\`: add one short lesson to your lessons file — something you learned the hard way this goal (a skipped check, a surprise an agent caused, a rule that saved time). It is advice for your future goals, never a rule that overrides the ones above. Read your lessons before each goal; they are already in your first message.
+- Never end your turn or write a final report while checklist items are still todo or jobs are open: delegate again or run \`wait\`. Stop only when the goal is done, you are out of room (pace pauses you), or something truly needs the owner.
 Before you edit anything, run \`git status\`; commit only your own changes, never push or deploy. When the goal is done and every job is reviewed, finish with a short plain report for the owner: what was done, by whom, the commits, anything left open.`;
 
 // The project folder for a goal: --dir, or a "+ New project" name made in ~/Projects. Throws with a
@@ -920,7 +938,11 @@ async function watch() {
   bus.on("error", () => { store.log({ kind: "note", text: "Notification watcher could not start (busctl missing?)." }); process.exit(0); });
   const parser = new NotifyParser();
   const onEvent = (evt) => {
-    const ev = handleNotification(evt, { jobs: store.read().jobs, storeDir: store.dir });
+    // A project-folder job's done file is in its sandbox tmp, not the project:
+    // matchJob finds done files through j.worktree, so hand it the tmp as the
+    // job's run dir (j.dir still covers folder matching).
+    const jobs = store.read().jobs.map((j) => !j.worktree && j.tmp ? { ...j, worktree: j.tmp } : j);
+    const ev = handleNotification(evt, { jobs, storeDir: store.dir });
     if (!ev) return;
     if (ev.kind === "agent-done") {
       store.log({ kind: "signal", job: ev.job, agent: ev.agent, text: `"${ev.summary}" — ${ev.inspection}` });
@@ -955,8 +977,22 @@ async function watch() {
   await new Promise(() => {});
 }
 
+// What is still open on the goal, phrased for the nudge she gets when a clean
+// exit leaves work unfinished: checklist items not done and jobs still
+// running/held/waiting or finished-but-unreviewed. "" when nothing is open.
+function openWork(s) {
+  const g = s.goal;
+  if (!g) return "";
+  const items = checklist(g, s.jobs).items.filter((i) => i.state !== "done").map((i) => i.n);
+  const jobs = s.jobs.filter((j) => (!j.goal || j.goal === g.id) && ["waiting", "held", "running", "finished"].includes(j.status));
+  const parts = [];
+  if (items.length) parts.push(`items ${items.join(", ")} are still open`);
+  if (jobs.length) parts.push(`jobs ${jobs.map((j) => j.id).join(", ")} are open`);
+  return parts.join(" and ");
+}
+
 async function drive() {
-  let pausedLogged = false, failures = 0;
+  let pausedLogged = false, failures = 0, nudge = null;
   for (;;) {
     const g = store.read().goal;
     if (!g || !["running", "paused"].includes(g.status)) return;
@@ -995,10 +1031,12 @@ async function drive() {
     }
     const resume = g.started;
     // Fresh lessons and this project's own rules go into the first message of
-    // every goal (advice only — her core rules above never change).
+    // every goal (advice only — her core rules above never change). A nudge
+    // resume carries its own short message instead of the generic one.
     const prompt = resume
-      ? "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal."
+      ? nudge || "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal."
       : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + rulesBlock(readProjectRules(g.dir));
+    nudge = null;
     const args = ["-p", "--model", g.model || "opus", "--dangerously-skip-permissions", "--output-format", "text", "--append-system-prompt", ROLE(g.dir),
       ...(resume ? ["--resume", g.session] : ["--session-id", g.session]), prompt];
     const reportPath = path.join(store.dir, `report-${g.id}.txt`);
@@ -1019,6 +1057,18 @@ async function drive() {
     if (pausedByUs) continue;
     const report = (() => { try { return fs.readFileSync(reportPath, "utf8").trim(); } catch { return ""; } })();
     if (code === 0) {
+      const s = store.read();
+      // A clean exit is not a finished goal: open checklist items or unreviewed
+      // jobs mean she stopped early. Resume her session with a nudge — at most
+      // 3 per goal — unless practice mode or an owner flag ends it normally.
+      const open = s.goal && ["running", "paused"].includes(s.goal.status) && !practiceMode() && !s.goal.needsOwner ? openWork(s) : "";
+      if (open && (s.goal.nudges || 0) < 3) {
+        const n = (s.goal.nudges || 0) + 1;
+        store.update((x) => { if (x.goal) x.goal.nudges = n; });
+        nudge = `The goal is not finished: ${open}. Keep going: delegate or wait, don't ask.`;
+        store.log({ kind: "note", text: `Claude exited cleanly but the goal is unfinished (${open}); resumed her, nudge ${n} of 3.` });
+        continue;
+      }
       store.update((s) => { s.goal.status = "done"; s.goal.finishedAt = Date.now(); s.goal.report = report.slice(-4000); });
       store.log({ kind: "report", text: report.slice(-4000) || "(no report)" });
       if (afterGoal()) { pausedLogged = false; failures = 0; continue; }

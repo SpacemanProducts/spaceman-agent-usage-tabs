@@ -110,7 +110,9 @@ fs.writeFileSync(path.join(fakeHome, "home-marker"), "the real (fake) home is vi
 const proc = path.join(root, "proc"); fs.mkdirSync(proc);
 const setLoad = (load) => fs.writeFileSync(path.join(proc, "loadavg"), `${load} 0.50 0.50 1/500 999\n`);
 setLoad("0.10");
-fs.writeFileSync(path.join(proc, "meminfo"), "MemTotal:       33554432 kB\nMemFree:        10000000 kB\nMemAvailable:   20971520 kB\n");
+// Copies are held on low memory only (load no longer matters — constance-ramp.mjs).
+const setMem = (availKb) => fs.writeFileSync(path.join(proc, "meminfo"), `MemTotal:       33554432 kB\nMemFree:        ${availKb} kB\nMemAvailable:   ${availKb} kB\n`);
+setMem(20971520);
 // Copy worktrees go in this test's own folder (removed with root), never the real
 // /var/tmp/constance-worktrees, where a real Constance run may have copies going.
 const worktrees = path.join(root, "worktrees");
@@ -219,6 +221,7 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
 {
   const ps = status();
   assert.equal(ps.practice, true, "status reports practice mode");
+  assert.ok(!ps.goal.nudges, "practice mode never nudges an unfinished goal");
   assert.equal(ps.jobs.length, 2);
   assert.ok(ps.jobs.every((j) => j.status === "accepted" && /practice run/.test(j.summary)), "practice jobs are born finished and reviewed");
   assert.deepEqual(ps.jobs.map((j) => j.files), [["z.txt"], []], "one editing and one read-only handoff");
@@ -471,6 +474,9 @@ fs.rmSync(path.join(root, "go"), { force: true });
 fs.rmSync(path.join(root, "owner-ok"), { force: true });
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
+p="\${@: -1}"
+# A nudge resume (the goal can't tick past the merge conflict) just reports again.
+[[ "$p" == *"goal is not finished"* ]] && { echo "Report: done."; exit 0; }
 $C delegate --agent devin --files a.txt --task "change a" >> "${root}/conflict.out" 2>&1
 $C delegate --agent devin --files b.txt --task "add b" >> "${root}/conflict.out" 2>&1
 touch "${root}/go"
@@ -545,9 +551,9 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
   assert.equal(git("branch", "--list", "constance/*").trim(), "", "all ten branches cleaned up");
 }
 
-// A held copy: the machine is busy, so the copy is held (its files reserved, the
-// reason shown), and it starts by itself once the load drops.
-setLoad("999.00");
+// A held copy: the machine is low on memory, so the copy is held (its files
+// reserved, the reason shown), and it starts by itself once memory frees up.
+setMem(1024 * 1024);
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
 $C delegate --agent devin --files h1.txt --task "add h1" > "${root}/held.out" 2>&1
@@ -562,17 +568,17 @@ assert.equal(run("start", "--dir", repo, "--goal", "held copy").status, 0);
 assert.ok(await until(() => { try { return fs.readFileSync(path.join(root, "held.out"), "utf8").includes("refused-held-files"); } catch { return false; } }), "both delegates ran");
 {
   const outHeld = fs.readFileSync(path.join(root, "held.out"), "utf8");
-  assert.match(outHeld, /is held: machine busy: load 999\.0 on \d+ cores/, "the delegate says it is held and why");
+  assert.match(outHeld, /is held: low memory: 1\.0 GiB free/, "the delegate says it is held and why");
   assert.match(outHeld, /overlap job/, "a held job's files stay reserved");
   const hs = status();
   const hj = hs.jobs.find((j) => j.goal === hs.goal.id && j.files.includes("h1.txt"));
-  assert.equal(hj.status, "held"); assert.equal(hj.worker, "Devin 1"); assert.match(hj.heldReason, /machine busy/);
+  assert.equal(hj.status, "held"); assert.equal(hj.worker, "Devin 1"); assert.match(hj.heldReason, /low memory/);
   assert.equal(hj.pid, undefined, "nothing launched while held");
   const c = hs.copies.find((x) => x.agent === "devin");
-  assert.equal(c.held, 1); assert.equal(c.running, 0); assert.match(c.heldReason, /machine busy/, "the panel gets the count and the reason");
+  assert.equal(c.held, 1); assert.equal(c.running, 0); assert.match(c.heldReason, /low memory/, "the panel gets the count and the reason");
   assert.ok(hs.log.some((l) => l.kind === "held" && l.job === hj.id), "held is in her log");
 }
-setLoad("0.10");
+setMem(20971520);
 assert.ok(await until(() => status().goal.status === "done", 60000), "the held copy starts once the machine calms down, and the goal finishes: " + JSON.stringify(status().goal));
 {
   const hs = status();
@@ -740,8 +746,9 @@ watcher.kill("SIGKILL");
   // Fake Constance for queued goals: the goal text is in her first message. "build q1" delegates one
   // tagged job and waits for it; "ask owner" flags a question; anything else just reports.
   fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
-p="\${@: -1}"; C="node ${CLI}"
-echo "$p" | head -1 >> "${root}/queue-goals.txt"
+C="node ${CLI}"
+p="\${@: -1}"
+[[ "$p" == "Goal from the owner:"* ]] && echo "$p" | head -1 >> "${root}/queue-goals.txt"
 while [[ ! -e "${root}/qgo" ]]; do sleep 0.2; done
 if grep -q "build q1" <<<"$p"; then
   $C delegate --agent grok --files q1.txt --item 1 --title "building q1" --task "add q1" >> "${root}/brain.out" 2>&1
@@ -926,6 +933,55 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
   assert.equal(dj.status, "sent back");
   assert.equal(fs.readFileSync(path.join(repo, "cover.txt"), "utf8"), "x\n", "only the grok job's cover.txt is in the repo");
 }
+// "Never stop to ask": an exit-0 run with open checklist items is not a finished
+// goal — the driver resumes her session with a nudge, at most 3 per goal, then
+// ends as before. The fake claude does nothing and exits 0 every time.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+n=0; [[ -f "${root}/nudge-runs" ]] && n=$(cat "${root}/nudge-runs"); n=$((n+1)); echo "$n" > "${root}/nudge-runs"
+echo "$@" > "${root}/nudge-args-$n"
+exit 0
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "1. first thing\n2. second thing").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 30000), "the nudged goal finishes: " + JSON.stringify(status().goal));
+{
+  assert.equal(fs.readFileSync(path.join(root, "nudge-runs"), "utf8").trim(), "4", "the first run plus 3 nudges, then it ends");
+  const last = fs.readFileSync(path.join(root, "nudge-args-4"), "utf8");
+  assert.match(last, /--resume/, "the nudge resumes her session");
+  assert.match(last, /The goal is not finished: items 1, 2 are still open/, "the nudge names what is open");
+  assert.match(last, /Keep going: delegate or wait, don't ask/, "and tells her to keep going");
+  assert.equal(status().goal.nudges, 3, "the nudge count is kept on the goal");
+  assert.ok(status().log.some((l) => l.kind === "note" && /nudge 3 of 3/.test(l.text)), "each nudge is logged");
+}
+
+// A project-folder job's done file lives in its sandbox tmp (inside the sandbox
+// that is /tmp), never in the project: sweep finds it there, the prompt says
+// so, and nothing lands under the project's .constance.
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent grok --task "read-only job: summarize a.txt" >> "${root}/tmpdone.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 30 > "${root}/tmpdone-wait.json"
+id=$(grep -o '"id": [0-9]*' "${root}/tmpdone-wait.json" | head -1 | grep -o '[0-9]*')
+$C review "$id" accept --note "ok" >> "${root}/tmpdone.out" 2>&1
+echo "Tmpdone report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "tmp done goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 30000), "the tmp-done goal finishes: " + JSON.stringify(status().goal));
+{
+  const tj = status().jobs.find((j) => j.goal === status().goal.id);
+  assert.equal(tj.status, "accepted");
+  assert.match(tj.summary, /cause: a\.txt has no b/, "the done file in the sandbox tmp was found");
+  const sig = JSON.parse(run("signals").stdout);
+  assert.equal(sig.find((s) => s.job === tj.id)?.source, "done-file", "the finish was recorded from the tmp done file");
+  const stored = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "jobs.json"), "utf8"));
+  const pj = stored.jobs.find((j) => j.id === tj.id);
+  assert.match(pj.prompt, /write the file \/tmp\/\.constance\/done-\d+\.json/, "the prompt points inside the sandbox tmp");
+  assert.ok(!fs.readdirSync(path.join(repo, ".constance")).some((f) => f.startsWith("done-")), "no done file in the project folder");
+}
+
 // Every finished or stopped job removed its own sandbox /tmp.
 {
   const jobsNow = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "jobs.json"), "utf8")).jobs;
