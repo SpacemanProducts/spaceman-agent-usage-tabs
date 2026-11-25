@@ -2,8 +2,9 @@
 // layout, how to test it, the rules that matter and the files it must never
 // touch — so a worker's prompt can carry just enough context without reading
 // the whole repo. The brief is rebuilt only when the tree moved a lot (more
-// than 20 committed files since the cached HEAD) or the cache is a week old;
-// small churn keeps the old brief.
+// than 20 committed files since the cached HEAD, or files touched since a
+// plain folder's cached build) or the cache is a week old; small churn keeps
+// the old brief.
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -14,12 +15,13 @@ const MAX_CHANGED = 20;
 const MAX_AGE_MS = 7 * 24 * 3600 * 1000;
 const SKIP_DIRS = new Set([".git", "node_modules"]);
 
+const gitRaw = (dir, exec, ...args) =>
+  exec ? exec("git", ["-C", dir, ...args]) : spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+
 const git = (dir, exec, ...args) => {
-  const r = exec ? exec("git", ["-C", dir, ...args]) : spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  const r = gitRaw(dir, exec, ...args);
   return r && r.status === 0 ? String(r.stdout || "") : "";
 };
-
-const headOf = (dir, exec) => git(dir, exec, "rev-parse", "HEAD").trim();
 
 // Files tracked by git, or a plain walk when the folder isn't a repo.
 function fileCount(dir, exec) {
@@ -173,17 +175,49 @@ function changedSince(dir, from, to, exec) {
   return diff.split("\n").filter(Boolean).length;
 }
 
+// A plain folder has no HEAD to diff, so "changed" means files whose mtime is
+// newer than the cached build — the same 20-file allowance as git churn.
+function changedSinceMtime(dir, sinceMs) {
+  if (!Number.isFinite(sinceMs)) return Infinity;
+  let n = 0;
+  const walk = (d) => {
+    let ents = [];
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (e.name.startsWith(".") || SKIP_DIRS.has(e.name)) continue;
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      try { if (fs.lstatSync(p).mtimeMs > sinceMs) n++; } catch { /* vanished mid-walk */ }
+    }
+  };
+  walk(dir);
+  return n;
+}
+
 // The brief for a project, served from cacheDir/<hash>.json while it is fresh:
-// rebuilt only when the cache is missing, older than 7 days, or more than 20
-// files changed in git since the cached HEAD.
+// rebuilt only when the cache is missing, older than 7 days, or the tree moved
+// — more than 20 committed files since the cached HEAD in a repo, more than 20
+// files touched since the cached build in a plain folder. A repo whose HEAD
+// can't be read (dead git, unborn branch) keeps rebuilding rather than
+// trusting the cache.
 export function briefFor(dir, { cacheDir, now = Date.now(), exec } = {}) {
   const t = now instanceof Date ? now.getTime() : Number(now) || Date.now();
   const file = path.join(cacheDir, cacheName(dir));
   let cached = null;
   try { cached = JSON.parse(fs.readFileSync(file, "utf8")); } catch { /* missing or corrupt */ }
-  const head = headOf(dir, exec);
+  const rev = gitRaw(dir, exec, "rev-parse", "HEAD");
+  const head = rev && rev.status === 0 ? String(rev.stdout || "").trim() : "";
+  // "not a git repository" in stderr is the only failure that earns the
+  // mtime rule; anything else (a broken repo, an exec seam with no stderr)
+  // stays on the rebuild-forever path.
+  const plainDir = !head && Boolean(rev) && rev.status !== 0 &&
+    /not a git repository/i.test(String(rev.stderr || ""));
   const age = cached && cached.builtAt ? t - Date.parse(cached.builtAt) : Infinity;
-  const changed = cached && cached.head ? changedSince(dir, cached.head, head, exec) : Infinity;
+  let changed = Infinity;
+  if (cached && cached.brief) {
+    if (head) changed = cached.head ? changedSince(dir, cached.head, head, exec) : Infinity;
+    else if (plainDir && !cached.head) changed = changedSinceMtime(dir, Date.parse(cached.builtAt));
+  }
   if (cached && cached.brief && age <= MAX_AGE_MS && changed <= MAX_CHANGED) return cached.brief;
   const brief = buildBrief(dir, { exec });
   try {
