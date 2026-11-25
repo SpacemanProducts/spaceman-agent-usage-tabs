@@ -5,8 +5,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { addTask, pendingTasks, peekNext, finishTask, removeTask, queueView, queueFile } from "./constance-queue.mjs";
+import { addTask, pendingTasks, peekNext, readyTasks, finishTask, removeTask, queueView, queueFile } from "./constance-queue.mjs";
 
+process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), "constance-queue-home-"));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-queue-"));
 const projA = "/home/u/proj-a", projB = "/home/u/proj-b";
 
@@ -49,6 +50,24 @@ assert.ok(!(projB in JSON.parse(fs.readFileSync(queueFile(dir), "utf8")).project
 // State survives a "restart" (fresh read from disk).
 addTask(projA, { task: "persisted" }, dir);
 assert.equal(pendingTasks(projA, dir)[0].task, "persisted");
+
+// readyTasks: skips tasks touching busy files, tasks already claimed by an
+// earlier pick, and honours the limit; read-only tasks are always eligible.
+const projR = "/home/u/proj-r";
+const r1 = addTask(projR, { task: "write a.js", files: ["a.js"] }, dir);
+const r2 = addTask(projR, { task: "read only" }, dir);
+const r3 = addTask(projR, { task: "write b.js", files: ["b.js"] }, dir);
+const r4 = addTask(projR, { task: "share a.js", files: ["a.js"] }, dir);
+assert.deepEqual(readyTasks(projR, {}, dir).map((t) => t.id), [r1.id, r2.id, r3.id], "r4 shares a.js with r1, so it is not picked");
+assert.deepEqual(readyTasks(projR, { busyFiles: ["a.js"] }, dir).map((t) => t.id), [r2.id, r3.id], "busy file skips r1 and the later r4 that shares it");
+assert.deepEqual(readyTasks(projR, { limit: 2 }, dir).map((t) => t.id), [r1.id, r2.id], "limit caps the result");
+// Two queued tasks sharing a file: the first picked claims it, the second is skipped.
+const projS = "/home/u/proj-s";
+const s1 = addTask(projS, { task: "first a.js", files: ["a.js", "shared.js"] }, dir);
+const s2 = addTask(projS, { task: "second shared.js", files: ["shared.js"] }, dir);
+const s3 = addTask(projS, { task: "third c.js", files: ["c.js"] }, dir);
+assert.deepEqual(readyTasks(projS, {}, dir).map((t) => t.id), [s1.id, s3.id], "no two picked tasks share a file");
+assert.deepEqual(readyTasks(projR, {}, dir), pendingTasks(projR, dir).filter((t) => t.id !== r4.id), "returns the same task objects pendingTasks returns");
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log("constance-queue: tests passed");

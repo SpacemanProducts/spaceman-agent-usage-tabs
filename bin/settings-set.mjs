@@ -3,13 +3,13 @@
 // folder), never to shell.json.
 // Usage: settings-set.mjs <key> <true|false>   |   settings-set.mjs hidden <agentId> <true|false>
 //        |   settings-set.mjs volume <0-100>   |   settings-set.mjs order <id,id,...|reset>
-//        |   settings-set.mjs maxCopies <1-10>
+//        |   settings-set.mjs maxCopies <1-10>   |   settings-set.mjs constanceMilk <0-100>
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { catalogIds } from "./catalog.mjs";
 
-export const ALLOWED = ["hideUninstalledAgents", "showUnusedModels", "resetAnimation", "resetSound", "autoOpenOnReset", "handoffNote", "angryRobot", "skipPermissions", "constancePractice", "welcomeDismissed"];
+export const ALLOWED = ["hideUninstalledAgents", "showUnusedModels", "resetAnimation", "resetSound", "autoOpenOnReset", "handoffNote", "angryRobot", "skipPermissions", "constancePractice", "constanceUseItOrLoseIt", "welcomeDismissed"];
 export const CORE_IDS = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp"];
 // The catalog agents (agents-catalog.json) are real tabs too: they can be hidden and reordered like the rest.
 export const AGENT_IDS = [...CORE_IDS, ...catalogIds()];
@@ -29,6 +29,15 @@ export function applyMaxCopies(current, value) {
   if (!/^\d{1,2}$/.test(String(value)) || !Number.isInteger(n) || n < 1 || n > 10) throw new Error(`maxCopies must be an integer 1-10: ${value}`);
   const base = current && typeof current === "object" && !Array.isArray(current) ? current : {};
   return { ...base, constanceMaxCopies: n };
+}
+
+// Constance's Milk Opus slider (bin/constance-milk.mjs): an integer 0-100, clamped into
+// range. The panel's slider only ever sends step-5 values; anything else integer is kept.
+export function applyMilk(current, value) {
+  const n = Number(value);
+  if (!/^-?\d{1,3}$/.test(String(value)) || !Number.isInteger(n)) throw new Error(`constanceMilk must be an integer 0-100: ${value}`);
+  const base = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+  return { ...base, constanceMilk: Math.min(100, Math.max(0, n)) };
 }
 
 // A tab the user hides stays hidden (by agent id) until they unhide it, even
@@ -70,6 +79,7 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
       : process.argv[2] === "order" ? applyOrder(current, process.argv[3])
       : process.argv[2] === "volume" ? applyVolume(current, process.argv[3])
       : process.argv[2] === "maxCopies" ? applyMaxCopies(current, process.argv[3])
+      : process.argv[2] === "constanceMilk" || process.argv[2] === "milk" ? applyMilk(current, process.argv[3])
       : applySetting(current, process.argv[2], process.argv[3]);
     fs.mkdirSync(dir, { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;

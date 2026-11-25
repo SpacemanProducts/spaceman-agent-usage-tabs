@@ -77,8 +77,11 @@ while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-x.txt}
 before=$(git rev-parse HEAD)
 echo "devin $name" > "$name"; git add "$name"; git commit -qm "devin: $name" || true
+if grep -q "sneaky copy" <<<"$p"; then echo cover > cover.txt; git add cover.txt; git commit -qm "devin: cover outside its list" || true; fi
 after=$(git rev-parse HEAD); c=""; [[ "$after" != "$before" ]] && c="$after"
-echo "{\\"summary\\": \\"added \${name%.*} in $here\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]}" > "$f"
+# The "selfmerge" marker makes it report its tests passed, so the job can self-merge.
+t=""; grep -q selfmerge <<<"$p" && t=', "tests": "pass"'
+echo "{\\"summary\\": \\"added \${name%.*} in $here\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]$t}" > "$f"
 `, { mode: 0o755 });
 // Fake Constance: delegate (one read-only investigation, then the fix), wait, review, report.
 // Records its arguments.
@@ -109,7 +112,9 @@ fs.writeFileSync(path.join(fakeHome, "home-marker"), "the real (fake) home is vi
 const proc = path.join(root, "proc"); fs.mkdirSync(proc);
 const setLoad = (load) => fs.writeFileSync(path.join(proc, "loadavg"), `${load} 0.50 0.50 1/500 999\n`);
 setLoad("0.10");
-fs.writeFileSync(path.join(proc, "meminfo"), "MemTotal:       33554432 kB\nMemFree:        10000000 kB\nMemAvailable:   20971520 kB\n");
+// Copies are held on low memory only (load no longer matters — constance-ramp.mjs).
+const setMem = (availKb) => fs.writeFileSync(path.join(proc, "meminfo"), `MemTotal:       33554432 kB\nMemFree:        ${availKb} kB\nMemAvailable:   ${availKb} kB\n`);
+setMem(20971520);
 // Copy worktrees go in this test's own folder (removed with root), never the real
 // /var/tmp/constance-worktrees, where a real Constance run may have copies going.
 const worktrees = path.join(root, "worktrees");
@@ -218,6 +223,7 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
 {
   const ps = status();
   assert.equal(ps.practice, true, "status reports practice mode");
+  assert.ok(!ps.goal.nudges, "practice mode never nudges an unfinished goal");
   assert.equal(ps.jobs.length, 2);
   assert.ok(ps.jobs.every((j) => j.status === "accepted" && /practice run/.test(j.summary)), "practice jobs are born finished and reviewed");
   assert.deepEqual(ps.jobs.map((j) => j.files), [["z.txt"], []], "one editing and one read-only handoff");
@@ -259,6 +265,30 @@ assert.ok(await until(() => status().goal && status().goal.status === "done"), "
   assert.match(fs2.goal.report, /Fallback report/);
   assert.equal(fs2.jobs.find((j) => j.id === 6).status, "accepted", "the delegated job still ran and was reviewed");
 }
+
+// Claude's own "hit your limit" exit is a pause until the time it states, never a failure:
+// wall.json is written, the goal waits paused (the reading in data.json looks fine, and
+// still can't resume her), and nothing counts as a failed run.
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+echo run >> "${root}/limit-runs"
+echo "You've hit your 5-hour limit · resets 5:50pm (America/New_York)"
+exit 1
+`, { mode: 0o755 });
+assert.equal(run("start", "--dir", repo, "--goal", "limit goal").status, 0);
+const wallPath = path.join(tabs, "constance", "wall.json");
+assert.ok(await until(() => fs.existsSync(wallPath) && status().goal.status === "paused"), "a limit exit pauses the goal: " + JSON.stringify(status().goal));
+{
+  const ls = status();
+  const wall = JSON.parse(fs.readFileSync(wallPath, "utf8"));
+  assert.equal(wall.stated, true); assert.ok(wall.until > Date.now(), "until the stated reset time");
+  assert.match(ls.goal.pauseReason, /hit its limit/);
+  assert.equal(ls.pace.mode, "stop", "pace honors the wall over a low reading"); assert.equal(ls.pace.hard, true);
+  assert.ok(!ls.log.some((l) => l.kind === "failed" && l.at > wall.at - 5000), "no failure logged");
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(fs.readFileSync(path.join(root, "limit-runs"), "utf8").trim().split("\n").length, 1, "no retries into the wall");
+}
+assert.equal(run("stop").status, 0);
+fs.rmSync(wallPath);
 
 // Learning layer + guardrails: the lessons file seeded itself, every handoff
 // prompt carries the project rules and the guardrail block, and a run that
@@ -446,6 +476,9 @@ fs.rmSync(path.join(root, "go"), { force: true });
 fs.rmSync(path.join(root, "owner-ok"), { force: true });
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
+p="\${@: -1}"
+# A nudge resume (the goal can't tick past the merge conflict) just reports again.
+[[ "$p" == *"goal is not finished"* ]] && { echo "Report: done."; exit 0; }
 $C delegate --agent devin --files a.txt --task "change a" >> "${root}/conflict.out" 2>&1
 $C delegate --agent devin --files b.txt --task "add b" >> "${root}/conflict.out" 2>&1
 touch "${root}/go"
@@ -520,9 +553,9 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
   assert.equal(git("branch", "--list", "constance/*").trim(), "", "all ten branches cleaned up");
 }
 
-// A held copy: the machine is busy, so the copy is held (its files reserved, the
-// reason shown), and it starts by itself once the load drops.
-setLoad("999.00");
+// A held copy: the machine is low on memory, so the copy is held (its files
+// reserved, the reason shown), and it starts by itself once memory frees up.
+setMem(1024 * 1024);
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
 $C delegate --agent devin --files h1.txt --task "add h1" > "${root}/held.out" 2>&1
@@ -537,17 +570,17 @@ assert.equal(run("start", "--dir", repo, "--goal", "held copy").status, 0);
 assert.ok(await until(() => { try { return fs.readFileSync(path.join(root, "held.out"), "utf8").includes("refused-held-files"); } catch { return false; } }), "both delegates ran");
 {
   const outHeld = fs.readFileSync(path.join(root, "held.out"), "utf8");
-  assert.match(outHeld, /is held: machine busy: load 999\.0 on \d+ cores/, "the delegate says it is held and why");
+  assert.match(outHeld, /is held: low memory: 1\.0 GiB free/, "the delegate says it is held and why");
   assert.match(outHeld, /overlap job/, "a held job's files stay reserved");
   const hs = status();
   const hj = hs.jobs.find((j) => j.goal === hs.goal.id && j.files.includes("h1.txt"));
-  assert.equal(hj.status, "held"); assert.equal(hj.worker, "Devin 1"); assert.match(hj.heldReason, /machine busy/);
+  assert.equal(hj.status, "held"); assert.equal(hj.worker, "Devin 1"); assert.match(hj.heldReason, /low memory/);
   assert.equal(hj.pid, undefined, "nothing launched while held");
   const c = hs.copies.find((x) => x.agent === "devin");
-  assert.equal(c.held, 1); assert.equal(c.running, 0); assert.match(c.heldReason, /machine busy/, "the panel gets the count and the reason");
+  assert.equal(c.held, 1); assert.equal(c.running, 0); assert.match(c.heldReason, /low memory/, "the panel gets the count and the reason");
   assert.ok(hs.log.some((l) => l.kind === "held" && l.job === hj.id), "held is in her log");
 }
-setLoad("0.10");
+setMem(20971520);
 assert.ok(await until(() => status().goal.status === "done", 60000), "the held copy starts once the machine calms down, and the goal finishes: " + JSON.stringify(status().goal));
 {
   const hs = status();
@@ -715,8 +748,9 @@ watcher.kill("SIGKILL");
   // Fake Constance for queued goals: the goal text is in her first message. "build q1" delegates one
   // tagged job and waits for it; "ask owner" flags a question; anything else just reports.
   fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
-p="\${@: -1}"; C="node ${CLI}"
-echo "$p" | head -1 >> "${root}/queue-goals.txt"
+C="node ${CLI}"
+p="\${@: -1}"
+[[ "$p" == "Goal from the owner:"* ]] && echo "$p" | head -1 >> "${root}/queue-goals.txt"
 while [[ ! -e "${root}/qgo" ]]; do sleep 0.2; done
 if grep -q "build q1" <<<"$p"; then
   $C delegate --agent grok --files q1.txt --item 1 --title "building q1" --task "add q1" >> "${root}/brain.out" 2>&1
@@ -786,11 +820,372 @@ echo "Report: done."
   assert.match(sb.now, /^Free\. Last goal finished\.$/);
   assert.match(run("goals", "next").stderr, /empty/);
   assert.deepEqual(fs.readFileSync(path.join(root, "queue-goals.txt"), "utf8").trim().split("\n").map((l) => l.replace(/^Goal from the owner: /, "")), ["build q1", "ask owner", "third goal, edited"]);
+  // The queue ran empty: the morning report is written and sent (silently).
+  assert.ok(await until(() => fs.existsSync(path.join(tabs, "constance", "morning-report.md")), 5000), "the morning report is written");
+  const mr = fs.readFileSync(path.join(tabs, "constance", "morning-report.md"), "utf8");
+  assert.match(mr, /# Morning report/); assert.match(mr, /build q1/); assert.match(mr, /third goal, edited/); assert.match(mr, /Pick a color/, "what needed the owner is in it");
+  assert.match(fs.readFileSync(path.join(root, "notified.txt"), "utf8"), /Constance: morning report/, "and a desktop notification went out");
+  assert.ok(sb && status().log.some((l) => l.kind === "morning"), "logged");
+  // Every reviewed job counts on the scorecard, shown on the board.
+  const sc = status().board.scorecard;
+  const grokRow = sc.rows.find((r) => r.agent === "grok");
+  assert.ok(grokRow && /accepted/.test(grokRow.line) && grokRow.hint, "grok has a scorecard row: " + JSON.stringify(sc));
+  assert.equal(sc.spareOn, true, "use it or lose it is on by default");
+  assert.match(run("scorecard").stdout, /grok: \d+ jobs, \d+ accepted/);
+  assert.match(run("agents").stdout, /AVAILABLE  grok .*\[grok: \d+ jobs/, "agents shows each available agent's record and size hint");
 }
+// Second-try rule, the backlog, and use it or lose it. "retry goal": a job is sent back twice,
+// the third try with the same files is refused, a split goes through. The goal also fills the
+// backlog; when it ends with the queue empty, devin's room (its window resets in 30 min, barely
+// used) goes to a backlog goal started by itself, once — then the morning report.
+{
+  fs.rmSync(path.join(root, "go"), { force: true });
+  try { fs.rmSync(path.join(root, "notified.txt")); } catch {}
+  fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+p="\${@: -1}"; C="node ${CLI}"
+echo "$p" | head -1 >> "${root}/retry-goals.txt"
+if grep -q "retry goal" <<<"$p"; then
+  touch "${root}/go"
+  $C delegate --agent grok --files r1.txt,r2.txt --task "add r" >> "${root}/retry.out" 2>&1
+  $C wait --timeout 30 > /dev/null
+  $C review $($C jobs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{console.log(JSON.parse(d).jobs.at(-1).id)})') send-back --note "wrong" >> "${root}/retry.out" 2>&1
+  first=$($C jobs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{console.log(JSON.parse(d).jobs.at(-1).id)})')
+  $C delegate --agent grok --files r1.txt,r2.txt --again "$first" --task "add r again" >> "${root}/retry.out" 2>&1
+  $C wait --timeout 30 > /dev/null
+  $C review $($C jobs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{console.log(JSON.parse(d).jobs.at(-1).id)})') send-back --note "still wrong" >> "${root}/retry.out" 2>&1
+  $C delegate --agent grok --files r2.txt,r1.txt --task "add r a third time" >> "${root}/retry.out" 2>&1 || echo "refused-third" >> "${root}/retry.out"
+  $C delegate --agent grok --files r1.txt --task "add r1 only" >> "${root}/retry.out" 2>&1 || echo "refused-split" >> "${root}/retry.out"
+  $C wait --timeout 30 > /dev/null
+  $C review $($C jobs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{console.log(JSON.parse(d).jobs.at(-1).id)})') accept --note "split worked" >> "${root}/retry.out" 2>&1
+  $C backlog add --kind test --text "cover the parser edge cases" >> "${root}/retry.out" 2>&1
+  $C backlog add --kind review --text "look over the guard design" >> "${root}/retry.out" 2>&1
+  $C backlog add --kind nonsense --text "x" >> "${root}/retry.out" 2>&1 || echo "refused-kind" >> "${root}/retry.out"
+  $C backlog >> "${root}/retry.out" 2>&1
+  $C spare >> "${root}/retry.out" 2>&1
+elif grep -q "Use it or lose it" <<<"$p"; then
+  $C backlog done 1 >> "${root}/retry.out" 2>&1
+fi
+echo "Report: done."
+`, { mode: 0o755 });
+  // devin: a window that resets in 30 minutes, barely used — room it would lose.
+  fs.writeFileSync(path.join(tabs, "data.json"), JSON.stringify({ generatedAt: Date.now(), agents: [
+    { id: "claude", installed: true, signedIn: true, limits: [{ title: "Session", percent: 0.1, resetsAt: soon(4) }, { title: "Weekly", percent: 0.1, resetsAt: soon(150) }] },
+    { id: "grok", installed: true, signedIn: true, limits: [{ title: "Daily", percent: 0.1 }] },
+    { id: "devin", name: "Devin", installed: true, signedIn: true, limits: [{ title: "Daily", percent: 0.1, resetsAt: soon(0.5) }] }] }));
+  // Earlier blocks gave grok guardrail strikes (one file per job); this block needs two-file jobs.
+  { const jf = path.join(tabs, "constance", "jobs.json"), d = JSON.parse(fs.readFileSync(jf, "utf8")); d.guards = {}; fs.writeFileSync(jf, JSON.stringify(d)); }
+  assert.equal(run("start", "--dir", repo, "--goal", "retry goal").status, 0);
+  assert.ok(await until(() => { const t = fs.existsSync(path.join(root, "retry-goals.txt")) ? fs.readFileSync(path.join(root, "retry-goals.txt"), "utf8") : ""; return /Use it or lose it/.test(t) && status().goal.status === "done"; }, 60000),
+    "a backlog goal started by itself after the retry goal: " + JSON.stringify(status().goal));
+  const ro = fs.readFileSync(path.join(root, "retry.out"), "utf8");
+  assert.match(ro, /sent back twice \(jobs \d+ and \d+\)/, "the second send-back says to split or do it");
+  assert.match(ro, /were already sent back for this work.*split it into smaller jobs/s, "the third try with the same files is refused");
+  assert.match(ro, /refused-third/); assert.doesNotMatch(ro, /refused-split/, "a smaller split goes through");
+  assert.match(ro, /refused-kind/, "an unknown backlog kind is refused");
+  assert.match(ro, /#1 test: cover the parser edge cases/); assert.match(ro, /#2 review: look over the guard design/);
+  assert.match(ro, /devin: #1 test: cover the parser edge cases/, "spare: devin's leftover room goes to the backlog's worker item");
+  const g = status().goal;
+  assert.equal(g.fromSpare, true);
+  assert.match(g.text, /Hand to Devin: test: cover the parser edge cases \(backlog #1\)/);
+  assert.doesNotMatch(g.text, /look over the guard design/, "review work is only for Constance's own leftover Opus, and she has none near a reset");
+  assert.match(fs.readFileSync(path.join(repo, ".constance", "backlog.md"), "utf8"), /- \[x\] test: cover the parser edge cases/, "she marked it done");
+  // Once per reset window: no second backlog goal, then the morning report.
+  assert.ok(await until(() => fs.existsSync(path.join(root, "notified.txt")) && /morning report/.test(fs.readFileSync(path.join(root, "notified.txt"), "utf8")), 10000), "the morning report went out after the backlog goal");
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(fs.readFileSync(path.join(root, "retry-goals.txt"), "utf8").trim().split("\n").filter((l) => /Use it or lose it/.test(l)).length, 1, "only one backlog goal for that window");
+  // The setting turns it off.
+  fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false, constanceUseItOrLoseIt: false }));
+  assert.match(run("spare", "--dir", repo).stdout, /use it or lose it is off/);
+  assert.equal(status().board.scorecard.spareOn, false);
+  fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
+  writeData();
+}
+// A copy job's own worktree means no excuses: the fake devin commits cover.txt
+// outside its list while a shared-folder grok job's file list covers that same
+// file — overlapping in time — and the copy is still flagged. The grok job,
+// which stayed inside its list, is clean.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files d1.txt --task "sneaky copy: also commit cover.txt" >> "${root}/copyguard.out" 2>&1
+$C delegate --agent grok --files cover.txt --task "add cover" >> "${root}/copyguard.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/cg-wait1.json"
+$C wait --timeout 60 > "${root}/cg-wait2.json"
+$C jobs > "${root}/cg-jobs.json"
+did=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.agent==="devin"&&j.files.includes("d1.txt")).id)' "${root}/cg-jobs.json")
+gid=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.agent==="grok"&&j.files.includes("cover.txt")).id)' "${root}/cg-jobs.json")
+$C review "$did" send-back --note "strayed outside its list" >> "${root}/copyguard.out" 2>&1
+$C review "$gid" accept --note "cover is fine" >> "${root}/copyguard.out" 2>&1
+echo "Copy guard report: the copy's stray commit was flagged."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "copy guard goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the copy guard goal finishes: " + JSON.stringify(status().goal));
+{
+  const cg = status();
+  const dj = cg.jobs.find((j) => j.agent === "devin" && j.files.includes("d1.txt") && j.goal === cg.goal.id);
+  const gj = cg.jobs.find((j) => j.agent === "grok" && j.files.includes("cover.txt") && j.goal === cg.goal.id);
+  assert.ok(dj && gj, "both jobs ran: " + JSON.stringify(cg.jobs.map((j) => [j.id, j.agent, j.task, j.status])));
+  assert.ok(dj.copy && dj.branch, "the devin job was a copy with its own worktree");
+  assert.ok(dj.guardViolation && dj.guardViolation.some((v) => v.includes("cover.txt")),
+    "the copy's out-of-list commit is flagged even though the grok job's list covers it: " + JSON.stringify(dj.guardViolation));
+  assert.ok(!gj.guardViolation, "the shared-folder job stayed inside its list");
+  assert.equal(gj.status, "accepted");
+  assert.equal(dj.status, "sent back");
+  assert.equal(fs.readFileSync(path.join(repo, "cover.txt"), "utf8"), "x\n", "only the grok job's cover.txt is in the repo");
+}
+// "Never stop to ask": an exit-0 run with open checklist items is not a finished
+// goal — the driver resumes her session with a nudge, at most 3 per goal, then
+// ends as before. The fake claude does nothing and exits 0 every time.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+n=0; [[ -f "${root}/nudge-runs" ]] && n=$(cat "${root}/nudge-runs"); n=$((n+1)); echo "$n" > "${root}/nudge-runs"
+echo "$@" > "${root}/nudge-args-$n"
+exit 0
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "1. first thing\n2. second thing").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 30000), "the nudged goal finishes: " + JSON.stringify(status().goal));
+{
+  assert.equal(fs.readFileSync(path.join(root, "nudge-runs"), "utf8").trim(), "4", "the first run plus 3 nudges, then it ends");
+  const last = fs.readFileSync(path.join(root, "nudge-args-4"), "utf8");
+  assert.match(last, /--resume/, "the nudge resumes her session");
+  assert.match(last, /The goal is not finished: items 1, 2 are still open/, "the nudge names what is open");
+  assert.match(last, /Keep going: delegate or wait, don't ask/, "and tells her to keep going");
+  assert.equal(status().goal.nudges, 3, "the nudge count is kept on the goal");
+  assert.ok(status().log.some((l) => l.kind === "note" && /nudge 3 of 3/.test(l.text)), "each nudge is logged");
+}
+
+// A project-folder job's done file lives in its sandbox tmp (inside the sandbox
+// that is /tmp), never in the project: sweep finds it there, the prompt says
+// so, and nothing lands under the project's .constance.
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent grok --task "read-only job: summarize a.txt" >> "${root}/tmpdone.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 30 > "${root}/tmpdone-wait.json"
+id=$(grep -o '"id": [0-9]*' "${root}/tmpdone-wait.json" | head -1 | grep -o '[0-9]*')
+$C review "$id" accept --note "ok" >> "${root}/tmpdone.out" 2>&1
+echo "Tmpdone report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "tmp done goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 30000), "the tmp-done goal finishes: " + JSON.stringify(status().goal));
+{
+  const tj = status().jobs.find((j) => j.goal === status().goal.id);
+  assert.equal(tj.status, "accepted");
+  assert.match(tj.summary, /cause: a\.txt has no b/, "the done file in the sandbox tmp was found");
+  const sig = JSON.parse(run("signals").stdout);
+  assert.equal(sig.find((s) => s.job === tj.id)?.source, "done-file", "the finish was recorded from the tmp done file");
+  const stored = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "jobs.json"), "utf8"));
+  const pj = stored.jobs.find((j) => j.id === tj.id);
+  assert.match(pj.prompt, /write the file \/tmp\/\.constance\/done-\d+\.json/, "the prompt points inside the sandbox tmp");
+  assert.ok(!fs.readdirSync(path.join(repo, ".constance")).some((f) => f.startsWith("done-")), "no done file in the project folder");
+}
+
+// Self-merge: a copy that reports its tests passed, stays inside its files and
+// passes the guard merges itself the moment it finishes — before any review.
+// `reviews` lists it for her background review; send-back reverts the merge,
+// accept only confirms it.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files sm1.txt --task "add sm1 selfmerge" >> "${root}/sm.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/sm-wait1.json"
+$C reviews > "${root}/sm-reviews1.json"
+id1=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sm-wait1.json")
+$C review "$id1" send-back --note "revert it" >> "${root}/sm.out" 2>&1
+$C delegate --agent devin --files sm2.txt --task "add sm2 selfmerge" >> "${root}/sm.out" 2>&1
+$C wait --timeout 60 > "${root}/sm-wait2.json"
+id2=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sm-wait2.json")
+$C review "$id2" accept --note "fine" >> "${root}/sm.out" 2>&1
+echo "SM report: done."
+`, { mode: 0o755 });
+writeData();
+const porcelainBeforeSm = git("status", "--porcelain");
+assert.equal(run("start", "--dir", repo, "--goal", "selfmerge goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the selfmerge goal finishes: " + JSON.stringify(status().goal));
+{
+  const sm = status();
+  const w1 = JSON.parse(fs.readFileSync(path.join(root, "sm-wait1.json"), "utf8"));
+  const rev1 = JSON.parse(fs.readFileSync(path.join(root, "sm-reviews1.json"), "utf8"));
+  const j1 = sm.jobs.find((j) => j.id === w1.review.id), j2 = sm.jobs.find((j) => j.files.includes("sm2.txt") && j.goal === sm.goal.id);
+  assert.ok(j1 && j2, "both selfmerge jobs ran");
+  assert.equal(j1.files[0], "sm1.txt");
+  assert.equal(rev1.length, 1, "reviews lists the pending self-merge: " + JSON.stringify(rev1));
+  assert.equal(rev1[0].job, j1.id); assert.equal(rev1[0].branch, j1.branch);
+  assert.equal(j1.status, "sent back", "send-back on a merged job marks it sent back: " + j1.status);
+  assert.ok(j1.revertedAt, "the revert is recorded on the job");
+  assert.equal(j2.status, "accepted", "accept on a merged job confirms it: " + j2.status);
+  assert.ok(!fs.existsSync(path.join(repo, "sm1.txt")), "the reverted merge took its file back out");
+  assert.ok(fs.existsSync(path.join(repo, "sm2.txt")), "the confirmed merge stayed");
+  const pend = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "reviews.json"), "utf8"));
+  assert.equal(pend.pending.length, 0, "no review left pending");
+  assert.deepEqual(pend.reviewed.map((r) => r.verdict).sort(), ["ok", "reverted"], "both reviews recorded");
+  assert.ok(sm.log.some((l) => l.kind === "merge" && /self-merged constance\/job-/.test(l.text)), "self-merges are in the log");
+  assert.ok(sm.log.some((l) => l.kind === "revert" && l.job === j1.id), "the revert is in the log");
+  assert.equal(git("branch", "--list", "constance/*").trim(), "", "self-merged branches are deleted");
+  assert.equal(git("status", "--porcelain"), porcelainBeforeSm, "the repo is left as it was found");
+}
+
+// Self-merge never fires on a guard violation: the sneaky copy reports its
+// tests passed but committed outside its list, so it stays "finished" for the
+// normal review and never enters the pending-review list.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files gv1.txt --task "sneaky copy selfmerge" >> "${root}/gv.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/gv-wait.json"
+$C jobs > "${root}/gv-jobs.json"
+id=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.files.includes("gv1.txt")).id)' "${root}/gv-jobs.json")
+$C review "$id" accept --note "ok" >> "${root}/gv.out" 2>&1
+echo "GV report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "selfmerge guard").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the selfmerge guard goal finishes: " + JSON.stringify(status().goal));
+{
+  const mid = JSON.parse(fs.readFileSync(path.join(root, "gv-jobs.json"), "utf8"));
+  const gj = mid.jobs.find((j) => j.files.includes("gv1.txt"));
+  assert.equal(gj.status, "finished", "a guard violation never self-merges: " + gj.status);
+  const gv = status();
+  const gj2 = gv.jobs.find((j) => j.id === gj.id);
+  assert.ok(gj2.guardViolation?.some((v) => v.includes("cover.txt")), "the violation is flagged: " + JSON.stringify(gj2.guardViolation));
+  assert.equal(gj2.status, "accepted", "the normal review path still merges it");
+  assert.ok(!gv.log.some((l) => l.kind === "merge" && /self-merged/.test(l.text) && l.job === gj.id), "no self-merge for it");
+  const pend = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "reviews.json"), "utf8"));
+  assert.ok(!pend.pending.some((p) => p.job === gj.id) && !pend.reviewed.some((p) => p.job === gj.id), "it never entered the review list");
+}
+
+// Slot filling: a queued task that names its agent starts as soon as a copy
+// slot is free — no review needed. sf1 self-merges; sf2 and sf3 are handed to
+// Devin 2 and Devin 3 while sf1 still waits for its background review.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files sf1.txt --task "add sf1 selfmerge" >> "${root}/sf.out" 2>&1
+$C queue --task "add sf2" --files sf2.txt --agent devin >> "${root}/sf.out" 2>&1
+$C queue --task "add sf3" --files sf3.txt --agent devin >> "${root}/sf.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/sf-wait1.json"
+$C jobs > "${root}/sf-jobs-mid.json"
+id1=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait1.json")
+$C review "$id1" accept --note "ok" >> "${root}/sf.out" 2>&1
+$C wait --timeout 60 > "${root}/sf-wait2.json"
+id2=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait2.json")
+$C review "$id2" accept --note "ok" >> "${root}/sf.out" 2>&1
+$C wait --timeout 60 > "${root}/sf-wait3.json"
+id3=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait3.json")
+$C review "$id3" accept --note "ok" >> "${root}/sf.out" 2>&1
+echo "SF report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "slot fill goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 120000), "the slot fill goal finishes: " + JSON.stringify(status().goal));
+{
+  const mid = JSON.parse(fs.readFileSync(path.join(root, "sf-jobs-mid.json"), "utf8"));
+  const sf1 = mid.jobs.find((j) => j.files.includes("sf1.txt"));
+  const handed = mid.jobs.filter((j) => ["sf2.txt", "sf3.txt"].some((f) => j.files.includes(f)));
+  assert.equal(sf1.status, "merged", "sf1 self-merged before any review: " + sf1.status);
+  assert.equal(handed.length, 2, "both queued tasks were handed out while sf1 awaited review: " + JSON.stringify(mid.jobs.map((j) => [j.id, j.task, j.status])));
+  assert.deepEqual(handed.map((j) => j.task).sort(), ["add sf2", "add sf3"]);
+  const sf = status();
+  const all = sf.jobs.filter((j) => j.goal === sf.goal.id);
+  assert.ok(all.every((j) => j.status === "accepted"), "all three reviewed: " + JSON.stringify(all.map((j) => [j.id, j.status])));
+  for (const f of ["sf1.txt", "sf2.txt", "sf3.txt"]) assert.ok(fs.existsSync(path.join(repo, f)), f + " merged");
+  assert.equal(sf.queue.length, 0, "the queue drained itself");
+}
+
+// Self-merge never blocks: with the suite slowed by CONSTANCE_SELFMERGE_SUITE_DELAY_MS,
+// a status call while the merge runs still returns in under 2 s, `jobs` (which
+// sweeps) too, wait never hands the job out mid-merge, and it ends up merged
+// for her background review.
+fs.rmSync(path.join(root, "go"), { force: true });
+const jobsJson = path.join(tabs, "constance", "jobs.json");
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files smx.txt --task "add smx selfmerge" >> "${root}/smx.out" 2>&1
+touch "${root}/go"
+# Wait for the self-merge to start, then time status and jobs calls mid-suite.
+for i in $(seq 1 160); do
+  node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.exit(s.jobs.some(j=>j.selfMerging)?0:1)' "${jobsJson}" 2>/dev/null && break
+  sleep 0.25
+done
+node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(!s.jobs.some(j=>j.selfMerging))process.exit(3)' "${jobsJson}"
+t0=$(date +%s%N); $C status > "${root}/smx-status.json"; t1=$(date +%s%N)
+echo $(( (t1-t0)/1000000 )) > "${root}/smx-status-ms.txt"
+t0=$(date +%s%N); $C jobs > "${root}/smx-jobs.json"; t1=$(date +%s%N)
+echo $(( (t1-t0)/1000000 )) > "${root}/smx-jobs-ms.txt"
+$C wait --timeout 90 > "${root}/smx-wait.json"
+id=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/smx-wait.json")
+$C reviews > "${root}/smx-reviews.json"
+$C review "$id" accept --note "fine" >> "${root}/smx.out" 2>&1
+echo "SMX report: done."
+`, { mode: 0o755 });
+writeData();
+// The delay has to reach whichever process sweeps first (the panel-style status
+// polls included), so it goes into the shared env for this goal only.
+env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS = "8000";
+assert.equal(run("start", "--dir", repo, "--goal", "async selfmerge goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 120000), "the async selfmerge goal finishes: " + JSON.stringify(status().goal));
+delete env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS;
+{
+  const smxMs = Number(fs.readFileSync(path.join(root, "smx-status-ms.txt"), "utf8"));
+  assert.ok(smxMs > 0 && smxMs < 2000, `status during the self-merge suite returned in ${smxMs} ms`);
+  const jobsMs = Number(fs.readFileSync(path.join(root, "smx-jobs-ms.txt"), "utf8"));
+  assert.ok(jobsMs > 0 && jobsMs < 2000, `jobs during the self-merge suite returned in ${jobsMs} ms`);
+  const w = JSON.parse(fs.readFileSync(path.join(root, "smx-wait.json"), "utf8"));
+  const rev = JSON.parse(fs.readFileSync(path.join(root, "smx-reviews.json"), "utf8"));
+  const smx = status();
+  const j = smx.jobs.find((x) => x.files.includes("smx.txt") && x.goal === smx.goal.id);
+  assert.ok(j, "the async selfmerge job ran");
+  assert.equal(j.status, "accepted", "the self-merged job was reviewed: " + j.status);
+  assert.ok(!j.selfMerging && !j.selfMergePid, "selfMerging cleared afterwards");
+  assert.ok(fs.existsSync(path.join(repo, "smx.txt")), "the merge landed");
+  assert.equal(w.review.id, j.id, "wait handed her the merged job, not one mid-merge");
+  assert.equal(rev.length, 1, "reviews listed the pending self-merge: " + JSON.stringify(rev));
+  assert.equal(rev[0].job, j.id);
+  assert.ok(smx.log.some((l) => l.kind === "merge" && /self-merged constance\/job-/.test(l.text) && l.job === j.id), "self-merge is in the log");
+}
+
 // Every finished or stopped job removed its own sandbox /tmp.
 {
   const jobsNow = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "jobs.json"), "utf8")).jobs;
   for (const j of jobsNow) if (j.tmp && ["finished", "accepted", "sent back", "stopped"].includes(j.status)) assert.ok(!fs.existsSync(j.tmp), `job ${j.id}'s temp folder is gone`);
+}
+
+// Leverage, Milk Opus and remote status: status carries the meter and the
+// policy, a finished goal's history line keeps the same leverage object, her
+// first prompt carried the milk lines, and `remote` writes a phone-safe file
+// with no paths in it.
+{
+  const ms = status();
+  assert.ok(ms.leverage && typeof ms.leverage.label === "string" && Number.isFinite(ms.leverage.spentPct),
+    "status has leverage: " + JSON.stringify(ms.leverage));
+  assert.equal(ms.milk.value, 25, "no constanceMilk setting -> the default");
+  assert.equal(ms.milk.band, "milk"); assert.equal(ms.milk.sandbox, true); assert.equal(ms.milk.guardrails, true);
+  // `remote` writes the summary and prints the path; the file has no paths in it.
+  const rr = run("remote");
+  assert.equal(rr.status, 0, rr.stderr);
+  const rfile = path.join(tabs, "constance", "remote-status.txt");
+  assert.equal(rr.stdout.trim(), rfile, "remote prints the path it wrote");
+  const rtext = fs.readFileSync(rfile, "utf8");
+  assert.match(rtext, /^Goal: /m);
+  for (const p of [root, repo, tabs, fakeHome, "/home/", "/var/tmp"]) assert.ok(!rtext.includes(p), `no "${p}" in the remote status`);
+  // Every recorded goal carries the leverage object status computed.
+  const hist = fs.readFileSync(path.join(tabs, "constance", "history.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(hist.length > 0);
+  for (const h of hist) assert.ok(h.leverage && typeof h.leverage.label === "string" && Number.isFinite(h.leverage.spentPct),
+    `history line for "${h.text}" has leverage: ` + JSON.stringify(h.leverage));
+  // Her first prompt carried the milk lines (after her lessons, before the rules).
+  const ga = fs.readFileSync(path.join(root, "claude-args-guard"), "utf8");
+  assert.match(ga, /Milk Opus is at 25 \(milk\)/, "the milk line is in her goal prompt");
+  assert.match(ga, /Sandbox and guardrails stay on at every setting\./);
+  assert.ok(ga.indexOf("Lessons from your earlier goals") < ga.indexOf("Milk Opus is at"), "milk comes after her lessons");
+  assert.ok(ga.indexOf("Milk Opus is at") < ga.indexOf("Rules for this project"), "milk comes before the project rules");
 }
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance: tests passed");

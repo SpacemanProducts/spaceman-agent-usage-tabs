@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs"; import os from "node:os"; import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { maybeWriteHandoff, answerPending, scrub, readClaudeMd, repoInfo, buildNote, writeHandoff, ensureAgentsLine, findActiveRepo, AGENTS_LINE, MARKER } from "./handoff.mjs";
+import { maybeWriteHandoff, answerPending, scrub, readClaudeMd, repoInfo, buildNote, writeHandoff, ensureAgentsLine, findActiveRepo, insidePluginsDir, AGENTS_LINE, MARKER } from "./handoff.mjs";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-test-"));
 const env = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -120,6 +120,43 @@ assert.equal(findActiveRepo({ projectsDir: "/nonexistent", squadDirFile: "/nonex
   assert.ok(!/Grok\*\*/.test(written));
   assert.equal(maybeWriteHandoff({ sent: [item("Claude Code", "Session", 0.97)], projectsDir: "/nonexistent", squadDirFile: "/nonexistent", pendingFile, settings: { handoffNote: true } }), "", "no active repo: nothing written, nothing asked");
   assert.equal(maybeWriteHandoff({ ...base, sent: [], settings: {} }), "");
+}
+
+// ---- a repo inside ~/.config/omarchy/plugins gets nothing written: the shell watches that folder and would reload
+// every plugin (closing open panels) on any write. Everything runs against a fake HOME under tmp.
+{
+  const fakeHome = path.join(tmp, "fake-home");
+  const pluginRepo = path.join(fakeHome, ".config", "omarchy", "plugins", "spaceman.some-plugin");
+  fs.mkdirSync(pluginRepo, { recursive: true });
+  git(pluginRepo, "init", "-q"); fs.writeFileSync(path.join(pluginRepo, "a.txt"), "1");
+  git(pluginRepo, "add", "-A"); git(pluginRepo, "commit", "-q", "-m", "init");
+  const pluginEnv = { HOME: fakeHome };
+  assert.ok(insidePluginsDir(pluginRepo, pluginEnv), "a repo inside the plugins folder");
+  assert.ok(insidePluginsDir(path.join(pluginRepo, "deeper", "dir"), pluginEnv), "a nested path counts too");
+  assert.ok(!insidePluginsDir(repo, pluginEnv), "a repo outside the plugins folder is fine");
+  assert.ok(!insidePluginsDir(path.join(fakeHome, ".config", "omarchy", "other"), pluginEnv), "a sibling folder is fine");
+  assert.ok(!insidePluginsDir(pluginRepo), "no env: the real HOME decides, not the fake one");
+
+  const skipped = writeHandoff(pluginRepo, trig, NOW, pluginEnv);
+  assert.equal(skipped.file, ""); assert.equal(skipped.addedLine, false);
+  assert.ok(!fs.existsSync(path.join(pluginRepo, "handoff")), "no handoff folder inside a plugin");
+  assert.ok(!fs.existsSync(path.join(pluginRepo, "AGENTS.md")), "no AGENTS.md inside a plugin");
+  assert.ok(!fs.readFileSync(path.join(pluginRepo, ".git", "info", "exclude"), "utf8").includes("handoff/"), "no exclude line inside a plugin");
+
+  // maybeWriteHandoff skips it before it can even ask, and answerPending can never write into one either
+  const squadPlugin = path.join(tmp, "squad-plugin"); fs.writeFileSync(squadPlugin, pluginRepo + "\n");
+  const pendPlugin = path.join(tmp, "handoff-pending-plugin.json");
+  const sess = { agent: { name: "Claude Code" }, limit: { title: "Session", percent: 0.97, resetsAt: "2026-11-22T12:00:00Z" }, level: "warn" };
+  const pbase = { sent: [sess], projectsDir: "/nonexistent", squadDirFile: squadPlugin, pendingFile: pendPlugin, env: pluginEnv };
+  assert.equal(maybeWriteHandoff({ ...pbase, settings: {} }), "", "a plugin repo is skipped, not asked about");
+  assert.ok(!fs.existsSync(pendPlugin), "no pending note for a plugin repo");
+  assert.equal(maybeWriteHandoff({ ...pbase, settings: { handoffNote: true } }), "");
+  fs.writeFileSync(pendPlugin, JSON.stringify({ repo: pluginRepo, trigger: { agent: "Claude Code", percent: 0.97, title: "Session", resetsIn: "", level: "warn" }, at: NOW }) + "\n");
+  assert.equal(answerPending(pendPlugin, "allow", pluginEnv), "", "a waiting note for a plugin repo writes nothing");
+  assert.ok(!fs.existsSync(path.join(pluginRepo, "handoff")));
+
+  const wroteOutside = writeHandoff(repo, trig, NOW, pluginEnv);
+  assert.ok(wroteOutside.file && fs.existsSync(wroteOutside.file), "a repo outside plugins still gets the note");
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

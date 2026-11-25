@@ -6,6 +6,7 @@
 //
 //   start --dir D --goal TEXT   new goal (refused while one is active); starts the driver in the background
 //   status                      JSON for the panel: goal, jobs, agents, pace, log
+//   remote                      write the phone-safe status summary to remote-status.txt (prints the path)
 //   agents | pace | jobs        what she reads before every handoff
 //   delegate --agent ID --task TEXT [--files a,b]   hand one task to one free agent (re-checks it first;
 //                                                   no --files = read-only; in practice mode it only logs the prompt)
@@ -15,6 +16,7 @@
 //   signals                     recent agent-finished notifications she heard
 //   wait [--timeout S]          block until a job finishes; prints the next one to review, oldest first
 //   review ID accept|send-back --note TEXT        record her verdict
+//   reviews                     self-merged jobs still waiting for her background review
 //   check N [--note TEXT]       tick checklist item N that she did herself
 //   needs-owner TEXT            the goal ends needing the owner: the goal queue stops instead of moving on
 //   job ID                      one job in full (prompt, report, review, its log lines) for the panel's card
@@ -32,13 +34,15 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.mjs";
 import { copyLimit, roomForCopy, readMachine, PUBLISHED_MAX } from "./constance-ramp.mjs";
-import { pace } from "./constance-pace.mjs";
+import { pace, canResume, keptGoing } from "./constance-pace.mjs";
+import { limitWall, writeWall } from "./constance-wall.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps } from "./constance-jobs.mjs";
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
 import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
 import { NotifyParser, handleNotification, recentSignals, recordSignal, jobFinishSignal, logSaysFinished } from "./constance-notify.mjs";
-import { addTask, peekNext, finishTask, removeTask, queueView } from "./constance-queue.mjs";
+import { addTask, peekNext, finishTask, removeTask, queueView, readyTasks } from "./constance-queue.mjs";
+import { selfMerge, runSuite, addPending, pendingReviews, markReviewed, revertMerge } from "./constance-selfmerge.mjs";
 import { sandboxProblem, sandboxLaunch, bwrapWorks } from "./constance-sandbox.mjs";
 import { logText } from "./constance-logtext.mjs";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
@@ -46,6 +50,14 @@ import { tokenMeter, matchJobs, snapshots, readRecords, usageFile, refreshInBack
 import { parseItems, parseItemArg, checklist } from "./constance-checklist.mjs";
 import { cards, nowLine, history, goalRecord } from "./constance-board.mjs";
 import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner } from "./constance-goalqueue.mjs";
+import { readScorecard, recordReview, scoreRows, sizeHint, rankAgents, scoreLine } from "./constance-scorecard.mjs";
+import { secondTry, sendBackAdvice } from "./constance-retry.mjs";
+import { planSpare, useItOrLoseItOn } from "./constance-spare.mjs";
+import { readBacklog, addItem as addBacklogItem, markTaken, markDone, removeItem as removeBacklogItem, openItems as openBacklog, formatItem, KINDS as BACKLOG_KINDS } from "./constance-backlog.mjs";
+import { buildReport, writeReport, lastReportAt } from "./constance-morning.mjs";
+import { addSample, readSamples, sessionSpent, leverage, bestReturnLesson } from "./constance-leverage.mjs";
+import { readMilk, milkPolicy, milkPrompt } from "./constance-milk.mjs";
+import { writeRemoteStatus } from "./constance-remote.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -115,6 +127,13 @@ function practiceMode() {
 // queue and reviews all talk about one place.
 const runDir = (j) => j.worktree || j.dir;
 
+// Where a job's done file is read from: a copy's worktree, or the job's own
+// sandbox tmp for a job that works in the project folder itself (inside the
+// sandbox that tmp is /tmp — see handOut; a done file inside the project would
+// count as a plugin change and reload the owner's shell).
+const jobDoneFile = (j) => doneFile(j.worktree || j.tmp || runDir(j), j.id);
+const jobDoneDir = (j) => j.worktree || j.tmp || runDir(j);
+
 // A job's sandbox /tmp is only ever the folder handOut made for it; it goes when the job ends.
 function dropJobTmp(j) {
   const t = String(j.tmp || "");
@@ -139,8 +158,13 @@ function sweep() {
   const changed = store.update((s) => {
     const changed = [];
     for (const j of s.jobs) {
-      if (j.status !== "running") continue;
-      const f = doneFile(runDir(j), j.id);
+      if (j.status !== "running") {
+        // A self-merge runs in a detached process (selfMerging); if it died
+        // mid-run the flag is stuck, so clear it and let the review take the job.
+        if (j.selfMerging && !alive(j.selfMergePid, "selfmerge")) { delete j.selfMerging; delete j.selfMergePid; }
+        continue;
+      }
+      const f = jobDoneFile(j);
       let done = null, source = "";
       try { done = JSON.parse(fs.readFileSync(f, "utf8")); j.finishedAt = fs.statSync(f).mtimeMs; source = "done-file"; }
       catch {
@@ -154,8 +178,11 @@ function sweep() {
     }
     return changed;
   });
-  for (const j of changed) { guardFinished(j); dropJobTmp(j); }
-  for (const { j, source } of signals) recordSignal(store.dir, jobFinishSignal(j, { source, runDir: runDir(j) }));
+  for (const j of changed) { guardFinished(j); dropJobTmp(j); maybeSelfMerge(j); }
+  // Whoever's sweep sees the finish logs the return — status polls can beat `wait` to it.
+  for (const j of changed) store.log({ kind: "returned", job: j.id, agent: j.agent, worker: j.worker, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
+  for (const { j, source } of signals) recordSignal(store.dir, jobFinishSignal(j, { source, runDir: jobDoneDir(j) }));
+  fillSlots();
   return changed;
 }
 
@@ -180,10 +207,13 @@ function guardFinished(j) {
   store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.guardChecked = true; });
   // Concurrent jobs share the folder and its git history, and the guard sees
   // every commit since the snapshot: work another overlapping job was allowed
-  // to do is that job's, never this one's violation.
+  // to do is that job's, never this one's violation. A job with its own
+  // worktree (a copy) is never excused and never excuses: its history is all
+  // its own, and its commits only reach the shared repo when its branch merges.
   const jStart = j.startedAt || 0, jEnd = j.finishedAt || Date.now();
-  const others = store.read().jobs.filter((k) => k.id !== j.id && k.startedAt && runDir(k) === dir &&
-    k.startedAt <= jEnd && jStart <= (k.finishedAt || Infinity));
+  const hasWorktree = (k) => !!(k.worktree || k.branch);
+  const others = hasWorktree(j) ? [] : store.read().jobs.filter((k) => k.id !== j.id && k.startedAt && runDir(k) === dir &&
+    !hasWorktree(k) && k.startedAt <= jEnd && jStart <= (k.finishedAt || Infinity));
   const allowed = (k) => [...(k.files || []), ".constance/"];
   const excusedCommits = new Set(), excusedPaths = new Set();
   for (const c of res.badCommits || []) {
@@ -231,12 +261,173 @@ function excludeDoneFiles(dir) {
   if (!txt.split("\n").includes(".constance/")) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, (txt && !txt.endsWith("\n") ? "\n" : "") + ".constance/\n"); }
 }
 
+// ---------------------------------------------------------------- self-merge and slot filling
+// A finished copy whose guard is clean, whose branch only touches its allowed
+// files and whose own report says its tests passed merges itself at once
+// (constance-selfmerge.mjs runs the repo's whole suite first, then merges,
+// with one rebase-and-retry on conflict). The merge lands in reviews.json for
+// Constance's background review — accept confirms it, send-back reverts it.
+// A flagged conflict is marked "conflict" and keeps its worktree, exactly like
+// a review-time one; anything else stays "finished" for the normal review.
+// constanceSelfMerge: false turns it all off. Best-effort only: a failure is
+// logged and the sweep moves on, never blocked — the merge itself runs in a
+// detached `selfmerge` process so the suite never stalls a status call.
+const reviewsFile = () => path.join(store.dir, "reviews.json");
+const selfMergeOn = () => readSettings().constanceSelfMerge !== false;
+
+// The agent's own word that its tests passed: a done-file `tests` field that
+// says so, or report text naming passing tests. Silence counts as false.
+function ownTestsPassed(done) {
+  if (!done) return false;
+  const t = done.tests;
+  if (t === true || /^(pass|passed|ok|green|success)$/i.test(String(t ?? ""))) return true;
+  const text = `${done.summary || ""}\n${done.report || ""}`;
+  return /\btests?\b[^.\n]{0,80}?\b(pass|passed|green|succeed)/i.test(text) || /\b(pass|passed|green)\b[^.\n]{0,80}?\btests?\b/i.test(text);
+}
+
+// Every file the copy's branch changed against the repo's current branch must
+// sit inside the job's allowed list (its files plus .constance/, same as the
+// guard's). Unreadable git means no.
+function branchDiffOk(j) {
+  const base = spawnSync("git", ["-C", j.dir, "merge-base", "HEAD", j.branch], { encoding: "utf8" });
+  if (base.status !== 0) return false;
+  const d = spawnSync("git", ["-C", j.dir, "diff", "--name-only", `${base.stdout.trim()}..${j.branch}`], { encoding: "utf8" });
+  if (d.status !== 0) return false;
+  const allowed = [...(j.files || []), ".constance/"];
+  return d.stdout.split("\n").filter(Boolean).every((p) => coversPath(allowed, p));
+}
+
+// The suite is the slow part of a self-merge, so it never runs inside sweep:
+// maybeSelfMerge only does the cheap checks, marks the job (selfMergeTried,
+// selfMerging — status stays "finished") and spawns `selfmerge ID` detached.
+// That process re-checks everything, runs the suite and merge under the merge
+// lock, logs the outcome and clears selfMerging; if it dies first, the next
+// sweep clears the flag and the normal review takes the job.
+function maybeSelfMerge(j) {
+  try {
+    if (!selfMergeOn() || !j.worktree || !j.branch) return;
+    const fresh = store.read().jobs.find((k) => k.id === j.id);
+    // guardChecked with no guardViolation is the guard's clean bill; without it
+    // there is no proof the run stayed inside its list, so no self-merge.
+    if (!fresh || fresh.status !== "finished" || fresh.selfMergeTried || fresh.selfMerging || fresh.guardViolation?.length || !fresh.guardChecked) return;
+    let done = null;
+    try { done = JSON.parse(fs.readFileSync(jobDoneFile(fresh), "utf8")); } catch {}
+    if (!ownTestsPassed(done)) return;   // normal review handles it
+    if (!branchDiffOk(fresh)) return;
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x && x.status === "finished" && !x.selfMergeTried) { x.selfMergeTried = true; x.selfMerging = true; } });
+    const marked = store.read().jobs.find((k) => k.id === j.id);
+    if (marked?.selfMerging) spawnSelfMerge(marked);
+  } catch (e) {
+    store.log({ kind: "note", job: j.id, agent: j.agent, text: `self-merge skipped for job ${j.id}: ${e.message}` });
+  }
+}
+
+const clearSelfMerging = (id) => store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { delete x.selfMerging; delete x.selfMergePid; } });
+
+// `node constance.mjs selfmerge ID`, detached with its output appended to the
+// job's own log. On a spawn failure the flag is cleared so review takes it.
+function spawnSelfMerge(j) {
+  let fd = null;
+  for (const f of [j.log, path.join(store.dir, `selfmerge-${j.id}.log`)]) {
+    if (!f) continue;
+    try { fd = fs.openSync(f, "a"); break; } catch {}
+  }
+  try {
+    const child = spawn(process.execPath, [SELF, "selfmerge", String(j.id)], { detached: true, stdio: ["ignore", fd ?? "ignore", fd ?? "ignore"], env: ENV });
+    child.unref();
+    if (fd !== null) fs.closeSync(fd);
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) x.selfMergePid = child.pid; });
+  } catch (e) {
+    if (fd !== null) try { fs.closeSync(fd); } catch {}
+    clearSelfMerging(j.id);
+    store.log({ kind: "note", job: j.id, agent: j.agent, text: `self-merge could not start for job ${j.id}: ${e.message}` });
+  }
+}
+
+// The detached half of a self-merge: re-check the job fresh (a review may have
+// taken it meanwhile), then the same checks/selfMerge/withMergeLock/drop/log
+// work maybeSelfMerge used to do inline — minus the part that blocked sweep.
+function runSelfMerge(id) {
+  const j = store.read().jobs.find((k) => k.id === id);
+  if (!j) return;
+  try {
+    if (j.status !== "finished" || j.selfMerging !== true || j.guardViolation?.length || !j.guardChecked || !j.worktree || !j.branch) return;
+    let done = null;
+    try { done = JSON.parse(fs.readFileSync(jobDoneFile(j), "utf8")); } catch {}
+    if (!ownTestsPassed(done) || !branchDiffOk(j)) return;
+    const checks = { ownTests: true, guard: true, diff: true };
+    // Tests can slow the suite down with CONSTANCE_SELFMERGE_SUITE_DELAY_MS;
+    // nothing sets it outside them.
+    const delay = Number(process.env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS) || 0;
+    const suite = delay ? (dir) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay); return runSuite(dir); } : runSuite;
+    // Re-check right before each merge attempt: a review that landed while the
+    // suite ran wins, and the merge must not fire on a job it already took.
+    const merge = (repo, branch) => {
+      const cur = store.read().jobs.find((k) => k.id === id);
+      if (!cur || cur.status !== "finished" || cur.selfMerging !== true) return { ok: false, output: "the job was reviewed while the suite ran" };
+      return mergeBranch(repo, branch);
+    };
+    const m = withMergeLock(() => selfMerge({ repo: j.dir, worktree: j.worktree, branch: j.branch, checks, suite, merge }));
+    if (m.merged) {
+      keepTokens(true);
+      const did = dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true, merged: true });
+      store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "merged"; x.mergedAt = Date.now(); x.mergeCommit = m.commit || ""; x.worktree = ""; x.cleaned = did.join("; "); } });
+      addPending(reviewsFile(), { job: j.id, commit: j.commit, branch: j.branch });
+      store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `self-merged ${j.branch}${m.commit ? ` (${String(m.commit).slice(0, 9)})` : ""}; ${did.join("; ")}` });
+      return;
+    }
+    if (m.conflict || m.flagged) {
+      store.update((s) => { const x = s.jobs.find((k) => k.id === id); if (x) { x.status = "conflict"; x.mergeError = m.reason || ""; } });
+      store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `self-merge ${m.conflict ? "conflict" : "failed"} on ${j.branch}: ${(m.reason || "").slice(-300)}` });
+      return;
+    }
+    store.log({ kind: "note", job: j.id, agent: j.agent, worker: j.worker, text: `self-merge didn't land ${j.branch}: ${m.reason || "unknown"}` });
+  } catch (e) {
+    store.log({ kind: "note", job: j.id, agent: j.agent, text: `self-merge skipped for job ${j.id}: ${e.message}` });
+  } finally {
+    clearSelfMerging(id);
+  }
+}
+
+// A self-merged job is already in the repo: wherever an accepted job counts
+// (checklist ticks, goal history, the goal-end checks) a merged one counts the
+// same — her later review only confirms it or reverts it.
+const asAccepted = (jobs) => jobs.map((j) => (j.status === "merged" ? { ...j, status: "accepted" } : j));
+
+// Queued tasks never wait for a review: after every sweep (and on status and
+// the driver's heartbeat) a ready task that names its agent goes straight to
+// handOut while that agent has room. Agent-less tasks still go through
+// autoNext when a job is accepted. A refused handoff is retried on the next
+// sweep but logged only once per process.
+const fillMissed = new Set();
+function fillSlots() {
+  try {
+    const s = store.read(), g = s.goal;
+    if (!g || g.status !== "running") return;
+    const dir = g.dir;
+    const busyFiles = s.jobs.filter((j) => ["held", "waiting", "running"].includes(j.status)).flatMap((j) => j.files || []);
+    let slots = 0;
+    for (const agent of Object.keys(PUBLISHED_MAX)) slots += Math.max(0, limitOf(agent) - copySlots(s, agent, dir).length);
+    if (!slots) return;
+    for (const t of readyTasks(dir, { busyFiles, limit: slots }, store.dir)) {
+      if (!t.agent) continue;
+      try {
+        const r = handOut({ agent: t.agent, task: t.task, files: t.files || [], items: parseItemArg(t.items || []), title: t.title || "" });
+        finishTask(dir, t.id, r.job.id, store.dir);
+        store.log({ kind: "note", text: `Ready queue: "${t.task.slice(0, 80)}" went to ${t.agent} automatically as job ${r.job.id} (a copy slot was free).` });
+      } catch (e) {
+        if (!fillMissed.has(t.id)) { fillMissed.add(t.id); store.log({ kind: "note", text: `Ready queue: "${t.task.slice(0, 80)}" stays queued — ${e.message}` }); }
+      }
+    }
+  } catch {}
+}
+
 // Copies of one agent that still hold their slot: held (waiting for room on the
 // machine), waiting/running, finished and awaiting review (the branch isn't
-// merged yet), or conflicted (left for the owner). Accepted, sent-back and
-// stopped jobs free their number.
+// merged yet), merged and awaiting its background review, or conflicted (left
+// for the owner). Accepted, sent-back and stopped jobs free their number.
 function copySlots(s, agent, dir) {
-  return s.jobs.filter((j) => j.agent === agent && j.dir === dir && j.copy && ["held", "waiting", "running", "finished", "conflict"].includes(j.status));
+  return s.jobs.filter((j) => j.agent === agent && j.dir === dir && j.copy && ["held", "waiting", "running", "finished", "merged", "conflict"].includes(j.status));
 }
 function claimCopy(s, agent, dir, limit, prefer = 0) {
   const used = new Set(copySlots(s, agent, dir).map((j) => j.copy));
@@ -262,10 +453,14 @@ function copyRoom(s, agent, machine) {
 // ramp up: when the machine has no room yet (constance-ramp.mjs), the job is
 // held — its files and number stay reserved — and releaseHeld() starts it later.
 // Throws with a human reason on any refusal; returns { job, who, verdict, practice, held }.
-function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = "" }) {
+function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = "", againOf = null }) {
   const g = store.read().goal;
   if (!g || g.status !== "running") throw new Error("No goal is running (stopped or paused), so nothing is handed out.");
   if (!agent || !task) throw new Error("delegate needs --agent ID and --task TEXT");
+  // Second-try rule: work sent back twice is never resent as it was; it is split
+  // into smaller jobs (fewer files each) or she does it herself.
+  const twice = secondTry(store.read().jobs, { files, againOf });
+  if (twice) throw new Error(twice.reason);
   const verdict = judged(freshData()).find((a) => a.id === agent);
   if (!verdict?.available) throw new Error(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
@@ -299,6 +494,7 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
     const j = { id, goal: g.id, agent, account, repo: dir, dir, files, task, status: practice ? "finished" : room.ok ? "waiting" : "held", createdAt: Date.now() };
     if (items.length) j.items = items;
     if (title) j.title = String(title).trim().slice(0, 80);
+    if (Number.isFinite(againOf) && againOf > 0) j.againOf = againOf;
     if (useCopy) { j.copy = copy; j.worker = worker; j.worktree = worktreeFor(id); j.branch = branchFor(id); }
     if (!room.ok) j.heldReason = room.reason;
     // Claimed now, so a second handOut racing this one sees the start and ramps.
@@ -310,9 +506,15 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
     const asCopy = limit > 1 && files.length > 0;
     if (asCopy && practice) { j.practiceWorktree = worktreeFor(id); j.practiceBranch = branchFor(id); }
     const wt = j.worktree || j.practiceWorktree, br = j.branch || j.practiceBranch;
-    j.prompt = asCopy
-      ? handoffPrompt({ id, dir, task, files, account, worktree: wt, branch: br, mainDir: dir }, extra)
-      : handoffPrompt(j, extra);
+    // Copies share the repo's one stash, so their prompts forbid it. And a job
+    // that works in the project folder itself can't write its done file there
+    // (inside the sandbox its temp folder is /tmp, which is where the prompt
+    // must point — a done file in the project would reload the owner's shell).
+    const promptExtra = asCopy ? `${extra}\nNever use git stash: other copies share it.` : extra;
+    const built = asCopy
+      ? handoffPrompt({ id, dir, task, files, account, worktree: wt, branch: br, mainDir: dir }, promptExtra)
+      : handoffPrompt(j, promptExtra);
+    j.prompt = asCopy ? built : built.split(doneFile(dir, id)).join(doneFile("/tmp", id));
     s.jobs.push(j);
     return j;
   });
@@ -347,8 +549,6 @@ function launchJob(job, accountLabel = job.account?.label || "") {
   }
   const rd = runDir(job);
   excludeDoneFiles(rd);
-  fs.mkdirSync(path.join(rd, ".constance"), { recursive: true });
-  try { fs.rmSync(doneFile(rd, job.id)); } catch {}
   // Snapshot the world before the run: the post-run guard checks the diff and
   // these lists against it.
   const before = guardSnapshot(ENV, rd);
@@ -365,6 +565,12 @@ function launchJob(job, accountLabel = job.account?.label || "") {
   try {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `constance-job-${job.id}-`));
     store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.tmp = tmp; });
+    // The done file goes in a copy's worktree, or in the job's own sandbox tmp
+    // for a project-folder job (inside the sandbox that tmp is /tmp, which is
+    // what the prompt tells the agent): never inside the project itself.
+    const doneDir = job.worktree ? rd : tmp;
+    fs.mkdirSync(path.join(doneDir, ".constance"), { recursive: true });
+    try { fs.rmSync(doneFile(doneDir, job.id)); } catch {}
     box = sandboxLaunch(launchCommand(agent, job.prompt), { agent, dir: rd, tmp, env: { ...ENV, ...acctEnv }, extraRw: Object.values(acctEnv), keyringAgents: keyringAgents() });
   } catch (e) {
     fs.closeSync(fd);
@@ -422,11 +628,14 @@ function copiesView(s) {
 
 function delegate() {
   const agent = arg("--agent"), task = arg("--task"), files = arg("--files").split(",").map((x) => x.trim()).filter(Boolean);
-  const items = parseItemArg(arg("--item")), title = arg("--title");
+  const items = parseItemArg(arg("--item")), title = arg("--title"), againOf = Number(arg("--again")) || null;
   let r;
-  try { r = handOut({ agent, task, files, items, title }); }
+  try { r = handOut({ agent, task, files, items, title, againOf }); }
   catch (e) { fail(e.message); }
   const { job, who, verdict } = r;
+  // The scorecard sizes tasks: advice, printed when the job is bigger than this agent's record suggests.
+  const row = scoreRows(readScorecard(store.dir)).find((x) => x.agent === agent), hint = sizeHint(row);
+  if (files.length > hint.maxFiles) process.stdout.write(`Scorecard: ${agent} ${hint.note}, so jobs of up to ${hint.maxFiles} file${hint.maxFiles === 1 ? "" : "s"} suit it best (this one has ${files.length}).\n`);
   if (r.practice) {
     out(`Practice job ${job.id}: ${who} would take it (${verdict.reason}).${job.practiceWorktree ? ` A real run would work in its own worktree ${job.practiceWorktree} on ${job.practiceBranch}.` : ""} Nothing launched; the full prompt is in the log. Run \`wait\` to review it.`);
     return;
@@ -435,7 +644,7 @@ function delegate() {
     out(`Job ${job.id} for ${who} is held: ${job.heldReason}. Its files are reserved and it starts by itself as soon as the machine has room; don't delegate it again. Run \`wait\`.`);
     return;
   }
-  out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."}${job.worker ? ` ${job.worker} works in its own worktree on ${job.branch}.` : ""} It writes ${doneFile(runDir(job), job.id)} when done; run \`wait\`.`);
+  out(`Job ${job.id} handed to ${who} (${verdict.reason}). ${files.length ? `It may edit ${files.join(", ")}.` : "Read-only."}${job.worker ? ` ${job.worker} works in its own worktree on ${job.branch}.` : ""} It writes ${jobDoneFile(job)} when done; run \`wait\`.`);
 }
 
 // After a job is accepted, the next queued task for its project goes to the
@@ -485,28 +694,36 @@ function queueCmd() {
   out(q.map((t) => `${t.id}. ${t.task}${t.files.length ? `  [${t.files.join(", ")}]` : "  [read-only]"}${t.agent ? `  → ${t.agent}` : ""}`).join("\n"));
 }
 
+// What `wait` reports as still working: running jobs plus finished ones whose
+// self-merge is still running in the background.
+const busyJobs = (s) => s.jobs.filter((j) => j.status === "running" || j.selfMerging)
+  .map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, ...(j.selfMerging ? { selfMerging: true } : {}) }));
+
 async function waitJob() {
   const until = Date.now() + Math.min(560, Number(arg("--timeout", "100")) || 100) * 1000;
   for (;;) {
-    for (const j of sweep()) store.log({ kind: "returned", job: j.id, agent: j.agent, worker: j.worker, account: j.account?.label || "", text: j.summary + (j.commit ? ` (commit ${j.commit.slice(0, 9)})` : "") });
+    sweep();
     releaseHeld();
     const s = store.read();
-    const next = reviewQueue(s.jobs)[0];
+    // Finished jobs and self-merged ones waiting for their background review,
+    // oldest finish first. A job still self-merging is not hers to review yet.
+    const next = [...reviewQueue(s.jobs).filter((j) => !j.selfMerging), ...s.jobs.filter((j) => j.status === "merged")]
+      .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0) || a.id - b.id)[0];
     if (next) {
       const files = changedFiles(next.dir, next.commit);
-      // Earlier finished or accepted jobs in this goal that changed the same files: check against them first.
-      const earlier = s.jobs.filter((j) => j.id !== next.id && j.goal === next.goal && ["finished", "accepted"].includes(j.status) && (j.finishedAt || 0) <= (next.finishedAt || 0))
+      // Earlier finished, merged or accepted jobs in this goal that changed the same files: check against them first.
+      const earlier = s.jobs.filter((j) => j.id !== next.id && j.goal === next.goal && ["finished", "merged", "accepted"].includes(j.status) && (j.finishedAt || 0) <= (next.finishedAt || 0))
         .map((j) => ({ id: j.id, agent: j.agent, commit: j.commit, shared: overlaps(changedFiles(j.dir, j.commit), files) })).filter((x) => x.shared.length);
       let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
       return out({ review: { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
         guardViolation: next.guardViolation || null,
-        checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null })), signals: recentSignals(store.dir, 6),
+        checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     const held = s.jobs.filter((j) => j.status === "held").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, heldReason: j.heldReason || "" }));
-    if (!s.jobs.some((j) => j.status === "running" || j.status === "waiting") && !held.length) return out({ review: null, stillRunning: [], next: "No jobs are running." });
+    if (!s.jobs.some((j) => j.status === "running" || j.status === "waiting" || j.selfMerging) && !held.length) return out({ review: null, stillRunning: [], next: "No jobs are running." });
     if (s.goal?.status === "stopped") return out({ review: null, next: "Stopped by the owner. End now." });
-    if (Date.now() > until) return out({ review: null, stillRunning: s.jobs.filter((j) => j.status === "running").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null })), held,
+    if (Date.now() > until) return out({ review: null, stillRunning: busyJobs(s), held,
       next: held.length ? `Still running; ${held.length} held cop${held.length === 1 ? "y starts" : "ies start"} by itself when the machine has room. Call \`wait\` again.` : "Still running; call `wait` again." });
     await sleep(5000);
   }
@@ -557,6 +774,15 @@ function cleanupRejected(j) {
   return did.join("; ");
 }
 
+// The scorecard counts every reviewed job once, with its kept tokens and run time.
+function score(j, verdict) {
+  try {
+    if (!j.worktree) keepTokens(true);   // copies already kept theirs before the merge/cleanup
+    const fresh = store.read().jobs.find((x) => x.id === j.id) || j;
+    recordReview(store.dir, fresh, verdict);
+  } catch (e) { store.log({ kind: "note", job: j.id, text: `Scorecard not updated: ${e.message}` }); }
+}
+
 function review() {
   const id = Number(process.argv[3]), verdict = process.argv[4], note = arg("--note");
   if (!["accept", "send-back"].includes(verdict)) fail("Usage: review ID accept|send-back --note TEXT");
@@ -565,6 +791,8 @@ function review() {
   sweep();
   const found = store.read().jobs.find((x) => x.id === id);
   if (!found) fail(`No job ${id}.`);
+  if (found.selfMerging) fail(`Job ${id} is self-merging right now; try again in a moment.`);
+  if (found.status === "merged") return reviewMerged(found, verdict, note);
   if (found.status !== "finished") fail(`Job ${id} is ${found.status}; only a finished job can be reviewed.`);
   const j = store.update((s) => { const j = s.jobs.find((x) => x.id === id); if (j) { j.status = verdict === "accept" ? "accepted" : "sent back"; j.reviewNote = note; j.reviewedAt = Date.now(); } return j; });
   store.log({ kind: "review", job: id, agent: j.agent, worker: j.worker, verdict, text: note });
@@ -573,12 +801,40 @@ function review() {
   if (verdict === "accept" && j.worktree) {
     const m = withMergeLock(() => mergeAccepted(j));
     if (!m.ok) {
+      score(j, verdict);
       out(`Job ${id} accepted, but merging ${j.branch} ${m.conflict ? "conflicted" : "failed"}: ${(m.output || "").trim().slice(-300)}. Nothing was forced; the worktree and branch were left in place.`);
       return;
     }
   }
-  const extra = verdict === "accept" ? autoNext(j) : (j.worktree ? ` ${cleanupRejected(j)}` : "");
+  const cleaned = verdict === "send-back" && j.worktree ? ` ${cleanupRejected(j)}` : "";
+  score(j, verdict);
+  const extra = verdict === "accept" ? autoNext(j) : `${cleaned}${(() => { const a = sendBackAdvice(store.read().jobs, j); return a ? ` ${a}` : ""; })()}`;
   out(`Job ${id} ${j.status}.${extra}`);
+}
+
+// The background review of a self-merged job: accept only confirms the merge
+// (the work is already in and its slot frees), send-back reverts the merge
+// commit — never a reset, and a failed revert leaves everything as it was.
+function reviewMerged(j, verdict, note) {
+  store.log({ kind: "review", job: j.id, agent: j.agent, worker: j.worker, verdict, text: note });
+  if (verdict === "accept") {
+    markReviewed(reviewsFile(), j.id, "ok");
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "accepted"; x.reviewNote = note; x.reviewedAt = Date.now(); } });
+    score(j, "accept");
+    out(`Job ${j.id} accepted; its self-merge of ${j.branch || "the branch"} is confirmed.${autoNext(j)}`);
+    return;
+  }
+  const target = j.mergeCommit || j.commit;
+  const rv = withMergeLock(() => revertMerge(j.dir, target));
+  if (!rv.ok) {
+    out(`Job ${j.id} send-back failed: reverting ${String(target).slice(0, 9)} didn't apply (${(rv.output || "").trim().slice(-300)}). It stays merged and pending; nothing was forced.`);
+    return;
+  }
+  markReviewed(reviewsFile(), j.id, "reverted");
+  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "sent back"; x.revertedAt = Date.now(); x.reviewNote = note; x.reviewedAt = Date.now(); } });
+  store.log({ kind: "revert", job: j.id, agent: j.agent, worker: j.worker, text: `reverted the self-merge of ${j.branch || "the branch"}${note ? `: ${note}` : ""}` });
+  score(j, "send-back");
+  out(`Job ${j.id} sent back; its self-merge was reverted.`);
 }
 
 // ---------------------------------------------------------------- the goal and the driver
@@ -586,11 +842,13 @@ const ROLE = (dir) => `You are Constance, the quarterback of the owner's coding 
 
 Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir}.
 - \`C pace\`: your own session/weekly pacing. Obey its mode. "normal": keep hard, risky or architectural work, delegate routine well-defined low-risk pieces. "delegate": you are burning your limits too fast, so delegate editing and testing too and keep only planning and review. You never run out of your own limits; the driver pauses you at 90% and resumes after the reset.
-- \`C agents\`: who is available right now (under their limits, signed in, readable, free). Re-check right before every handoff; availability changes as limits reset. No agent is the default: spread work over whoever has spare capacity. Never use an agent that isn't listed as available, and never anything that costs money.
+- \`C agents\`: who is available right now (under their limits, signed in, readable, free), best scorecard first, each with its record (jobs, accepted, sent back, average tokens and time) and how big a job suits it. Re-check right before every handoff; availability changes as limits reset. No agent is the default: spread work over whoever has spare capacity, and size each task to its agent's record. Never use an agent that isn't listed as available, and never anything that costs money.
 - The goal's checklist: \`C status\` shows the goal split into numbered items (board.checklist), which the owner watches tick. Tag every handoff with the item it is for, \`--item N\` (or \`--item 1,3\`), and give it \`--title "fixing the guard"\`: a few plain words, starting with a verb in -ing form, shown to the owner as "Devin 2 is fixing the guard". An item ticks when one of its jobs is merged and none is still open. When you finish an item yourself, \`C check N --note "..."\`.
-- If the goal ends with something only the owner can settle (a decision, a merge conflict, a failure you couldn't fix, an item you had to leave), run \`C needs-owner "one plain sentence"\` before your report. The owner's next queued goal then waits for them instead of starting.
+- \`C needs-owner "one plain sentence"\` is only for what truly needs the owner: a decision only they can make, a merge conflict, or a failure that two tries could not fix — never an ordinary failure you can retry or delegate again. Run it before your report; the owner's next queued goal then waits for them instead of starting.
 - \`C delegate --agent ID --files a,b --item N --title "..." --task "..."\`: hand off one small, clear task — the smaller and more self-contained, the better; give weaker agents smaller pieces. List every file it may edit; two editing jobs may never share files, and you must not edit a running job's files yourself. For read-only work (investigating a cause, summarizing a file) omit \`--files\`. The tool adds the folder check, git rules, tests/build and done file to the prompt, so the task text itself only needs to say what to do.
 - Devin may run as several copies at once (up to ${limitOf("devin")}): each editing job gets its own worktree and branch, shows up as Devin 1..${limitOf("devin")}, and merges into the project only after you accept it. Give copies tasks whose files never overlap; if a merge ever conflicts the job is marked and left for the owner — report it, don't force it. Copies ramp up as the machine allows: a delegate may come back "held" — its files are reserved and it starts by itself when the load and free memory allow, so never delegate it again; just keep going and \`wait\`.
+- Second-try rule: when a job comes back wrong, a redo goes out with \`--again ID\` (the job it redoes). Work sent back twice is never resent as it was: split it into smaller jobs with fewer files each, or do it yourself. \`delegate\` refuses a third try with the same files.
+- Use it or lose it: \`C spare\` shows which agents have room they would lose at a reset that is close, and which items of this project's backlog (\`C backlog\`; \`C backlog add --kind review|bug|design|task|test|docs --text "..."\`) could use it. Spend leftover room only on backlog items, never on made-up work just to burn it. Your own leftover Opus goes to reviews, tangled bugs and design. When you hand a backlog item out, \`C backlog take N --job ID\`; when it is finished, \`C backlog done N\`.
 - When a bug's cause is unknown, the first handoff changes nothing: tell the agent to find the cause, report it in a few lines and stop. Send the fix as a second handoff once you know the cause.
 - When a large file needs reading, hand that to a free agent to summarize instead of reading it all yourself.
 - Some work stays with you, never delegated: live database changes, bugs tangled across many parts of the code, and anything involving secrets or credentials.
@@ -600,6 +858,7 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - \`C queue --task "..." [--files a,b] [--agent ID]\`: while planning, keep a short queue of ready tasks for this project so free agents never sit idle. When you accept a job, the next queued task is handed to the same agent automatically. \`C queue\` lists what is pending, \`C queue rm ID\` drops one.
 - \`C signals\`: recent "agent finished" notifications heard from the desktop. One matched to your job means check it; one for an agent with no job is the owner's own run — noted, never touched.
 - \`C lesson "..."\`: add one short lesson to your lessons file — something you learned the hard way this goal (a skipped check, a surprise an agent caused, a rule that saved time). It is advice for your future goals, never a rule that overrides the ones above. Read your lessons before each goal; they are already in your first message.
+- Never end your turn or write a final report while checklist items are still todo or jobs are open: delegate again or run \`wait\`. Stop only when the goal is done, you are out of room (pace pauses you), or something truly needs the owner.
 Before you edit anything, run \`git status\`; commit only your own changes, never push or deploy. When the goal is done and every job is reviewed, finish with a short plain report for the owner: what was done, by whom, the commits, anything left open.`;
 
 // The project folder for a goal: --dir, or a "+ New project" name made in ~/Projects. Throws with a
@@ -660,7 +919,14 @@ function recordHistory(fresh = true) {
   const s = store.read();
   if (!s.goal || ["running", "paused"].includes(s.goal.status)) return null;
   if (readHistory().some((r) => r.id === s.goal.id)) return null;
-  const rec = goalRecord(s.goal, s.jobs, matchJobs(s.jobs, records));
+  const rec = goalRecord(s.goal, asAccepted(s.jobs), matchJobs(s.jobs, records));
+  // The same leverage object status shows, kept on the history line; and, once
+  // per goal like the record itself, one lesson naming the handoff that paid
+  // off best (jobs carry tokens and their review verdicts for it).
+  rec.leverage = leverageView(s, tokenMeter({ jobs: s.jobs, goal: s.goal, records }).goal?.total ?? null);
+  const back = bestReturnLesson(s.jobs.filter((j) => j.goal === s.goal.id).map((j) => ({
+    ...j, verdict: j.status === "accepted" || j.status === "merged" ? "accept" : j.status === "sent back" ? "send-back" : "review" })));
+  if (back) addLesson(back, store.dir);
   fs.appendFileSync(historyFile(), JSON.stringify(rec) + "\n");
   return rec;
 }
@@ -675,7 +941,12 @@ function tellOwner(title, body) {
 function afterGoal() {
   const s = store.read(), g = s.goal;
   if (!g || ["running", "paused"].includes(g.status)) return false;
-  const why = needsOwner(g, s.jobs, { practice: practiceMode() });
+  const why = needsOwner(g, asAccepted(s.jobs), { practice: practiceMode() });
+  // A self-merged job still owes its background review: ending the goal with
+  // one pending would orphan the revert path, so it stops the queue like an
+  // unreviewed finished job does.
+  const unreviewedMerged = s.jobs.filter((j) => j.goal === g.id && j.status === "merged").map((j) => j.id);
+  if (unreviewedMerged.length) why.push(`job${unreviewedMerged.length > 1 ? "s" : ""} ${unreviewedMerged.join(", ")} merged and still waiting for review`);
   if (why.length) {
     const text = why.join("; ");
     store.update((x) => { if (x.goal && x.goal.id === g.id) x.goal.needsOwner = text.charAt(0).toUpperCase() + text.slice(1) + "."; });
@@ -687,6 +958,10 @@ function afterGoal() {
       pauseQueue(store.dir, why.join("; "));
       store.log({ kind: "needs-you", text: `Goal queue stopped: ${why.join("; ")}. ${q.goals.length} goal${q.goals.length === 1 ? "" : "s"} wait for you.` });
       tellOwner("Constance needs you", `${why.join("; ")}. The goal queue is stopped until you start the next goal.`);
+    } else if (g.fromQueue || g.fromSpare) {
+      // The queue ran dry on a goal that needs the owner: the morning report says so (one notice, not two).
+      store.log({ kind: "needs-you", text: `${why.join("; ")}.` });
+      morningReport();
     } else {
       store.log({ kind: "needs-you", text: `${why.join("; ")}.` });
       tellOwner("Constance needs you", `${why.join("; ")}.`);
@@ -694,7 +969,13 @@ function afterGoal() {
     return false;
   }
   const next = takeNext(store.dir);
-  if (!next) return false;
+  if (!next) {
+    // The queue is empty. Room an agent would lose at a reset goes to the project's backlog
+    // first (use it or lose it); when there's nothing worth doing, the morning report goes out.
+    if (startSpareGoal(g)) return true;
+    if (g.fromQueue || g.fromSpare) morningReport();
+    return false;
+  }
   let dir;
   try { dir = resolveDir(next.dir); }
   catch (e) {
@@ -710,6 +991,70 @@ function afterGoal() {
   store.log({ kind: "note", text: "Started the next goal from the goal queue." });
   spawnWatcher();
   return true;
+}
+
+// ---------------------------------------------------------------- use it or lose it, and the morning report
+// Limits per agent for the spare-room planner: the agent's own meters, else its first account's.
+const limitsOf = (a) => ((a.limits || []).length ? a.limits : (a.accounts || []).find((x) => (x.limits || []).length)?.limits || []);
+function sparePlan(dir, d = freshData()) {
+  const available = judged(d).filter((a) => a.available).map((a) => a.id);
+  return planSpare({ agents: (d.agents || []).map((a) => ({ id: a.id, limits: limitsOf(a) })), available,
+    backlog: dir ? openBacklog(dir) : [], settings: readSettings() });
+}
+const spareFile = () => path.join(store.dir, "spare.json");
+function readSpare() { try { const d = JSON.parse(fs.readFileSync(spareFile(), "utf8")); return { used: Array.isArray(d.used) ? d.used : [] }; } catch { return { used: [] }; } }
+
+// When the goal queue is empty and an agent has room it would lose before a reset, start one goal
+// made only of the project's own backlog items (never invented work). Once per reset window, so it
+// can't loop; the setting (constanceUseItOrLoseIt) turns it off.
+function startSpareGoal(g) {
+  if (!g?.dir || !useItOrLoseItOn(readSettings())) return false;
+  let plan;
+  try { plan = sparePlan(g.dir); } catch { return false; }
+  const seen = readSpare().used;
+  const key = (p) => `${p.agent}:${p.window.title}:${p.window.resetsAt}`;
+  const picks = plan.picks.filter((p) => !seen.includes(key(p)));
+  if (!picks.length) return false;
+  const names = Object.fromEntries((readData().agents || []).map((a) => [a.id, a.name || a.id]));
+  const lines = [];
+  for (const p of picks) for (const it of p.items)
+    lines.push(`${lines.length + 1}. ${p.agent === "claude" ? "You (Constance) do this yourself" : `Hand to ${names[p.agent] || p.agent}`}: ${formatItem(it)} (backlog #${it.id})`);
+  const text = [`Use it or lose it: ${plan.reason} Work only on these items from this project's backlog (.constance/backlog.md). If one turns out not to be worth doing, skip it and say why: never make work just to use the room. When an item is finished run \`C backlog done N\` with its backlog number.`, ...lines].join("\n");
+  const res = beginGoal(text, g.dir, { fromSpare: true, driverPid: process.pid });
+  if (res.busy) return false;
+  fs.writeFileSync(spareFile(), JSON.stringify({ used: [...seen, ...picks.map(key)].slice(-200) }) + "\n");
+  store.log({ kind: "note", text: `Use it or lose it: started a backlog goal (${picks.map((p) => `${names[p.agent] || p.agent} ${p.window.title}`).join(", ")}).` });
+  spawnWatcher();
+  return true;
+}
+
+// The morning report: what got done since the last one, tokens, and what needs the owner.
+function morningReport() {
+  try {
+    const rep = buildReport({ records: readHistory(), since: lastReportAt(store.dir) });
+    const file = writeReport(store.dir, rep);
+    store.log({ kind: "morning", text: rep.text.trim(), file });
+    tellOwner(rep.title, rep.body);
+    return rep;
+  } catch (e) { store.log({ kind: "note", text: `Morning report not written: ${e.message}` }); return null; }
+}
+
+// `backlog`: the project's worthwhile-work list (list | add --kind K --text T [--files a,b] | take N --job ID | done N | rm N).
+function backlogCmd() {
+  const g = store.read().goal;
+  const dir = arg("--dir") ? path.resolve(arg("--dir")) : g?.dir;
+  if (!dir) fail("No goal is running: pass --dir PROJECT.");
+  const sub = process.argv[3], n = Number(process.argv[4]);
+  if (sub === "add") {
+    try { const it = addBacklogItem(dir, { kind: arg("--kind", "task"), text: arg("--text"), files: arg("--files").split(",").map((x) => x.trim()).filter(Boolean) }); out(`Backlog #${it.id}: ${formatItem(it)}`); }
+    catch (e) { fail(`${e.message} (kinds: ${BACKLOG_KINDS.join(", ")})`); }
+    return;
+  }
+  if (sub === "take") { if (!markTaken(dir, n, Number(arg("--job")) || 0)) fail(`No backlog item ${n}.`); return out(`Backlog #${n} marked as handed out.`); }
+  if (sub === "done") { if (!markDone(dir, n)) fail(`No backlog item ${n}.`); return out(`Backlog #${n} done.`); }
+  if (sub === "rm") { if (!removeBacklogItem(dir, n)) fail(`No backlog item ${n}.`); return out(`Backlog #${n} removed.`); }
+  const items = readBacklog(dir);
+  out(items.length ? items.map((it) => `#${it.id} ${it.done ? "[done] " : it.job !== null ? `[job ${it.job}] ` : ""}${formatItem(it)}`).join("\n") : "The backlog is empty.");
 }
 
 // `goals`: the owner's goal queue.
@@ -815,7 +1160,11 @@ async function watch() {
   bus.on("error", () => { store.log({ kind: "note", text: "Notification watcher could not start (busctl missing?)." }); process.exit(0); });
   const parser = new NotifyParser();
   const onEvent = (evt) => {
-    const ev = handleNotification(evt, { jobs: store.read().jobs, storeDir: store.dir });
+    // A project-folder job's done file is in its sandbox tmp, not the project:
+    // matchJob finds done files through j.worktree, so hand it the tmp as the
+    // job's run dir (j.dir still covers folder matching).
+    const jobs = store.read().jobs.map((j) => !j.worktree && j.tmp ? { ...j, worktree: j.tmp } : j);
+    const ev = handleNotification(evt, { jobs, storeDir: store.dir });
     if (!ev) return;
     if (ev.kind === "agent-done") {
       store.log({ kind: "signal", job: ev.job, agent: ev.agent, text: `"${ev.summary}" — ${ev.inspection}` });
@@ -850,8 +1199,33 @@ async function watch() {
   await new Promise(() => {});
 }
 
+// What is still open on the goal, phrased for the nudge she gets when a clean
+// exit leaves work unfinished: checklist items not done and jobs still
+// running/held/waiting or finished-but-unreviewed. "" when nothing is open.
+function openWork(s) {
+  const g = s.goal;
+  if (!g) return "";
+  const items = checklist(g, asAccepted(s.jobs)).items.filter((i) => i.state !== "done").map((i) => i.n);
+  const jobs = s.jobs.filter((j) => (!j.goal || j.goal === g.id) && ["waiting", "held", "running", "finished", "merged"].includes(j.status));
+  const parts = [];
+  if (items.length) parts.push(`items ${items.join(", ")} are still open`);
+  if (jobs.length) parts.push(`jobs ${jobs.map((j) => j.id).join(", ")} are open`);
+  return parts.join(" and ");
+}
+
+// The driver's heartbeat (its watch interval and adopt loop): refresh the
+// leverage samples and the phone-safe remote status, each at most once a
+// minute. statusPayload() does the sampling; nothing is sent anywhere.
+let lastBeat = 0;
+function heartbeat() {
+  const now = Date.now();
+  if (now - lastBeat < SAMPLE_GAP_MS) return;
+  lastBeat = now;
+  try { writeRemoteStatus(statusPayload(), remoteFile()); } catch {}
+}
+
 async function drive() {
-  let pausedLogged = false, failures = 0;
+  let pausedLogged = false, failures = 0, nudge = null;
   for (;;) {
     const g = store.read().goal;
     if (!g || !["running", "paused"].includes(g.status)) return;
@@ -861,7 +1235,20 @@ async function drive() {
       if (!pausedLogged) { store.log({ kind: "paused", text: p.reason }); pausedLogged = true; }
       await sleep(60e3); continue;
     }
-    if (g.status === "paused") { store.update((s) => { s.goal.status = "running"; delete s.goal.pauseReason; }); store.log({ kind: "resumed", text: "Back under her limits; picking the goal up again." }); pausedLogged = false; }
+    if (g.status === "paused") {
+      // Resume only on a reading that is current: a cached or unreadable one can't prove the
+      // limit is gone (Keep going is the owner's own call and doesn't need one).
+      const kept = keptGoing(p);
+      if (!canResume(p, claudeOf(readData()))) {
+        const why = "Waiting for a current reading of Claude's limits before picking the goal up again.";
+        if (g.pauseReason !== why) { store.update((s) => { s.goal.pauseReason = why; }); store.log({ kind: "paused", text: why }); }
+        pausedLogged = true;
+        await sleep(60e3); continue;
+      }
+      store.update((s) => { s.goal.status = "running"; delete s.goal.pauseReason; });
+      store.log({ kind: "resumed", text: kept ? "You chose Keep going; picking the goal up again." : "Back under her limits; picking the goal up again." });
+      pausedLogged = false;
+    }
     // After a restart the previous Claude run may still be going: adopt it rather than start a second one.
     if (alive(g.brainPid, "claude")) {
       let killed = false;
@@ -869,7 +1256,7 @@ async function drive() {
         const st = store.read().goal;
         if (!st || st.status === "stopped") return;
         if (!killed && pace(claudeOf(readData())).mode === "stop") { killGroup(g.brainPid); killed = true; }
-        try { releaseHeld(); } catch {}
+        try { releaseHeld(); fillSlots(); heartbeat(); } catch {}
         await sleep(5000);
       }
       const st = store.read().goal;
@@ -877,10 +1264,12 @@ async function drive() {
     }
     const resume = g.started;
     // Fresh lessons and this project's own rules go into the first message of
-    // every goal (advice only — her core rules above never change).
+    // every goal (advice only — her core rules above never change). A nudge
+    // resume carries its own short message instead of the generic one.
     const prompt = resume
-      ? "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal."
-      : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + rulesBlock(readProjectRules(g.dir));
+      ? nudge || "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal."
+      : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + "\n" + milkPrompt(readMilk(readSettings())) + rulesBlock(readProjectRules(g.dir));
+    nudge = null;
     const args = ["-p", "--model", g.model || "opus", "--dangerously-skip-permissions", "--output-format", "text", "--append-system-prompt", ROLE(g.dir),
       ...(resume ? ["--resume", g.session] : ["--session-id", g.session]), prompt];
     const reportPath = path.join(store.dir, `report-${g.id}.txt`);
@@ -891,7 +1280,7 @@ async function drive() {
     const watch = setInterval(() => {
       const st = store.read().goal;
       if (!st || st.status === "stopped") { killGroup(brain.pid); return; }
-      try { releaseHeld(); } catch {}
+      try { releaseHeld(); fillSlots(); heartbeat(); } catch {}
       if (pace(claudeOf(readData())).mode === "stop") { pausedByUs = true; killGroup(brain.pid); }
     }, 30e3);
     const code = await new Promise((r) => brain.on("exit", (c) => r(c)));
@@ -901,10 +1290,33 @@ async function drive() {
     if (pausedByUs) continue;
     const report = (() => { try { return fs.readFileSync(reportPath, "utf8").trim(); } catch { return ""; } })();
     if (code === 0) {
+      const s = store.read();
+      // A clean exit is not a finished goal: open checklist items or unreviewed
+      // jobs mean she stopped early. Resume her session with a nudge — at most
+      // 3 per goal — unless practice mode or an owner flag ends it normally.
+      const open = s.goal && ["running", "paused"].includes(s.goal.status) && !practiceMode() && !s.goal.needsOwner ? openWork(s) : "";
+      if (open && (s.goal.nudges || 0) < 3) {
+        const n = (s.goal.nudges || 0) + 1;
+        store.update((x) => { if (x.goal) x.goal.nudges = n; });
+        nudge = `The goal is not finished: ${open}. Keep going: delegate or wait, don't ask.`;
+        store.log({ kind: "note", text: `Claude exited cleanly but the goal is unfinished (${open}); resumed her, nudge ${n} of 3.` });
+        continue;
+      }
       store.update((s) => { s.goal.status = "done"; s.goal.finishedAt = Date.now(); s.goal.report = report.slice(-4000); });
       store.log({ kind: "report", text: report.slice(-4000) || "(no report)" });
       if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
+    }
+    // Claude said it hit its limit ("You've hit your 5-hour limit · resets 5:50pm (America/New_York)"):
+    // a pause until the time it stated, never a failure. pace() reads wall.json and stops her until then.
+    const wall = limitWall(report);
+    if (wall && (code !== 0 || report.length < 400)) {
+      writeWall(store.dir, wall);
+      const p2 = pace(claudeOf(readData()));
+      store.update((s) => { if (s.goal) { s.goal.status = "paused"; s.goal.pauseReason = p2.reason; } });
+      store.log({ kind: "paused", text: p2.reason });
+      pausedLogged = true;
+      continue;
     }
     // Opus (or whatever she is on) isn't allowed on this Claude plan: drop to the best model that is
     // and restart the goal fresh — a rejected run leaves no session, so --resume can't be used. This
@@ -937,6 +1349,9 @@ function stopAll() {
     for (const j of s.jobs) if (j.status === "running" || j.status === "waiting" || j.status === "held") { if (alive(j.pid, LAUNCH[j.agent]?.cli || "")) killGroup(j.pid); j.status = "stopped"; j.stoppedAt = Date.now(); }
     return JSON.parse(JSON.stringify(s));
   });
+  // A self-merge still running in the background dies with everything else;
+  // the next sweep clears its flag and the job stays finished for the record.
+  for (const j of s.jobs) if (j.selfMerging && alive(j.selfMergePid, "selfmerge")) killGroup(j.selfMergePid);
   // Keep the halted workers' token counts before their worktrees go (only when any ran).
   if (halted.size) keepTokens(true);
   for (const j of s.jobs) if (j.status === "stopped") { if (halted.has(j.id)) guardFinished(j); dropJobTmp(j); if (j.worktree) dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true }); }
@@ -983,40 +1398,100 @@ function boardView(s, d, records) {
   const live = matchJobs(s.jobs, records);
   const gq = readGoalQueue(store.dir);
   return {
-    checklist: checklist(s.goal, s.jobs),
+    checklist: checklist(s.goal, asAccepted(s.jobs)),
     cards: cards({ jobs: s.jobs, goal: s.goal, queue: s.goal && ["running", "paused"].includes(s.goal.status) ? queueView(s.goal.dir, store.dir) : [], live, names: name }),
-    now: nowLine({ goal: s.goal, jobs: s.jobs, names: name, goalQueue: gq.goals, queuePaused: gq.paused }),
+    // A merged job still waits for her review, so the Now line counts it with the finished ones.
+    now: nowLine({ goal: s.goal, jobs: s.jobs.map((j) => (j.status === "merged" ? { ...j, status: "finished" } : j)), names: name, goalQueue: gq.goals, queuePaused: gq.paused }),
     history: history({ records: readHistory(), log: store.readLog(5000), goal: s.goal, jobs: s.jobs, live }),
     goalQueue: gq,
+    scorecard: scorecardView(name, s.goal?.dir),
   };
 }
 
-function status() {
-  const records = keepTokens();
-  const s = store.read(), d = readData();
-  out({ goal: s.goal, board: boardView(s, d, records), tokens: tokensView(s, d, records), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: pace(claudeOf(d)), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
-    queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) });
+// The panel's SCORECARD: one line per agent with a size hint, and the use-it-or-lose-it state.
+function scorecardView(name, dir) {
+  const rows = scoreRows(readScorecard(store.dir), name).map((r) => {
+    const h = sizeHint(r);
+    return { agent: r.agent, name: r.name, line: scoreLine(r), hint: `${h.note}: up to ${h.maxFiles} file${h.maxFiles === 1 ? "" : "s"} a job` };
+  });
+  const spareOn = useItOrLoseItOn(readSettings());
+  let spare = "";
+  if (spareOn && dir) { try { const p = sparePlan(dir, readData()); spare = p.picks.length ? p.reason : ""; } catch {} }
+  return { rows, spareOn, spare };
 }
+
+// ---------------------------------------------------------------- leverage, milk, remote
+// The leverage meter's samples file: one Claude-session reading at most every
+// 60 s, shared by status calls, the remote command and the driver heartbeat.
+// The file's own mtime is the throttle, so separate processes agree.
+const leverageFile = () => path.join(store.dir, "leverage.jsonl");
+const SAMPLE_GAP_MS = 60e3;
+const remoteFile = () => path.join(store.dir, "remote-status.txt");
+
+function sampleLeverage(p) {
+  const used = (p?.windows || []).find((w) => w.title === "Session")?.used;
+  if (!Number.isFinite(used)) return;
+  const f = leverageFile();
+  try { if (Date.now() - fs.statSync(f).mtimeMs < SAMPLE_GAP_MS) return; } catch {}
+  try { addSample(f, { at: Date.now(), used }); } catch {}
+}
+
+// Her leverage for the goal on record: the free-agent token total the TOKENS
+// section shows for the goal, per 1% of her own session spent since it began.
+function leverageView(s, tokens) {
+  return leverage({ tokens: tokens ?? null, spentPct: sessionSpent(readSamples(leverageFile(), s.goal?.startedAt)) });
+}
+
+function statusPayload() {
+  sweep();   // the panel's 3 s poll is what notices done files and starts self-merges
+  const records = keepTokens();
+  fillSlots();
+  const s = store.read(), d = readData();
+  const p = pace(claudeOf(d));
+  sampleLeverage(p);
+  const tv = tokensView(s, d, records);
+  return { goal: s.goal, board: boardView(s, d, records), tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p,
+    leverage: leverageView(s, tv.goal?.total ?? null), milk: milkPolicy(readMilk(readSettings())), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
+    queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
+}
+
+function status() { out(statusPayload()); }
 
 const cmd = process.argv[2];
 if (process.argv[1] === SELF) {
   if (cmd === "start") startGoal();
   else if (cmd === "drive") await drive();
   else if (cmd === "status") status();
+  // The phone-safe summary (constance-remote.mjs): written to her state dir,
+  // nothing is sent anywhere and no port is opened. Prints the file's path.
+  else if (cmd === "remote") { writeRemoteStatus(statusPayload(), remoteFile()); out(remoteFile()); }
   else if (cmd === "agents") {
-    const d = freshData(), guards = store.read().guards || {};
-    out(judged(d).map((a) => `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}`).join("\n"));
+    const d = freshData(), guards = store.read().guards || {}, card = readScorecard(store.dir), rows = scoreRows(card);
+    const all = judged(d), order = rankAgents(all.filter((a) => a.available).map((a) => a.id), card);
+    // Available agents first, best scorecard first; each with its record and a size hint.
+    const sorted = [...order.map((id) => all.find((a) => a.id === id)), ...all.filter((a) => !a.available)];
+    out(sorted.map((a) => {
+      const row = rows.find((r) => r.agent === a.id), h = sizeHint(row);
+      const sc = a.available ? `  [${row ? scoreLine(row) : "no reviewed jobs yet"}; ${h.note}: up to ${h.maxFiles} file${h.maxFiles === 1 ? "" : "s"} a job]` : "";
+      return `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}${sc}`;
+    }).join("\n"));
   }
   else if (cmd === "pace") out(pace(claudeOf(freshData())));
   else if (cmd === "jobs") { sweep(); releaseHeld(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], copies: copiesView(s), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
   else if (cmd === "queue") queueCmd();
+  else if (cmd === "backlog") backlogCmd();
+  else if (cmd === "scorecard") { const rows = scoreRows(readScorecard(store.dir)); out(rows.length ? rows.map((r) => `${scoreLine(r)} — ${sizeHint(r).note}`).join("\n") : "No reviewed jobs yet."); }
+  else if (cmd === "spare") { const g = store.read().goal; const p = sparePlan(arg("--dir") ? path.resolve(arg("--dir")) : g?.dir); out(p.picks.length ? [p.reason, ...p.picks.flatMap((x) => x.items.map((it) => `${x.agent}: #${it.id} ${formatItem(it)}`))].join("\n") : p.reason); }
   else if (cmd === "signals") out(recentSignals(store.dir, 20));
   // The whole log as plain text (the panel's Copy all): every entry, practice prompts in full.
   else if (cmd === "log") { const names = Object.fromEntries((readData().agents || []).map((a) => [a.id, a.name || a.id])); process.stdout.write(logText(store.readLog(Infinity), (id) => names[id] || id)); }
   else if (cmd === "watch") await watch();
+  // Internal: the detached half of a self-merge (spawned by maybeSelfMerge).
+  else if (cmd === "selfmerge") runSelfMerge(Number(process.argv[3]));
   else if (cmd === "delegate") delegate();
   else if (cmd === "wait") await waitJob();
   else if (cmd === "review") review();
+  else if (cmd === "reviews") out(pendingReviews(reviewsFile()));
   else if (cmd === "note") { store.log({ kind: "note", text: process.argv.slice(3).join(" ") }); out("noted"); }
   else if (cmd === "lesson") {
     const text = process.argv.slice(3).join(" ").trim();
@@ -1037,5 +1512,5 @@ if (process.argv[1] === SELF) {
     out("noted: the goal queue waits for the owner after this goal");
   }
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|agents|pace|jobs|job|delegate|wait|review|check|needs-owner|note|lesson|queue|goals|signals|log|watch|stop|recover");
+  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|selfmerge|stop|recover");
 }

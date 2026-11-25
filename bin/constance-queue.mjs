@@ -42,6 +42,24 @@ export function pendingTasks(projectDir, dir = stateDir()) {
   return (readAll(dir).projects[projectDir] || []).filter((t) => t.status === "pending");
 }
 
+// Pending tasks that can start right now, oldest first: a task is skipped when
+// any of its files is in busyFiles or is already claimed by an earlier picked
+// task (two picked tasks never share a file). Tasks with no files are read-only
+// and always eligible. At most `limit` tasks.
+export function readyTasks(projectDir, { busyFiles = [], limit = Infinity } = {}, dir = stateDir()) {
+  const busy = new Set(busyFiles.filter(Boolean));
+  const claimed = new Set();
+  const ready = [];
+  for (const t of pendingTasks(projectDir, dir)) {
+    if (ready.length >= limit) break;
+    const files = (t.files || []).filter(Boolean);
+    if (files.some((f) => busy.has(f) || claimed.has(f))) continue;
+    for (const f of files) claimed.add(f);
+    ready.push(t);
+  }
+  return ready;
+}
+
 // The next task to hand out, or null. Does not remove it — call finishTask or
 // failTask after the handoff is attempted.
 export function peekNext(projectDir, dir = stateDir()) {

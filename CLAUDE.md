@@ -168,6 +168,37 @@ keeps the developer in flow:
   records history, then either starts the next goal in the same driver or, when `needsOwner()` finds a
   problem, pauses the queue, logs `needs-you` and sends a silent notify-send. Stop never advances the
   queue; a goal started by hand or "Start next" clears a pause.
+  Since 1.49.1 (the 2026-11-24 failure: Keep going pressed at Session 100%, she resumed into the wall
+  three times): a window at 100% is a hard stop Keep going can't override; Keep going matches a reset
+  time within 5 min (resets_at jitters); a paused goal resumes only on a current reading (limits present,
+  not `unsure`); Claude's "hit your … limit · resets <time> (<zone>)" exit writes `wall.json`
+  (`bin/constance-wall.mjs`) and pauses until that time, never counting as a failure.
+  Since 1.49.0: a per-agent scorecard (`bin/constance-scorecard.mjs`, `scorecard.json`, recorded once per
+  reviewed job) ranks `agents` and gives size hints (advice, not enforced); the second-try rule
+  (`bin/constance-retry.mjs`) makes `delegate` refuse work sent back twice unless it is a strict-subset split
+  (`--again ID` links a redo). Use it or lose it (`bin/constance-spare.mjs` + `bin/constance-backlog.mjs`,
+  `<project>/.constance/backlog.md`): only in `afterGoal()` when the queue is empty, one backlog-only goal per
+  reset window (`spare.json`), Claude takes only review/bug/design; setting `constanceUseItOrLoseIt` (default on).
+  There is still no goal-less loop, so spare room is only checked when a goal ends. Morning report
+  (`bin/constance-morning.mjs`) when the queue empties after a queued or backlog goal. Copy jobs (own worktree)
+  are never excused by, and never excuse, other jobs' files. Lessons are tidied once (`tidied: 1` marker).
+  Since 1.50.0 (constance-next, not merged): copies start as soon as memory allows (no load check, no
+  30 s spacing; `bin/constance-ramp.mjs`), and the ready queue fills every free slot after each sweep
+  (`readyTasks` in `bin/constance-queue.mjs`, `fillSlots`), not only on accept. A clean copy (guard clean,
+  diff inside its list, its report says tests pass) self-merges after the full suite passes
+  (`bin/constance-selfmerge.mjs`, one rebase-and-retry on conflict, else status `conflict`); her review comes
+  later (`reviews.json`, `C reviews`): accept confirms, send-back runs `git revert`. `constanceSelfMerge:
+  false` turns it off. Leverage meter (`bin/constance-leverage.mjs`, `leverage.jsonl`): free-agent goal
+  tokens per 1% of her Session spent (target 5M per 1%, 1,000M per session), in status, the panel tiles
+  and history; the best handoff kind becomes a lesson. Milk Opus slider (`bin/constance-milk.mjs`,
+  `constanceMilk` 0..100, default 25) sets review depth, task size and planning in her prompt; sandbox and
+  guardrails never change. A clean exit with items or jobs still open resumes her with a nudge (max 3 per
+  goal). **Panel closing bug:** the shell's inotify watcher reloads every plugin (closing panels) on any
+  write inside `~/.config/omarchy/plugins/` except top-level hidden entries and `.git`, so `.constance/`
+  done files and `handoff/HANDOFF.md` in this folder closed it. Project-folder jobs now write done files
+  in their sandbox tmp, and `bin/handoff.mjs` never writes inside the plugins folder. Remote control is
+  only a proposal (`docs/remote-control.md`) plus a read-only `remote-status.txt` (`C remote`); no port,
+  nothing sent.
 
 ## Working rules
 
