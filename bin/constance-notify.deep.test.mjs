@@ -4,21 +4,33 @@
 // cases, log-tail boundaries, signal dedupe and corrupt state. Everything
 // runs against mktemp dirs with a fake HOME; no bus, network or real agents.
 //
-// REAL BUGS FOUND (assertions commented out, reported to Constance):
-//  1. handleNotification stores the notification BODY as `summary` when the
-//     summary is empty (clip(summary || body)) — the "never the body" privacy
-//     rule is violated.
-//  2. handleNotification crashes (TypeError from path.join) when the matched
-//     running job has neither worktree nor dir: inspectJobDir(undefined).
-//  3. NotifyParser's Member= regex is unanchored, so a STRING argument whose
-//     value contains "Interface=org.freedesktop.Notifications  Member=Notify"
-//     resets the string collection and the notification is silently dropped.
-//  4. recentSignals(dir, 0) returns EVERY line: slice(-0) === slice(0).
-//  5. recentSignals returns [] for the whole file when ANY line fails
-//     JSON.parse — one corrupt line hides all signals and breaks dedupe.
-//  6. matchJob's byDir check is a bare substring test: a job whose dir is a
-//     prefix of another job's dir can win the match for the longer path.
-//  7. recordSignal(dir, null) appends a literal "null" line and returns true.
+// BUGS FOUND EARLIER (all fixed in constance-notify.mjs; the assertions below
+// now verify the corrected behavior):
+//  1. handleNotification stored the notification BODY as `summary` when the
+//     summary was empty — now clip(summary) only, the body is never stored.
+//  2. handleNotification crashed (TypeError from path.join) when the matched
+//     running job had neither worktree nor dir — inspectJobDir reports
+//     "no run dir" instead.
+//  3. NotifyParser's Member= regex was unanchored, so a STRING argument whose
+//     value contained "Interface=org.freedesktop.Notifications  Member=Notify"
+//     reset the string collection — STRING lines are now excluded from the
+//     header test.
+//  4. recentSignals(dir, 0) returned EVERY line: slice(-0) === slice(0) —
+//     non-positive n now returns [].
+//  5. recentSignals returned [] for the whole file when ANY line failed
+//     JSON.parse — corrupt lines are now skipped individually.
+//  6. matchJob's byDir check was a bare substring test: a job whose dir was a
+//     prefix of another job's dir could win the match for the longer path —
+//     a dir now only counts as a whole path token.
+//  7. recordSignal(dir, null) appended a literal "null" line and returned
+//     true — null/non-object events are now refused.
+//
+// STILL OPEN (assertions commented out under '// BUG:' below):
+//  8. agentInText/agentApp hand out the live KNOWN entries; mutating the
+//     returned `names` array changes what agentApp()/allowedSender() accept —
+//     the privacy allowlist — while agentInText's precompiled NAME_RES
+//     regexes never see the new name, so text matching and sender matching
+//     diverge.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -228,6 +240,11 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'constance-notify-deep-'));
 const repoA = path.join(root, 'repo-a'), repoB = path.join(root, 'repo-a-long');
 const stateDir = path.join(root, 'state');
 for (const d of [repoA, repoB, stateDir]) fs.mkdirSync(d, { recursive: true });
+// Point every home-ish env var inside the scratch root so nothing this test
+// spawns (git reads ~/.gitconfig) can touch the real home folder.
+for (const [v, d] of [['HOME', 'home'], ['XDG_STATE_HOME', 'xdg-state'], ['XDG_CONFIG_HOME', 'xdg-config'], ['XDG_CACHE_HOME', 'xdg-cache']]) {
+  const p = path.join(root, d); fs.mkdirSync(p, { recursive: true }); process.env[v] = p;
+}
 const git = (...a) => execFileSync('git', ['-C', repoA, ...a], { encoding: 'utf8' });
 git('init', '-q'); git('config', 'user.email', 't@t'); git('config', 'user.name', 't');
 fs.writeFileSync(path.join(repoA, 'a.txt'), 'a\n'); git('add', 'a.txt'); git('commit', '-qm', 'init');
@@ -559,6 +576,336 @@ const freshDir = () => fs.mkdtempSync(path.join(root, 'h-'));
   const d = freshDir();
   assert.equal(recordSignal(d, null), false, 'a null event is not a signal');
   assert.deepEqual(recentSignals(d), []);
+}
+
+// ---------- NotifyParser: stream and state edges ----------
+
+// feed() returns the completed event on the NEXT "‣ Type=" header line (or on
+// end()), never at the "};" closing the MESSAGE; end() is idempotent.
+{
+  const p = new NotifyParser();
+  const lines = [...full('Ghostty', '', 'Grok finished', 'b').split('\n'), '‣ Type=method_return'];
+  const got = [];
+  for (const l of lines) { const e = p.feed(l); if (e) got.push(e); }
+  assert.equal(got.length, 1, 'the header line flushes the completed block');
+  assert.deepEqual(got[0], { app: 'Ghostty', summary: 'Grok finished', body: 'b' });
+  assert.equal(p.end(), null, 'nothing left to emit');
+  assert.equal(p.end(), null, 'end() twice emits nothing');
+}
+
+// A Notify block missing its "‣ Type=" header still parses: Member= plus four
+// STRING args is enough for end() to emit it (the parser is lenient; busctl
+// always prints headers).
+{
+  const p = new NotifyParser();
+  for (const l of [
+    '  Interface=org.freedesktop.Notifications  Member=Notify',
+    '  STRING "Ghostty";', '  STRING "";',
+    '  STRING "Grok finished";', '  STRING "b";',
+  ]) assert.equal(p.feed(l), null);
+  assert.deepEqual(p.end(), { app: 'Ghostty', summary: 'Grok finished', body: 'b' });
+}
+
+// STRING lines before any Member=Notify are ignored — they can never seed a
+// collection, and end() has nothing to emit.
+{
+  const p = new NotifyParser();
+  for (const l of ['  STRING "Ghostty";', '  STRING "";', '  STRING "Grok finished";', '  STRING "b";']) p.feed(l);
+  assert.equal(p.end(), null);
+}
+
+// A second Member=Notify discards the strings collected for the first: only
+// the last complete set can ever emit; the first is silently dropped.
+{
+  const p = new NotifyParser();
+  const lines = [
+    '‣ Type=method_call',
+    '  Interface=org.freedesktop.Notifications  Member=Notify',
+    '  STRING "Ghostty";', '  STRING "";', '  STRING "first";', '  STRING "1";',
+    '  Interface=org.freedesktop.Notifications  Member=Notify',
+    '  STRING "Devin";', '  STRING "";', '  STRING "second";', '  STRING "2";',
+    '‣ Type=method_return',
+  ];
+  const got = [];
+  for (const l of lines) { const e = p.feed(l); if (e) got.push(e); }
+  assert.deepEqual(got, [{ app: 'Devin', summary: 'second', body: '2' }], 'the second Member= wiped the first collection');
+}
+
+// An unrelated bus header arriving MID-block truncates the pending collection:
+// the partial strings are dropped and STRING lines outside a Notify block are
+// ignored, so the notification is lost entirely rather than completed wrongly.
+{
+  const p = new NotifyParser();
+  const lines = [
+    '‣ Type=method_call',
+    '  Interface=org.freedesktop.Notifications  Member=Notify',
+    '  STRING "Ghostty";', '  STRING "";',
+    '‣ Type=method_return',
+    '  STRING "Grok finished";', '  STRING "b";',
+  ];
+  for (const l of lines) p.feed(l);
+  assert.equal(p.end(), null, 'the truncated notification is dropped, not completed');
+}
+
+// feed() is line-oriented: non-string input throws rather than being coerced.
+{
+  const p = new NotifyParser();
+  assert.throws(() => p.feed(42), TypeError);
+  assert.throws(() => p.feed(null), TypeError);
+  assert.throws(() => p.feed({}), TypeError);
+}
+
+// notificationsIn coerces its input; numbers/booleans/objects yield nothing.
+assert.deepEqual(notificationsIn(42), []);
+assert.deepEqual(notificationsIn(true), []);
+assert.deepEqual(notificationsIn({}), []);
+
+// ---------- agent names: priority and odd inputs ----------
+
+// agentInText resolves by KNOWN order, not by position in the text: grok
+// precedes devin in LAUNCH, so it wins no matter which name comes first.
+assert.equal(agentInText('Devin finished and Grok too').id, 'grok');
+assert.equal(agentInText('Grok finished and Devin too').id, 'grok');
+// kilo is a launchable worker too.
+assert.equal(agentInText('Kilo finished').id, 'kilo');
+// Non-string haystacks coerce to strings and simply don't match.
+for (const t of [null, undefined, 42, {}, []]) assert.equal(agentInText(t), null);
+
+// agentApp: the " cli"/" code" suffix strip applies once, case-insensitively.
+assert.equal(agentApp('Codex Code').id, 'codex');
+assert.equal(agentApp('Claude code').id, 'claude');
+assert.equal(agentApp('Devin CLI').id, 'devin');
+assert.equal(agentApp('Kilo').id, 'kilo');
+assert.equal(agentApp('Devin CLI Code'), null, 'only one suffix is stripped');
+assert.equal(agentApp('kilo auto'), null, '"kilo auto" is not a known sender name');
+assert.equal(agentApp([]), null);
+assert.equal(agentApp({}), null);
+// allowedSender follows agentApp for the same names.
+assert.equal(allowedSender('Kilo'), true);
+assert.equal(allowedSender('kilo auto'), false);
+
+// BUG: agentInText/agentApp hand out the LIVE KNOWN entries. Pushing onto the
+// returned `names` array changes what agentApp()/allowedSender() accept — the
+// privacy allowlist — while agentInText's precompiled NAME_RES regexes never
+// see the new name, so text matching and sender matching diverge.
+// {
+//   const k = agentInText('Devin finished');
+//   k.names.push('made-up-sender');
+//   // assert.equal(agentApp('made-up-sender'), null);          // FAILS: returns devin's entry
+//   // assert.equal(allowedSender('made-up-sender'), false);   // FAILS: returns true
+//   k.names.pop();
+// }
+
+// ---------- matchJob: wrong types and tiebreak edges ----------
+
+// jobs must be an array: null/undefined/primitives throw a TypeError inside
+// filter() rather than degrading to "no match". handleNotification inherits
+// this — its jobs=[] default only applies to undefined.
+for (const bad of [null, undefined, 'jobs', 5, {}]) {
+  assert.throws(() => matchJob('Grok finished', bad), TypeError, `jobs=${JSON.stringify(bad)}`);
+}
+assert.throws(() => handleNotification({ app: 'Ghostty', summary: 'Grok finished', body: '' }, { jobs: null }), TypeError);
+// A null entry inside the array crashes the same way (j.status on null).
+assert.throws(() => matchJob('Grok finished', [null]), TypeError);
+
+// Two running jobs that BOTH have done files: the first in array order wins
+// (not the newest startedAt) and the match is not flagged ambiguous.
+{
+  fs.writeFileSync(doneFile(repoA, 50), '{}');
+  fs.writeFileSync(doneFile(repoB, 51), '{}');
+  const m = matchJob('Grok finished', [
+    { id: 50, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 },
+    { id: 51, agent: 'grok', status: 'running', dir: repoB, startedAt: 99 },
+  ]);
+  assert.equal(m.job, 50, 'withDone preserves array order, not startedAt');
+  assert.equal(m.ambiguous, false);
+  fs.rmSync(doneFile(repoA, 50)); fs.rmSync(doneFile(repoB, 51));
+}
+
+// Dir matching is case-sensitive: an uppercased path in the text is not a dir
+// hit, so the newest-running fallback decides instead.
+{
+  const jobs = [
+    { id: 60, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 },
+    { id: 61, agent: 'grok', status: 'running', dir: repoB, startedAt: 2 },
+  ];
+  const m = matchJob(`Grok finished in ${repoA.toUpperCase()}`, jobs);
+  assert.equal(m.job, 61, 'a case-differing path does not count as a dir mention');
+  assert.equal(m.ambiguous, true);
+}
+
+// ---------- inspectJobDir: odd paths and empty repos ----------
+
+// Falsy dirs report "no run dir"; a path that is a plain file reports only
+// the done-file part (git -C on a file fails silently).
+for (const d of [0, false]) assert.equal(inspectJobDir(d, 1), 'no run dir');
+{
+  const f = path.join(root, 'plain-file'); fs.writeFileSync(f, 'x');
+  assert.equal(inspectJobDir(f, 1), 'no done file yet');
+}
+// A git repo with zero commits: git log fails (no HEAD) and is skipped, but
+// status still reports the worktree state.
+{
+  const nc = path.join(root, 'no-commits'); fs.mkdirSync(nc);
+  execFileSync('git', ['-C', nc, 'init', '-q']);
+  assert.equal(inspectJobDir(nc, 1), 'no done file yet; worktree clean');
+  fs.writeFileSync(path.join(nc, 'n.txt'), 'n\n');
+  assert.match(inspectJobDir(nc, 1), /uncommitted: \?\? n\.txt/);
+}
+
+// ---------- logSaysFinished: coerced and stale input ----------
+
+// Buffers and String objects coerce like primitives.
+assert.equal(logSaysFinished(Buffer.from('job finished')), true);
+assert.equal(logSaysFinished(new String('still working')), false);
+// A done-file mention pushed out of the 4 KiB tail does not count.
+assert.equal(logSaysFinished('.constance/done-9.json written\n' + 'x'.repeat(5000)), false);
+
+// ---------- jobFinishSignal: wrong types ----------
+
+assert.throws(() => jobFinishSignal(null, { source: 'exit' }), TypeError);
+assert.throws(() => jobFinishSignal(undefined), TypeError);
+// An empty job object still yields a well-formed (if empty) signal.
+{
+  const sig = jobFinishSignal({}, { source: 'exit' });
+  assert.equal(sig.agent, undefined);
+  assert.equal(sig.job, undefined);
+  assert.equal(sig.summary, '');
+  assert.equal(sig.inspection, 'no run dir');
+  assert.equal(typeof sig.at, 'number');
+}
+
+// ---------- handleNotification: clipping, privacy and odd storeDirs ----------
+
+// A long summary is clipped to 120 chars with an ellipsis, same as
+// jobFinishSignal; a single running job carries no ambiguity note.
+{
+  const d = freshDir();
+  const ev = handleNotification({ app: 'Ghostty', summary: 'Grok ' + 's'.repeat(200), body: '' },
+    { jobs: [{ id: 1, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 }], storeDir: d });
+  assert.equal(ev.summary.length, 120);
+  assert.ok(ev.summary.endsWith('…'));
+  assert.equal(ev.note, undefined, 'a single running job is not ambiguous');
+}
+
+// A storeDir whose parents don't exist: recordSignal fails silently inside,
+// the event is still returned and nothing throws.
+{
+  const ev = handleNotification({ app: 'Ghostty', summary: 'Grok finished', body: '' },
+    { jobs: [{ id: 1, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 }],
+      storeDir: path.join(root, 'missing', 'deep', 'dir') });
+  assert.equal(ev.kind, 'agent-done');
+  assert.ok(!fs.existsSync(path.join(root, 'missing')));
+}
+
+// The finish word may live in the body alone: kind is still agent-done, the
+// stored summary stays empty and the body text never reaches disk.
+{
+  const d = freshDir();
+  const ev = handleNotification({ app: 'Ghostty', summary: '', body: 'Grok finished — read the report' },
+    { jobs: [{ id: 1, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 }], storeDir: d });
+  assert.equal(ev.kind, 'agent-done');
+  assert.equal(ev.summary, '');
+  assert.ok(!/read the report/.test(fs.readFileSync(notifyFile(d), 'utf8')));
+}
+
+// For a foreign (owner's own) run the finish check looks at summary+body
+// together, so "finished" in the body alone still records the event — with
+// no text stored.
+{
+  const d = freshDir();
+  const ev = handleNotification({ app: 'Ghostty', summary: 'Codex', body: 'all finished, logs attached' },
+    { jobs: [], storeDir: d });
+  assert.equal(ev.kind, 'foreign');
+  assert.equal(ev.agent, 'codex');
+  assert.ok(!/logs attached/.test(fs.readFileSync(notifyFile(d), 'utf8')));
+}
+
+// When the text names two agents, agentInText's KNOWN-order priority picks
+// the agent whose jobs are even considered (grok outranks devin).
+{
+  const d = freshDir();
+  const ev = handleNotification({ app: 'Ghostty', summary: 'Devin finished, Grok too', body: '' },
+    { jobs: [{ id: 1, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 }], storeDir: d });
+  assert.equal(ev.agent, 'grok');
+  assert.equal(ev.job, 1);
+}
+
+// ev.at comes from Date.now, same as jobFinishSignal.
+{
+  const realNow = Date.now;
+  Date.now = () => 987654;
+  try {
+    const ev = handleNotification({ app: 'Ghostty', summary: 'Grok is thinking', body: '' },
+      { jobs: [{ id: 1, agent: 'grok', status: 'running', dir: repoA, startedAt: 1 }], storeDir: freshDir() });
+    assert.equal(ev.at, 987654);
+  } finally { Date.now = realNow; }
+}
+
+// ---------- recordSignal / recentSignals: hostile file contents ----------
+
+// notify.jsonl that is a directory: reads as empty, writes refused.
+{
+  const d = freshDir();
+  fs.mkdirSync(notifyFile(d), { recursive: true });
+  assert.deepEqual(recentSignals(d), []);
+  assert.equal(recordSignal(d, { at: 1, agent: 'x', kind: 'foreign' }), false);
+}
+
+// Valid-JSON scalar lines are returned verbatim and don't break the dedupe
+// scan's `old && old.job` guard.
+{
+  const d = freshDir();
+  fs.writeFileSync(notifyFile(d), 'null\n42\n"text"\n[1,2]\n');
+  assert.deepEqual(recentSignals(d), [null, 42, 'text', [1, 2]]);
+  assert.equal(recordSignal(d, { at: 1, agent: 'grok', kind: 'agent-done', job: 9 }), true);
+  assert.equal(recordSignal(d, { at: 2, agent: 'grok', kind: 'agent-done', job: 9 }), false, 'dedupe still sees the written signal');
+}
+
+// Events JSON.stringify cannot represent are refused, not thrown.
+{
+  const d = freshDir();
+  assert.equal(recordSignal(d, { job: 1n, agent: 'grok' }), false, 'BigInt breaks stringify');
+  const circ = { agent: 'grok' }; circ.self = circ;
+  assert.equal(recordSignal(d, circ), false, 'circular refs break stringify');
+  assert.deepEqual(recentSignals(d), []);
+}
+
+// Arrays are objects too: accepted and round-trip as arrays (loose typing is
+// harmless — recentSignals consumers only read .job/.kind fields).
+{
+  const d = freshDir();
+  assert.equal(recordSignal(d, [1, 2]), true);
+  assert.deepEqual(recentSignals(d), [[1, 2]]);
+}
+
+// n <= 0 or non-numeric means "no signals"; Infinity returns the whole file
+// (that is what recordSignal's dedupe scan uses internally).
+{
+  const d = freshDir();
+  for (let i = 0; i < 3; i++) recordSignal(d, { at: i, agent: 'x', kind: 'foreign' });
+  assert.deepEqual(recentSignals(d, -1), []);
+  assert.deepEqual(recentSignals(d, NaN), []);
+  assert.equal(recentSignals(d, Infinity).length, 3);
+}
+
+// A file of only blank lines reads as empty.
+{
+  const d = freshDir();
+  fs.writeFileSync(notifyFile(d), '\n   \n\t\n');
+  assert.deepEqual(recentSignals(d), []);
+}
+
+// Interleaved append+read stays consistent across many calls. The module is
+// fully synchronous so there is no true concurrency to race; this is a smoke
+// check that dedupe and tail-slicing hold under repetition.
+{
+  const d = freshDir();
+  let expected = 0;
+  for (let i = 0; i < 25; i++) {
+    if (recordSignal(d, { at: i, agent: 'grok', kind: 'agent-done', job: i % 3 })) expected++;
+    assert.equal(recentSignals(d).length, expected);
+  }
 }
 
 fs.rmSync(root, { recursive: true, force: true });
