@@ -3,6 +3,11 @@
 One short entry per feature release, newest first; small fix versions are folded into the release
 they belong to. The full history, patch by patch, is in git (`git log`).
 
+## 1.53.0 - 2026-11-25
+- **Freebuff and Kilo Code get Cook Meter tabs.** Both read only local usage records — Kilo Code from its `kilo.db` (tokens, requests and cost), Freebuff from its run-state credits and tokens — and neither can read plan limits, which are cloud-only, so neither gets meters and each says so in one calm line. `bin/kilo-usage.mjs`, `bin/freebuff-usage.mjs`, `bin/collect-freebuff-kilo.test.mjs`.
+- **Kilo Code is a free-only Constance worker.** It runs `kilo run --auto -m kilo-auto/free` in its own bubblewrap profile, capped at 2 copies and ranked right after Devin; a run whose output shows a paid model or any cost over 0 fails the job (`bin/kilo-free.mjs`). Both agents keep file logins, so neither needs `constanceKeyringAgents`. Research notes: `docs/agents-freebuff-kilo.md`.
+- **Freebuff is shown but never delegated to.** Its CLI has no headless or prompt mode (interactive TUI only), so `judge()` refuses it; its sponsor banners are stripped from the text Constance reviews (`bin/freebuff-ads.mjs`).
+
 ## 1.52.0 - 2026-11-25
 - **Constance: the goal queue keeps going.** `queueStops()` in `bin/constance-goalqueue.mjs` splits a finished goal's problems into stops (you pressed Stop, `C needs-owner`, a merge conflict) and notes (a failed goal, unreviewed or still-running jobs, open checklist items). Only stops pause the queue and send the silent notification naming the reason; notes are kept on the goal (`endNotes`) and logged, and the next queued goal starts right away. A goal that fails three times keeps a one-line `failReason` in history. A "hit your limit" exit is still a pause until the stated reset, then the same goal resumes. `bin/constance-queue4.test.mjs` runs 4 queued goals end to end, with a limit hit in goal 2 and a real failure in goal 3.
 - **Constance: Copy summary.** A "Copy summary" chip next to Copy all copies `C summary` (`bin/constance-summary.mjs`): each goal's status, the checklist, failed jobs with a one-line error, the leverage numbers and the last 30 log lines, never more than 80 lines.
