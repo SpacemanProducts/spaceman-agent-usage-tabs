@@ -46,7 +46,7 @@ assert.ok(qml.includes('text: "Sandbox and guardrails always on."'), "guardrails
 assert.match(qml, /readonly property int constanceMilk:/, "constanceMilk property exists");
 assert.match(qml, /readonly property string constanceMilkBand:/, "constanceMilkBand property exists");
 assert.match(qml, /constance\.milk/, "the slider prefers status.milk when present");
-assert.ok(qml.includes('root.writeSetting(["constanceMilk", String(v)])'), "moving it writes constanceMilk");
+assert.ok(qml.includes('root.writeSetting(["constanceMilk", String(pending)])'), "releasing it writes constanceMilk");
 assert.ok(qml.includes("Math.round(f * 20) * 5"), "the slider steps by 5 over 0..100");
 
 // History rows show leverage.label when the record carries it.
