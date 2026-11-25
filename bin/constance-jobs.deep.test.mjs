@@ -238,12 +238,14 @@ try {
   fs.mkdirSync(path.join(ls3dir, "log.jsonl"), { recursive: true });
   assert.throws(() => openStore(ls3dir).log({ kind: "x" }));
   assert.deepEqual(openStore(ls3dir).readLog(), [], "but readLog on it still reads empty");
-  // BUG: readLog(0) returns EVERY entry, not none — slice(-0) is slice(0).
-  // Same for negative n, which silently drops the first |n| lines instead of
-  // meaning anything sensible. Pinned here as a comment until the semantics
-  // are decided; a caller asking for 0 lines should get [].
-  // assert.deepEqual(ls.readLog(0), [], "readLog(0) should return no entries");
-  // assert.deepEqual(ls2.readLog(-1), [], "readLog(-1) should return no entries");
+  // n <= 0 asks for no entries: slice(-0) is slice(0), which would return
+  // EVERY line, and a negative n would silently drop the first |n| lines.
+  // Pinned on a clean store (ls/ls2 above have corrupt logs that mask it).
+  const ls4 = openStore(storeDir("logs4"));
+  for (let i = 1; i <= 3; i++) ls4.log({ kind: "k", i });
+  assert.deepEqual(ls4.readLog(0), [], "readLog(0) returns no entries");
+  assert.deepEqual(ls4.readLog(-1), [], "readLog(-1) returns no entries");
+  assert.deepEqual(ls4.readLog("2").map((e) => e.i), [1, 2, 3], "a non-number n uses the default, not the string");
 
   // ---------- jobs.lock: the races ----------
 
