@@ -57,7 +57,7 @@ assert.ok(!s2.includes(" other"), "no other bucket when empty");
 // Paths and emails are stripped everywhere they could appear; the summary
 // stays under 15 lines even with a long checklist.
 const stuffed = status({
-  goal: { text: "Fix /home/spaceman/secrets and mail bob@example.com now" },
+  goal: { text: "Fix /home/someone/secrets and mail bob@example.com now" },
   board: { checklist: { items: [
     ...Array.from({ length: 14 }, (_, i) => ({ n: i + 1, text: `item ${i + 1} in /tmp/x`, state: "todo" })),
     { n: 15, text: "reach me at a@b.co", state: "todo" },
@@ -71,7 +71,7 @@ assert.ok(s3.split("\n").length <= 16, "15 lines + trailing newline");
 assert.ok(s3.includes("… "), "overflow items are folded");
 
 // A path-looking goal loses the path tokens but keeps the plain words.
-const g = remoteSummary(status({ goal: "Work in /home/spaceman/code on it" }));
+const g = remoteSummary(status({ goal: "Work in /home/someone/code on it" }));
 assert.ok(g.includes("Goal: Work in on it"), g.split("\n")[0]);
 
 // Empty / broken input never throws.
