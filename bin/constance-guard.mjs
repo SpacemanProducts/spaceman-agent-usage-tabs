@@ -33,18 +33,26 @@ function headOf(dir) {
   return r.status === 0 ? r.stdout.trim() : "";
 }
 
-// Paths dirty in the worktree right now.
+// Paths dirty in the worktree right now. -z prints raw unquoted names (a file
+// literally called "x -> y.txt" survives), --untracked-files=all lists every
+// new file instead of collapsing a wholly untracked folder to "dir/", and a
+// rename reports BOTH sides ("to\0from"), so renaming into an allowed name
+// still shows the deleted source.
 export function dirtyPaths(dir) {
   const out = [];
-  const st = git(dir, "status", "--porcelain");
+  const st = git(dir, "status", "--porcelain", "-z", "--untracked-files=all");
   if (st.status !== 0) return out;
-  for (const line of st.stdout.split("\n")) {
-    if (!line.trim()) continue;
-    let p = line.slice(3).trim();
-    const arrow = p.indexOf(" -> ");
-    if (arrow >= 0) p = p.slice(arrow + 4);
-    if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
+  const fields = st.stdout.split("\0");
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    if (!f || f.length < 4) continue;
+    const p = f.slice(3);
     out.push(p);
+    const xy = f.slice(0, 2);
+    if (xy.includes("R") || xy.includes("C")) {
+      const other = fields[++i];
+      if (other && xy.includes("R")) out.push(other);
+    }
   }
   return out;
 }
@@ -61,10 +69,22 @@ export function commitFromRun(dir, commit, baseHead) {
   return git(dir, "merge-base", "--is-ancestor", baseHead, commit).status === 0;
 }
 
+// --name-only reports a rename under its new name only, which would hide the
+// deleted source; --name-status shows "R<score>\told\tnew", so both sides of a
+// rename are checked (a copy's source is untouched, so only its destination
+// counts).
 const commitFiles = (dir, commit) => {
   const out = [];
-  const r = git(dir, "show", "--name-only", "--format=", commit);
-  if (r.status === 0) r.stdout.split("\n").filter(Boolean).forEach((p) => out.push(p));
+  const r = git(dir, "show", "--name-status", "--format=", "-M", commit);
+  if (r.status !== 0) return out;
+  for (const line of r.stdout.split("\n")) {
+    if (!line.trim()) continue;
+    const f = line.split("\t");
+    const st = f[0] || "";
+    if (st.startsWith("R")) { if (f[1]) out.push(f[1]); if (f[2]) out.push(f[2]); }
+    else if (st.startsWith("C")) { if (f[2]) out.push(f[2]); }
+    else if (f[1]) out.push(f[1]);
+  }
   return out;
 };
 
@@ -75,6 +95,9 @@ export function newCommits(dir, baseHead) {
   if (!baseHead) return [];
   const base = git(dir, "rev-parse", "--verify", "--quiet", baseHead + "^{commit}");
   if (base.status !== 0) return [];
+  // A base that is not an ancestor of HEAD (history rewritten mid-run) makes
+  // base..HEAD span everything: "can't tell which commits are the run's".
+  if (git(dir, "merge-base", "--is-ancestor", base.stdout.trim(), "HEAD").status !== 0) return [];
   const r = git(dir, "rev-list", "--reverse", base.stdout.trim() + "..HEAD");
   if (r.status !== 0) return [];
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -92,7 +115,9 @@ export function changedPaths(dir, commit, before = null) {
 }
 
 const norm = (p) => String(p).replace(/^\.\//, "").replace(/\/+$/, "");
-const inside = (p, list) => list.some((f) => { const a = norm(f), b = norm(p); return a === b || a === "." || b === a + "/" || a.startsWith(b + "/"); });
+// An allowed entry covers a changed path inside it (".constance/" aside), the
+// path itself, or — for collapsed/odd entries — either direction of nesting.
+const inside = (p, list) => list.some((f) => { const a = norm(f), b = norm(p); return a === b || a === "." || b === a + "/" || a.startsWith(b + "/") || b.startsWith(a + "/"); });
 
 // Dot-prefixed entries are ignored in the comparisons: tools churn hidden dirs
 // constantly (~/.cache, ~/.local, browser state), and an agent misbehaving in a

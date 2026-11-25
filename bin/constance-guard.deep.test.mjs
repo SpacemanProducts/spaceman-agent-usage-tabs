@@ -4,14 +4,15 @@
 // any agent CLI. Covers what the first test leaves out: several bad commits at
 // once, pre-dirty paths, commits that are not the run's own, renames and
 // deletions, an empty allowed list, old snapshots without a HEAD, and the
-// restoreRun dedupe. Suspected bugs are commented out with a note, not fixed
-// (this job is test-only) — see the BUG blocks at the bottom.
+// restoreRun dedupe — plus the five edge cases that used to be suspected bugs
+// (directory allowed entries, rename sources, quoted/arrow filenames,
+// untracked-dir collapse, rewritten base HEADs).
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { snapshot, checkRun, restoreRun, changedPaths, commitFromRun, newCommits } from "./constance-guard.mjs";
+import { snapshot, checkRun, restoreRun, changedPaths, commitFromRun, newCommits, dirtyPaths } from "./constance-guard.mjs";
 
 // One isolated world per scenario: fake HOME with a Projects folder holding a
 // git repo "app", mirroring how delegate() sets a job up (including the
@@ -61,9 +62,9 @@ function setup({ exclude = true } = {}) {
   assert.ok(b.dirty.includes("wip.txt") && b.dirty.includes("draft.md"), "pre-run dirt recorded");
   s.write("wip.txt", "owner edit + agent\n"); s.write("stray.txt"); s.write("sub/new-dirty.txt");
   const res = checkRun({ dir: s.repo, files: ["ok.txt"], commit: "", before: b, env: s.env });
-  // "sub/" not "sub/new-dirty.txt": git collapses a wholly untracked directory
-  // to its top level in porcelain output (the same collapse behind BUG 4).
-  assert.deepEqual([...res.badPaths].sort(), ["stray.txt", "sub/"],
+  // "sub/new-dirty.txt", not "sub/": --untracked-files=all expands a wholly
+  // untracked directory to its files, so nothing hides under a collapsed "dir/".
+  assert.deepEqual([...res.badPaths].sort(), ["stray.txt", "sub/new-dirty.txt"],
     "pre-dirty wip.txt/draft.md excused no matter how the run touched them");
   const did = restoreRun({ dir: s.repo, badPaths: res.badPaths });
   assert.ok(did.some((d) => d.includes("left in place")), "strays are reported, never deleted");
@@ -113,9 +114,8 @@ function setup({ exclude = true } = {}) {
   s.done();
 }
 
-// ---- renames and deletions: git reports a rename under its NEW name only, in
-// both commits (--name-only) and dirty status ("R old -> new"). A rename whose
-// destination is allowed passes; the old name is never checked (see BUG below).
+// ---- renames and deletions: --name-status reports both sides of a rename, so
+// renaming an outside file INTO an allowed name still flags the deleted source.
 {
   const s = setup();
   s.write("ok.txt", "o\n"); s.write("gone.txt", "g\n");
@@ -128,8 +128,9 @@ function setup({ exclude = true } = {}) {
   const res = checkRun({ dir: s.repo, files: ["ok2.txt"], commit: dc, before: b, env: s.env });
   assert.equal(res.ok, false);
   assert.deepEqual(res.ownCommits, [rc, dc]);
-  assert.deepEqual(res.badCommits, [dc], "the rename commit touched only an allowed path");
-  assert.deepEqual(res.badPaths, ["gone.txt"], "the deleted outside file is caught; ok2.txt is fine");
+  assert.deepEqual(res.badCommits, [dc, rc], "both commits touched a path outside the list: the rename deleted ok.txt");
+  assert.deepEqual([...res.badPaths].sort(), ["gone.txt", "ok.txt"],
+    "the deleted outside file and the rename's source are caught; ok2.txt is fine");
   s.done();
 }
 {
@@ -154,15 +155,15 @@ function setup({ exclude = true } = {}) {
   s.done();
 }
 {
-  // Same rename rule for uncommitted work: a staged rename shows as
-  // "R old -> new" and only the new name reaches dirtyPaths.
+  // Same rename rule for uncommitted work: a staged rename's "to\0from" pair
+  // reaches dirtyPaths as both names, so the deleted source is checked too.
   const s = setup();
   s.write("ok.txt", "o\n"); s.git("add", "ok.txt"); s.git("commit", "-qm", "add ok");
   const b = s.before();
   s.git("mv", "ok.txt", "stolen.txt");
   const res = checkRun({ dir: s.repo, files: ["ok.txt"], commit: "", before: b, env: s.env });
   assert.equal(res.ok, false);
-  assert.deepEqual(res.badPaths, ["stolen.txt"]);
+  assert.deepEqual(res.badPaths, ["stolen.txt"], "ok.txt is allowed; stolen.txt is not");
   s.done();
 }
 
@@ -263,78 +264,89 @@ function setup({ exclude = true } = {}) {
   s.done();
 }
 
-// ============================================================ suspected bugs
-// Found while writing this file; asserted nowhere because they are real bugs in
-// bin/constance-guard.mjs and this job must not change it. Reported to Constance.
+// ============================================================ edge cases
+// The five suspected bugs, now fixed in bin/constance-guard.mjs and asserted
+// here for real.
 
-// BUG 1 — ".constance/" never actually covers files INSIDE it. inside() checks
-// `allowed.startsWith(changed + "/")`, i.e. an allowed entry covers a changed
-// path only when the entry IS the path or lives under it — never the reverse.
-// So a job that commits (git add -f) or modifies a tracked .constance file is
-// flagged "changed files outside its list", contradicting the ".constance/
-// aside" comment. In production the info/exclude usually keeps .constance out
-// of status, but a forced add or a tracked file still trips it.
-//
-//   // const s = setup({ exclude: false });
-//   // const b = s.before();
-//   // fs.mkdirSync(path.join(s.repo, ".constance"));
-//   // fs.writeFileSync(path.join(s.repo, ".constance", "done-1.json"), "{}");
-//   // s.git("add", "-f", ".constance/done-1.json");
-//   // const c = s.commit("done file committed");
-//   // const res = checkRun({ dir: s.repo, files: [], commit: c, before: b, env: s.env });
-//   // EXPECTED: res.ok === true (".constance/ aside")
-//   // ACTUAL:   res.ok === false, badPaths === [".constance/done-1.json"]
+// ---- a directory entry in the allowed list covers files INSIDE it: ".constance/"
+// aside means a forced add or a tracked .constance file is not "outside the
+// list" (inside() now also matches changed paths under an allowed entry).
+{
+  const s = setup({ exclude: false });
+  const b = s.before();
+  fs.mkdirSync(path.join(s.repo, ".constance"));
+  fs.writeFileSync(path.join(s.repo, ".constance", "done-1.json"), "{}");
+  s.git("add", "-f", ".constance/done-1.json");
+  const c = s.commit("done file committed");
+  const res = checkRun({ dir: s.repo, files: [], commit: c, before: b, env: s.env });
+  assert.equal(res.ok, true, ".constance/ aside: " + JSON.stringify(res.violations));
+  s.done();
+}
 
-// BUG 2 — a rename INTO an allowed name hides the source. git reports renames
-// under the new name only, so `git mv evil.txt allowed.txt` (allowed.txt in the
-// job's list) changes "allowed.txt" — inside the list — and the deletion of
-// evil.txt is never reported or reverted. Same for a staged rename in status.
-//
-//   // const s = setup();
-//   // s.write("evil.txt"); s.git("add", "evil.txt"); s.git("commit", "-qm", "base");
-//   // const b = s.before();
-//   // s.git("mv", "evil.txt", "allowed.txt");
-//   // const c = s.commit("sneaky rename");
-//   // const res = checkRun({ dir: s.repo, files: ["allowed.txt"], commit: c, before: b, env: s.env });
-//   // EXPECTED: evil.txt's deletion flagged (badPaths or a rename-aware check)
-//   // ACTUAL:   res.ok === true — only "allowed.txt" was ever looked at
+// ---- a rename INTO an allowed name still reports the deleted source:
+// `git mv evil.txt allowed.txt` changes "allowed.txt" (inside the list) but
+// also deletes evil.txt — commitFiles reads --name-status so both sides count.
+{
+  const s = setup();
+  s.write("evil.txt"); s.git("add", "evil.txt"); s.git("commit", "-qm", "base");
+  const b = s.before();
+  s.git("mv", "evil.txt", "allowed.txt");
+  const c = s.commit("sneaky rename");
+  const res = checkRun({ dir: s.repo, files: ["allowed.txt"], commit: c, before: b, env: s.env });
+  assert.equal(res.ok, false);
+  assert.deepEqual(res.badPaths, ["evil.txt"], "the deleted source is flagged even though the destination is allowed");
+  s.done();
+}
+{
+  // Same rule uncommitted: a staged rename reports both names in dirtyPaths.
+  const s = setup();
+  s.write("evil.txt"); s.git("add", "evil.txt"); s.git("commit", "-qm", "base");
+  const b = s.before();
+  s.git("mv", "evil.txt", "allowed.txt");
+  const res = checkRun({ dir: s.repo, files: ["allowed.txt"], commit: "", before: b, env: s.env });
+  assert.equal(res.ok, false);
+  assert.deepEqual(res.badPaths, ["evil.txt"]);
+  s.done();
+}
 
-// BUG 3 — dirtyPaths mangles real filenames containing " -> ". The porcelain
-// line is split on " -> " BEFORE the surrounding quotes are stripped, so a
-// file literally named `x -> y.txt` (which git quotes as "x -> y.txt") comes
-// back as `y.txt"`. The mangled path matches nothing real: it is either a
-// false violation or, worse, could coincidentally match an allowed name.
-//
-//   // const s = setup();
-//   // const b = s.before();
-//   // s.write("x -> y.txt");
-//   // EXPECTED: dirtyPaths(s.repo) contains a path equal to "x -> y.txt"
-//   // ACTUAL:   it returns ['y.txt"'] — verified against this git version
+// ---- dirtyPaths returns real filenames verbatim: porcelain -z is unquoted
+// and un-split, so a file literally named "x -> y.txt" is not mangled.
+{
+  const s = setup();
+  const b = s.before();
+  s.write("x -> y.txt");
+  assert.ok(dirtyPaths(s.repo).includes("x -> y.txt"), JSON.stringify(dirtyPaths(s.repo)));
+  const res = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env });
+  assert.deepEqual(res.badPaths, ["x -> y.txt"], "the real name reaches the violation list");
+  s.done();
+}
 
-// BUG 4 (softer) — an untracked directory collapses to "dir/" in porcelain, and
-// inside() treats that as covering everything under it when an allowed file
-// lives there: with allowed ["src/foo.mjs"] not yet created, an agent that only
-// writes src/evil.txt untracked passes clean, because status says "?? src/".
-// Committing the same file IS caught (commitFiles lists real paths), so the
-// hole is only for uncommitted leftovers.
-//
-//   // const s = setup();
-//   // const b = s.before();
-//   // s.write("src/evil.txt");   // src/foo.mjs does not exist yet
-//   // const res = checkRun({ dir: s.repo, files: ["src/foo.mjs"], commit: "", before: b, env: s.env });
-//   // EXPECTED: src/evil.txt flagged
-//   // ACTUAL:   res.ok === true — "?? src/" is inside "src/foo.mjs"'s folder
+// ---- an untracked directory no longer hides new files next to a
+// not-yet-existing allowed file: --untracked-files=all lists src/evil.txt
+// itself instead of collapsing to "?? src/".
+{
+  const s = setup();
+  const b = s.before();
+  s.write("src/evil.txt"); // src/foo.mjs does not exist yet
+  const res = checkRun({ dir: s.repo, files: ["src/foo.mjs"], commit: "", before: b, env: s.env });
+  assert.equal(res.ok, false);
+  assert.deepEqual(res.badPaths, ["src/evil.txt"]);
+  s.done();
+}
 
-// BUG 5 (softer) — newCommits never checks that baseHead is an ancestor of HEAD.
-// If the pre-run HEAD is rewritten mid-run (owner rebase/reset), rev-list
-// base..HEAD returns ALL of HEAD's history and every old commit is diff-checked
-// as the run's — while commitFromRun would refuse each of them (its
-// merge-base --is-ancestor baseHead commit check fails). The two guards
-// disagree in exactly the case the snapshot exists for.
-//
-//   // const s = setup();
-//   // const b = s.before();
-//   // s.git("checkout", "-qb", "rewritten"); s.git("reset", "-q", "--hard", "HEAD~0"); // any unrelated base works
-//   // newCommits(s.repo, <a commit not on HEAD's history>) lists HEAD's whole history.
+// ---- newCommits treats a baseHead that is not an ancestor of HEAD as "cannot
+// verify": after the history is rewritten, base..HEAD would span ALL of HEAD's
+// history, so the answer is [] — nothing is diff-checked or reverted as the
+// run's own.
+{
+  const s = setup();
+  const b = s.before();
+  s.git("checkout", "-q", "--orphan", "rewritten");
+  s.git("commit", "-qm", "fresh root, unrelated to the snapshot");
+  assert.deepEqual(newCommits(s.repo, b.head), [], "a non-ancestor base lists nothing");
+  const res = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env });
+  assert.deepEqual(res.ownCommits, [], "the rewritten history is never the run's");
+  s.done();
+}
 
 console.log("constance-guard.deep: tests passed");
