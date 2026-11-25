@@ -1,6 +1,6 @@
 // Freebuff (Codebuff-based) usage, read from its own local run state —
 // read-only, no network, no credentials. Freebuff keeps one directory per
-// chat under ~/.config/manicode/chats/<timestamp>/ and may also keep the
+// chat under ~/.config/manicode/projects/chats/<timestamp>/ (seen on the host; also ~/.config/manicode/chats/) and may also keep the
 // same chats under ~/.config/manicode/projects/<project>/chats/<timestamp>/
 // (deduped by the timestamp folder name). run-state.json holds the counters
 // it actually reports, nested at sessionState.mainAgentState
@@ -119,6 +119,7 @@ function chatDirs(manicode) {
       chats.push({ run, meta: readJson(metaFile), runFile, metaFile });
     }
   };
+  addFrom(path.join(manicode, "projects", "chats"));
   addFrom(path.join(manicode, "chats"));
   const projects = path.join(manicode, "projects");
   let projectNames;
