@@ -2720,7 +2720,7 @@ Panel {
                   height: width
                   radius: width / 2
                   anchors.verticalCenter: milkRail.verticalCenter
-                  x: milkRail.x + milkRail.width * root.constanceMilk / 100 - width / 2
+                  x: milkRail.x + milkRail.width * (milkArea.pending >= 0 ? milkArea.pending : root.constanceMilk) / 100 - width / 2
                   color: root.foreground
                   border.width: 1
                   border.color: root.soft(root.foreground, 0.4)
@@ -2731,13 +2731,19 @@ Panel {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   preventStealing: true
+                  // Dragging only moves the knob; the setting is saved once, on release.
+                  property int pending: -1
                   function setFromX(x) {
                     var f = Math.max(0, Math.min(1, (x - milkRail.x) / milkRail.width))
-                    var v = Math.round(f * 20) * 5
-                    if (v !== root.constanceMilk) root.writeSetting(["constanceMilk", String(v)])
+                    pending = Math.round(f * 20) * 5
                   }
                   onPressed: function(m) { setFromX(m.x) }
                   onPositionChanged: function(m) { if (pressed) setFromX(m.x) }
+                  onReleased: {
+                    if (pending >= 0 && pending !== root.constanceMilk) root.writeSetting(["constanceMilk", String(pending)])
+                    pending = -1
+                  }
+                  onCanceled: pending = -1
                 }
                 PanelToolTip { visible: milkArea.containsMouse; text: "Milk Opus " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
               }
