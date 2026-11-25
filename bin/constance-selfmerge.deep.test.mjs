@@ -410,5 +410,294 @@ console.log("done");
   assert.equal(pendingReviews(file).length, kids * per, "no addPending may be lost");
 }
 
+// --- More edge cases and error paths --------------------------------------
+
+// runSuite, `bin` exists but is a regular file: readdirSync throws before any
+// temp HOME is made, so nothing is leaked.
+{
+  const dir = path.join(root, "suite-binstr");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "bin"), "not a dir\n");
+  assert.throws(() => runSuite(dir));
+}
+
+// runSuite, a directory named *.test.mjs: node cannot run it, so it counts as
+// a failed file exactly like a non-zero exit.
+{
+  const dir = path.join(root, "suite-dirt");
+  fs.mkdirSync(path.join(dir, "bin", "dir.test.mjs"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "bin", "ok.test.mjs"), `console.log("ok-marker");\n`);
+  const s = runSuite(dir);
+  assert.equal(s.ok, false);
+  assert.deepEqual(s.failed, ["dir.test.mjs"]);
+  assert.ok(s.output.includes("ok-marker"), "the good file still ran");
+}
+
+// selfMerge, the merge lock itself can fail: a lock that throws propagates
+// (the suite already ran outside the lock, but nothing was merged), and a
+// lock that declines to run fn returns its own value verbatim.
+{
+  const repo = makeRepo("lockthrow");
+  const c = makeCopy(repo, 40, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
+  let suiteCalls = 0;
+  assert.throws(() => selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL,
+    suite: () => { suiteCalls++; return okSuite(); },
+    lock: () => { throw new Error("another merge is still running"); } }),
+    /another merge is still running/);
+  assert.equal(suiteCalls, 1, "the suite ran before the lock was taken");
+  assert.equal(fs.existsSync(path.join(repo, "b.txt")), false, "nothing merged");
+  assert.equal(cleanStatus(repo), true);
+
+  const repo2 = makeRepo("lockveto");
+  const c2 = makeCopy(repo2, 41, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
+  suiteCalls = 0;
+  const r = selfMerge({ repo: repo2, worktree: c2.worktree, branch: c2.branch, checks: ALL,
+    suite: () => { suiteCalls++; return okSuite(); },
+    lock: () => ({ merged: false, reason: "busy" }) });
+  assert.deepEqual(r, { merged: false, reason: "busy" }, "a vetoing lock's return value passes through");
+  assert.equal(suiteCalls, 1);
+  assert.equal(fs.existsSync(path.join(repo2, "b.txt")), false);
+}
+
+// selfMerge, the merge itself throws (e.g. a git-level crash inside the
+// injected merge): the error propagates out of the lock and the repo is left
+// clean — the rebase on an unmoved main was a no-op.
+{
+  const repo = makeRepo("merge-throws");
+  const c = makeCopy(repo, 42, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
+  assert.throws(() => selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL, suite: okSuite,
+    merge: () => { throw new Error("git exploded"); } }), /git exploded/);
+  assert.equal(cleanStatus(repo), true);
+  assert.equal(noMergeHead(repo), true);
+  assert.equal(noRebaseLeft(c.worktree), true);
+}
+
+// selfMerge, a successful merge that reports no commit passes the missing
+// field through (mergeBranch only omits it when rev-parse HEAD fails).
+{
+  const repo = makeRepo("nocommit");
+  const c = makeCopy(repo, 43, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
+  const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL, suite: okSuite,
+    merge: () => ({ ok: true }) });
+  assert.equal(r.merged, true);
+  assert.equal(r.commit, undefined);
+  assert.equal(r.retried, false);
+}
+
+// selfMerge, the worktree path exists but is not a git worktree at all: the
+// rebase fails inside the lock and the result is flagged as a conflict even
+// though nothing conflicted — same mislabel as the missing-worktree case.
+{
+  const repo = makeRepo("nongitwt");
+  const fake = path.join(root, "nongitwt", "plain-dir");
+  fs.mkdirSync(fake, { recursive: true });
+  fs.writeFileSync(path.join(fake, "keep.txt"), "keep\n");
+  const r = selfMerge({ repo, worktree: fake, branch: "constance/job-44", checks: ALL, suite: okSuite });
+  assert.equal(r.merged, false); assert.equal(r.flagged, true);
+  assert.equal(r.reason, "conflict, rebase failed");
+  assert.equal(fs.readFileSync(path.join(fake, "keep.txt"), "utf8"), "keep\n", "the plain dir is untouched");
+  assert.equal(cleanStatus(repo), true);
+}
+
+// BUG (real, left unfixed per the task): a copy with no commits of its own —
+// branch still at the base, or every commit already contained in main — makes
+// `git merge --no-ff` a no-op ("Already up to date", exit 0), so selfMerge
+// reports { merged: true, commit: <pre-existing main HEAD> }. That commit is
+// NOT a merge commit and contains none of the copy's work; if it is recorded
+// via addPending and later reverted, revertMerge undoes main's real prior
+// commit. The honest result for a no-op merge would be merged:false (nothing
+// to review) or at least a commit that is really a merge of the branch.
+// {
+//   const repo = makeRepo("emptycopy");
+//   const c = makeCopy(repo, 45);   // worktree on constance/job-45, no commits
+//   const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL, suite: okSuite });
+//   assert.equal(r.merged, false, "a no-op merge must not report merged");
+//   // or, if merged:true is kept for the bookkeeping, r.commit must be a real
+//   // merge commit whose second parent is the copy's branch tip.
+// }
+
+// The reviews file tolerates every JSON shape that is not the expected
+// object: scalars, arrays and wrong-typed fields all read as empty lists.
+{
+  for (const content of ["null", "42", "\"str\"", "true", "[]", "{}",
+    "{\"pending\":\"x\",\"reviewed\":{}}", "{\"pending\":{},\"reviewed\":[]}"]) {
+    const f = path.join(root, "shape-" + Math.random().toString(36).slice(2) + ".json");
+    fs.writeFileSync(f, content);
+    assert.deepEqual(pendingReviews(f), [], `shape ${content} must read as empty`);
+  }
+  // Non-object pending entries are passed through verbatim — callers must
+  // tolerate them; only Array.isArray is checked.
+  const f = path.join(root, "shape-passthrough.json");
+  fs.writeFileSync(f, JSON.stringify({ pending: [1, "a", null], reviewed: [5] }));
+  assert.deepEqual(pendingReviews(f), [1, "a", null]);
+}
+
+// The reviews path may be a directory: reads return empty, writes throw.
+{
+  const dir = path.join(root, "reviews-as-dir");
+  fs.mkdirSync(dir, { recursive: true });
+  assert.deepEqual(pendingReviews(dir), []);
+  assert.throws(() => addPending(dir, { job: 1, commit: "c", branch: "b" }));
+}
+
+// BUG (minor, left unfixed): when writeReviews fails — here because the
+// target path is a directory — the temp file `<file>.<pid>.tmp` it already
+// wrote is left behind. The rename is the only step that can fail after the
+// write, and there is no cleanup for it.
+// {
+//   const dir = path.join(root, "litter-target");
+//   fs.mkdirSync(dir, { recursive: true });
+//   try { addPending(dir, { job: 1 }); } catch {}
+//   const left = fs.readdirSync(path.dirname(dir)).filter((f) => f.includes(".tmp"));
+//   assert.deepEqual(left, [], "a failed reviews write must not leave .tmp litter");
+// }
+
+// addPending creates missing parent directories itself, and afterwards the
+// folder holds exactly the reviews file — the .lock dir and the .tmp file are
+// both gone.
+{
+  const deep = path.join(root, "made", "up", "dirs", "reviews.json");
+  addPending(deep, { job: 3, commit: "c", branch: "b" });
+  assert.equal(pendingReviews(deep).length, 1);
+  assert.deepEqual(fs.readdirSync(path.dirname(deep)), ["reviews.json"], "no .lock or .tmp leftovers");
+}
+
+// Two pending entries can share a job id: markReviewed removes them one at a
+// time, first-added first-reviewed. The stored reviewed entries carry
+// reviewedAt; the value markReviewed returns does not.
+{
+  const f = path.join(root, "dupjob.json");
+  addPending(f, { job: 8, commit: "first", branch: "b1" });
+  addPending(f, { job: 8, commit: "second", branch: "b2" });
+  assert.equal(pendingReviews(f).length, 2);
+  const r1 = markReviewed(f, 8, "ok");
+  assert.equal(r1.commit, "first");
+  assert.equal("reviewedAt" in r1, false, "the return value has no reviewedAt");
+  assert.equal(pendingReviews(f).length, 1, "the duplicate is still pending");
+  const r2 = markReviewed(f, 8, "reverted");
+  assert.equal(r2.commit, "second");
+  assert.equal(pendingReviews(f).length, 0);
+  const raw = JSON.parse(fs.readFileSync(f, "utf8"));
+  assert.equal(raw.reviewed.length, 2);
+  for (const e of raw.reviewed) {
+    assert.equal(typeof e.reviewedAt, "number");
+    assert.ok(e.reviewedAt > 0);
+  }
+}
+
+// markReviewed without a verdict stores an entry with no verdict key at all
+// (JSON.stringify drops undefined), while reviewedAt is still recorded.
+{
+  const f = path.join(root, "noverdict.json");
+  addPending(f, { job: 4, commit: "c", branch: "b" });
+  markReviewed(f, 4);
+  const raw = JSON.parse(fs.readFileSync(f, "utf8"));
+  assert.equal(raw.reviewed.length, 1);
+  assert.equal("verdict" in raw.reviewed[0], false);
+  assert.equal(typeof raw.reviewed[0].reviewedAt, "number");
+}
+
+// The reviews lock: a lock dir whose owner pid is dead is stale and taken
+// over immediately; a lock dir with no owner file but an old mtime is stale
+// too. Reads never take the lock — pendingReviews answers even while a live
+// lock is held.
+{
+  const dead = spawnSync(process.execPath, ["-e", "0"]).pid;
+  const f1 = path.join(root, "stale-dead.json");
+  fs.mkdirSync(f1 + ".lock");
+  fs.writeFileSync(path.join(f1 + ".lock", "owner"), String(dead));
+  const t0 = Date.now();
+  addPending(f1, { job: 1, commit: "c", branch: "b" });
+  assert.ok(Date.now() - t0 < 5000, "a dead owner's lock is taken over without waiting");
+  assert.equal(fs.existsSync(f1 + ".lock"), false, "the stale lock dir is gone afterwards");
+  assert.equal(pendingReviews(f1).length, 1);
+
+  const f2 = path.join(root, "stale-old.json");
+  fs.mkdirSync(f2 + ".lock");
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(f2 + ".lock", old, old);
+  addPending(f2, { job: 2, commit: "c", branch: "b" });
+  assert.equal(pendingReviews(f2).length, 1);
+
+  const f3 = path.join(root, "live-lock.json");
+  fs.writeFileSync(f3, JSON.stringify({ pending: [{ job: 5, commit: "c", branch: "b", at: 1 }], reviewed: [] }));
+  fs.mkdirSync(f3 + ".lock");
+  fs.writeFileSync(path.join(f3 + ".lock", "owner"), String(process.pid));
+  assert.deepEqual(pendingReviews(f3).map((p) => p.job), [5], "reads do not wait on the lock");
+  fs.rmSync(f3 + ".lock", { recursive: true, force: true });
+}
+
+// Mixed race: children that each addPending AND markReviewed their own disjoint
+// job ranges. Under the reviews lock the final state is exact — nothing
+// pending, every job reviewed once with its verdict.
+const MOP_CHILD = path.join(root, "mop-child.mjs");
+fs.writeFileSync(MOP_CHILD, `import { pathToFileURL } from "node:url";
+const [mod, file, base, n] = process.argv.slice(2);
+const { addPending, markReviewed } = await import(pathToFileURL(mod).href);
+for (let i = 0; i < Number(n); i++) {
+  const job = Number(base) + i;
+  addPending(file, { job, commit: "c" + job, branch: "b" + job });
+  markReviewed(file, job, "ok");
+}
+console.log("done");
+`);
+{
+  const file = path.join(root, "race-mixed.json");
+  const kids = 6, per = 10;
+  const res = await Promise.all(Array.from({ length: kids }, (_, k) =>
+    spawnNode(MOP_CHILD, [SELF, file, k * per, per])));
+  for (const r of res) assert.equal(r.code, 0, r.err);
+  const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(raw.pending.length, 0, "every added job was reviewed");
+  assert.equal(raw.reviewed.length, kids * per, "no reviewed entry was lost");
+  const jobs = new Set(raw.reviewed.map((e) => e.job));
+  assert.equal(jobs.size, kids * per, "each job reviewed exactly once");
+  for (const e of raw.reviewed) assert.equal(e.verdict, "ok");
+}
+
+// BUG (real, left unfixed per the task): the strict version of the unlocked
+// race above. mergeBranch's cleanBefore reset covers a merge that fails AFTER
+// staging but BEFORE MERGE_HEAD exists, but not this interleaving: while the
+// winner's `git merge` is still in progress (MERGE_HEAD present), the loser's
+// `git merge` fails immediately ("You have not concluded your merge"), sees
+// MERGE_HEAD and runs `git merge --abort` — aborting the WINNER's merge. The
+// repo is then left mid-merge: observed MERGE_HEAD still present with
+// `D ha.txt`, `A hb.txt`, `?? ha.txt` in git status --porcelain. Production
+// always merges under withMergeLock so this needs a lock bypass to trigger,
+// but the failure path treats another process's in-progress merge as its own.
+// This commented-out test asserts the invariant that SHOULD hold; it fails
+// whenever the two merges actually overlap.
+// {
+//   const repo = makeRepo("race-free-strict");
+//   const a = makeCopy(repo, 50, (wt) => commitFile(wt, "ha.txt", "a\n", "copy a"));
+//   const b = makeCopy(repo, 51, (wt) => commitFile(wt, "hb.txt", "b\n", "copy b"));
+//   await Promise.all([
+//     spawnNode(SM_CHILD, [SELF, repo, a.worktree, a.branch, ""]),
+//     spawnNode(SM_CHILD, [SELF, repo, b.worktree, b.branch, ""]),
+//   ]);
+//   assert.equal(noMergeHead(repo), true, "no merge state survives");
+//   assert.equal(cleanStatus(repo), true, "a failed merge must not leave staged or untracked changes behind");
+//   for (const wt of [a.worktree, b.worktree]) assert.equal(noRebaseLeft(wt), true);
+// }
+
+// revertMerge on a repo whose uncommitted changes overlap the revert refuses
+// and does not touch them: no REVERT_HEAD, dirty bytes intact. (Unrelated
+// dirty files do NOT block a revert — git only refuses when the merge would
+// overwrite local changes — so the dirty file here is b.txt, the very file
+// the reverted commit added.)
+{
+  const repo = makeRepo("revdirty");
+  commitOn(repo, "b.txt", "b\n", "work to revert");
+  const target = git(repo, "rev-parse", "HEAD").trim();
+  fs.writeFileSync(path.join(repo, "b.txt"), "dirty-b\n");
+  fs.writeFileSync(path.join(repo, "mine.txt"), "uncommitted\n");
+  const rv = revertMerge(repo, target);
+  assert.equal(rv.ok, false, "git revert refuses when local changes would be overwritten");
+  assert.equal(fs.readFileSync(path.join(repo, "b.txt"), "utf8"), "dirty-b\n", "the dirty file survived");
+  assert.equal(fs.readFileSync(path.join(repo, "mine.txt"), "utf8"), "uncommitted\n");
+  assert.equal(sh(repo, "rev-parse", "-q", "--verify", "REVERT_HEAD").status !== 0, true, "no revert state left");
+  assert.ok(git(repo, "status", "--porcelain").includes("b.txt"), "b.txt is still modified, not deleted");
+}
+
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance-selfmerge.deep: tests passed");
