@@ -18,12 +18,12 @@ picks. Three options:
 
 | Option | What it needs | Listens on a port? | What leaves the machine |
 | --- | --- | --- | --- |
-| Syncthing-shared folder | Syncthing on the PC and phone, paired once | No inbound port (it dials out) | The summary file goes phone↔PC directly, encrypted |
-| Tailscale + SSH forced command | Tailscale on both, one SSH key on the phone locked to a read-only command that prints the file | SSH only on the tailnet, not the LAN | Nothing leaves the tailnet; phone pulls the file on demand |
+| Syncthing-shared folder | Syncthing on the PC and phone, paired once | Yes: 22000 TCP/UDP (sync) and 21027 UDP (LAN discovery) | The summary file goes phone↔PC, encrypted (relays only if a direct link fails) |
+| Tailscale + SSH forced command | Tailscale on both, one SSH key on the phone locked to a read-only command that prints the file | Yes: Tailscale's WireGuard UDP port, and SSH reachable only over the tailnet | Nothing leaves the tailnet; phone pulls the file on demand |
 | Outbound push (e.g. ntfy) | An ntfy topic (self-hosted or public) | No | The summary is POSTed to the ntfy server; phone subscribes |
 
-All three avoid opening anything to the internet. Syncthing and Tailscale
-keep the file between your own devices; ntfy is the simplest but hands the
+Only ntfy needs no listening port. Syncthing and Tailscale open ports (so they need your OK)
+but keep the file between your own devices; ntfy is the simplest but hands the
 summary to a third-party server (a self-hosted ntfy avoids that).
 
 **Status: none enabled. Pick one and say OK before any port opens or any
