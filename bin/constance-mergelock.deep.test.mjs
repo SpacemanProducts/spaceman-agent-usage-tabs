@@ -234,25 +234,32 @@ const runChild = (body, args = ["--input-type=module", "-e", body]) =>
 
 // ============================================================ races: real child processes
 {
-  // Several children race to take over the SAME dead-holder lock. Both the
-  // stale check and the rm+mkdir takeover must be race-safe: every child
-  // gets in, one at a time, and the counter loses nothing.
-  const lock = fakeLock("race-dead", { owner: deadPid() });
-  const counter = path.join(root, "counter-dead");
-  fs.writeFileSync(counter, "0");
-  const N = 4;
-  const code = `import fs from "node:fs"; import { withLock } from ${JSON.stringify(MOD)};
+  // Several children race to take over the SAME dead-holder lock, ten rounds
+  // in one run. The takeover must be race-safe every time: every child gets
+  // in, one at a time — an `inside` marker proves no two critical sections
+  // ever overlap — and the counter loses nothing.
+  const N = 8, ROUNDS = 10;
+  for (let round = 0; round < ROUNDS; round++) {
+    const lock = fakeLock(`race-dead-${round}`, { owner: deadPid() });
+    const counter = path.join(root, `counter-dead-${round}`);
+    const inside = path.join(root, `inside-dead-${round}`);
+    const violations = path.join(root, `violations-dead-${round}`);
+    fs.writeFileSync(counter, "0");
+    const code = `import fs from "node:fs"; import { withLock } from ${JSON.stringify(MOD)};
 withLock(${JSON.stringify(lock)}, () => {
+  if (fs.existsSync(${JSON.stringify(inside)})) fs.appendFileSync(${JSON.stringify(violations)}, "overlap\\n");
+  fs.writeFileSync(${JSON.stringify(inside)}, "1");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+  fs.rmSync(${JSON.stringify(inside)});
   const n = Number(fs.readFileSync(${JSON.stringify(counter)}, "utf8"));
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
   fs.writeFileSync(${JSON.stringify(counter)}, String(n + 1));
-}, { waitMs: 30000, pollMs: 10 });`;
-  const kids = Array.from({ length: N }, () => runChild(code));
-  assert.deepEqual(await Promise.all(kids), Array(N).fill(0));
-  // The rename-based takeover is atomic: every child ran one at a time and
-  // the counter lost nothing.
-  assert.equal(fs.readFileSync(counter, "utf8"), String(N), "no holder's update was lost");
-  assert.equal(fs.existsSync(lock), false);
+}, { waitMs: 30000, pollMs: 5 });`;
+    const kids = Array.from({ length: N }, () => runChild(code));
+    assert.deepEqual(await Promise.all(kids), Array(N).fill(0), `round ${round}: every child exited 0`);
+    assert.equal(fs.readFileSync(counter, "utf8"), String(N), `round ${round}: no holder's update was lost`);
+    assert.equal(fs.existsSync(violations), false, `round ${round}: two children were inside the lock at once`);
+    assert.equal(fs.existsSync(lock), false);
+  }
 }
 {
   // Same race, but the stale lock has NO owner file (an old version's lock,
