@@ -82,6 +82,9 @@ assert.deepEqual(J(palette("#000000")), { light: false, low: "#4caf50", mid: "#f
 {
   assert.equal(levelOf(0.51), "low"); assert.equal(levelOf(0.599), "low"); assert.equal(levelOf(0.6), "mid");
   assert.equal(levelOf(0.85), "mid"); assert.equal(levelOf(0.851), "high"); assert.equal(levelOf(1), "high");
+  assert.equal(levelOf(-0.5), "low"); assert.equal(levelOf(1.5), "high", "out-of-range clamps to the outer bands");
+  // The labels are the contract other code keys off: exactly these three strings.
+  assert.deepEqual(J([...new Set([levelOf(0), levelOf(0.7), levelOf(1)])]), ["low", "mid", "high"]);
 }
 
 // ---- the smooth gradient: green (120) at 0% to red (0) at 100%
@@ -94,8 +97,10 @@ const hueOf = (hex) => {
 };
 {
   const dark = palette("#101315");
-  // The named stops, as shown on a dark theme.
-  const want = { 0: [120, "#7af07a"], 15: [102, null], 30: [84, null], 45: [66, null], 60: [48, null], 75: [30, null], 90: [12, null], 100: [0, "#f07a7a"] };
+  // The named stops, as shown on a dark theme: exact color at each of 0, 15,
+  // 30, 45, 60, 75, 90 and 100%.
+  const want = { 0: [120, "#7af07a"], 15: [102, "#9df07a"], 30: [84, "#c1f07a"], 45: [66, "#e4f07a"],
+    60: [48, "#f0d97a"], 75: [30, "#f0b57a"], 90: [12, "#f0927a"], 100: [0, "#f07a7a"] };
   for (const [pct, [hue, hex]] of Object.entries(want)) {
     const c = forLevel(pct / 100, dark);
     assert.ok(Math.abs(usageHue(pct / 100) - hue) < 1e-9, `${pct}% asks for hue ${hue}`);
@@ -128,6 +133,27 @@ for (const [name, bg] of realBgs) {
   for (let i = 0; i <= 100; i++) {
     const c = gradient(i / 100, pal);
     assert.ok(contrast(c, bg) >= 4.5, `${name} (${bg}): ${i}% ${c} only ${contrast(c, bg).toFixed(2)}:1`);
+  }
+}
+// ---- and on the exact surface the code ensures against: pal.bg is the
+// composited popup/bar background, which is what Panel.qml's percent text and
+// bars actually sit on. The percent text wears the gradient color itself, so
+// it must read there through the yellow range (roughly 40-65%).
+for (const [name, bg] of realBgs) {
+  const pal = palette(bg);
+  for (let i = 0; i <= 100; i++) {
+    const c = gradient(i / 100, pal);
+    assert.ok(contrast(c, pal.bg) >= 4.5, `${name}: ${i}% ${c} on its surface ${pal.bg} only ${contrast(c, pal.bg).toFixed(2)}:1`);
+  }
+}
+{
+  // A translucent popup surface composites over the shell background; the
+  // gradient must still read on the result. ensure() works on unrounded
+  // floats and toHex() then rounds to 8-bit, so allow a hair under 4.5.
+  const pal = palette({ r: 1, g: 1, b: 1, a: 0.5 }, "#101315");
+  for (let i = 0; i <= 100; i++) {
+    const c = gradient(i / 100, pal);
+    assert.ok(contrast(c, pal.bg) >= 4.4, `composited popup ${pal.bg}: ${i}% ${c} only ${contrast(c, pal.bg).toFixed(2)}:1`);
   }
 }
 // ---- on the dark themes the fixed saturation/lightness is used untouched
