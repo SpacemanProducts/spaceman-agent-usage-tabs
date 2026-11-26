@@ -85,6 +85,7 @@ import { memoryOf, addDecision, addProblem, solveProblem, addNext, beginStep, en
 import { nextStep, stepPrompt, resumedFrom, progressMark, MAX_NUDGES } from "./constance-steps.mjs";
 import { routeModel, logRoute } from "./constance-route.mjs";
 import { pickBrain, topModel, brainLimits, brainCommand, brainWall, milkLabel } from "./constance-brain.mjs";
+import { weekStatus, readWeekState, writeWeekState } from "./constance-weekwire.mjs";
 import { buildSummary } from "./constance-summary.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -2018,7 +2019,11 @@ async function drive() {
     const ho = renderHandoffNow() || { text: "", file: "" };
     const firstPlan = kind === "plan" && !memoryOf(st.goal).steps.length;
     // Fresh lessons and this project's own rules ride along on every step (advice only — her core rules never change).
-    const prompt = stepPrompt({ kind, dir: g.dir, handoff: ho.text, handoffPath: ho.file, lessons: lessonsBlock(readLessons(store.dir)), milk: milkPrompt(readMilk(readSettings())), rules: rulesBlock(readProjectRules(g.dir)), batch, resumed, nudge: nudgeText, ownerGoal: firstPlan ? g.text : "" });
+    // The week's drifted intensity is the level she runs on; the owner's Milk
+    // Opus slider stays the setting it drifts from (board.week is null without a weekly reading).
+    const week = weekBoard(st, dNow);
+    const milkLevel = week?.effective ?? readMilk(readSettings());
+    const prompt = stepPrompt({ kind, dir: g.dir, handoff: ho.text, handoffPath: ho.file, lessons: lessonsBlock(readLessons(store.dir)), milk: milkPrompt(milkLevel), rules: rulesBlock(readProjectRules(g.dir)), batch, resumed, nudge: nudgeText, ownerGoal: firstPlan ? g.text : "" });
     const session = randomUUID();
     const mark = stepView(st).mark;
     store.update((x) => { if (x.goal) { const m = memoryOf(x.goal); beginStep(m, { kind, session, model, jobs: step.jobs || [], promptChars: prompt.length, resumed, mark }); x.goal.handoff = m; } });
@@ -2031,7 +2036,7 @@ async function drive() {
     // Every step leaves a route line: the step, the model she actually runs on,
     // and why (constance-route.mjs routes planning; a review batch runs on her brain model).
     try {
-      store.log({ kind: "route", step: kind, model, text: kind === "plan" ? routeModel("plan", { milk: readMilk(readSettings()) }).why : "a review batch runs on her own brain model" });
+      store.log({ kind: "route", step: kind, model, text: kind === "plan" ? routeModel("plan", { milk: milkLevel }).why : "a review batch runs on her own brain model" });
       logRoute(path.join(store.dir, "routes.jsonl"), { step: kind, model, job: g.id });
     } catch {}
     let pausedByUs = false;
@@ -2211,6 +2216,23 @@ function leadTokensOf(goal, records) {
   return seen ? total : null;
 }
 
+// The week's pace wire (constance-weekwire.mjs): where the week stands and the
+// drifted intensity her prompt runs on. The drift state persists in her state
+// dir, rewritten only when it actually moved (a fresh `at` stamp alone doesn't
+// count); the board gets the result minus that state, null with no weekly reading.
+function weekBoard(s, d) {
+  const cl = checklist(s.goal, asAccepted(s.jobs));
+  const prev = readWeekState(store.dir);
+  const w = weekStatus({ limits: brainOf(d).limits, settings: readSettings(), state: prev, now: Date.now(),
+    openItems: cl.items.filter((i) => i.state !== "done").length,
+    running: s.jobs.filter((j) => ["running", "waiting"].includes(j.status)).length,
+    stopped: !!s.goal && ["paused", "stopped"].includes(s.goal.status) });
+  if (!w) return null;
+  const { state, ...week } = w;
+  if (JSON.stringify({ ...prev, at: 0 }) !== JSON.stringify({ ...state, at: 0 })) writeWeekState(store.dir, state);
+  return week;
+}
+
 function boardView(s, d, records) {
   const names = Object.fromEntries((d.agents || []).filter((a) => a.name).map((a) => [a.id, a.name]));
   const name = (id) => names[id] || (id ? id[0].toUpperCase() + id.slice(1) : id);
@@ -2234,6 +2256,7 @@ function boardView(s, d, records) {
       prepHistory: prepHistory(s, log), now: Date.now(), running, lanes, slots: freeSlots + running,
       perPct: leverageView(s, workerTokens).perPct, workerTokens, leadTokens }),
     checklist: cl,
+    week: weekBoard(s, d),
     cards: cards({ jobs: s.jobs, goal: s.goal, queue: s.goal && ["running", "paused"].includes(s.goal.status) ? queueView(s.goal.dir, store.dir, s.goal.id) : [], live, names: name }),
     // A merged job still waits for her review, so the Now line counts it with the finished ones.
     now: nowLine({ goal: s.goal, jobs: s.jobs.map((j) => (j.status === "merged" ? { ...j, status: "finished" } : j)), names: name, goalQueue: gq.goals, queuePaused: gq.paused, queueHeld: gq.ownerPaused }),
