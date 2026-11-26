@@ -58,9 +58,11 @@ const readJobs = (w) => JSON.parse(fs.readFileSync(jobsFile(w), "utf8"));
 
 // run() is the whole contract: the process must exit on its own (0 or the
 // deliberate fail() exit 1 — never a signal, a timeout or a spawn error) and
-// must not print a stack trace.
-function run(w, ...a) {
-  const r = spawnSync("node", [CLI, ...a], { env: w.env, encoding: "utf8", timeout: 60000 });
+// must not print a stack trace. timeoutMs exists for commands that can run the
+// collector synchronously (freshData() allows it up to 120 s): callers pass a
+// larger budget there instead of weakening the no-timeout contract.
+function runT(w, timeoutMs, ...a) {
+  const r = spawnSync("node", [CLI, ...a], { env: w.env, encoding: "utf8", timeout: timeoutMs });
   assert.equal(r.error, undefined, `${a.join(" ")}: spawn error ${r.error}`);
   assert.equal(r.signal, null, `${a.join(" ")}: killed by ${r.signal}`);
   assert.ok(r.status === 0 || r.status === 1, `${a.join(" ")}: unexpected exit ${r.status}`);
@@ -68,6 +70,7 @@ function run(w, ...a) {
   assert.doesNotMatch(r.stderr, /node:internal/, `${a.join(" ")}: node internal in stderr:\n${r.stderr}`);
   return r;
 }
+function run(w, ...a) { return runT(w, 60000, ...a); }
 const ok = (w, ...a) => { const r = run(w, ...a); assert.equal(r.status, 0, `${a.join(" ")}: exit 1: ${r.stderr}`); return r; };
 const bad = (w, re, ...a) => { const r = run(w, ...a); assert.equal(r.status, 1, `${a.join(" ")}: expected a plain failure, got ${r.status}: ${r.stdout}`); assert.match(r.stderr, re, `${a.join(" ")}: stderr was ${JSON.stringify(r.stderr)}`); return r; };
 
@@ -84,7 +87,7 @@ const SAFE_COMMANDS = (w) => [
 // The same plus the commands that read data.json through freshData() — safe only
 // when data.json itself is readable and fresh.
 const FULL_COMMANDS = (w) => [...SAFE_COMMANDS(w), ["agents"], ["pace"], ["spare"]];
-function battery(w, commands = SAFE_COMMANDS(w)) { for (const a of commands) run(w, ...a); }
+function battery(w, commands = SAFE_COMMANDS(w), timeoutMs = 60000) { for (const a of commands) runT(w, timeoutMs, ...a); }
 
 // ---------------------------------------------------------------- fresh state
 {
@@ -317,7 +320,10 @@ function battery(w, commands = SAFE_COMMANDS(w)) { for (const a of commands) run
     ["limits not an array", () => JSON.stringify({ generatedAt: Date.now(), agents: [{ id: "grok", installed: true, signedIn: true, limits: "junk" }] })],
   ]) {
     const w = world(); writeTabs(w, "data.json", typeof content === "function" ? content() : content);
-    battery(w, FULL_COMMANDS(w));
+    // Payloads without a fresh generatedAt (null, [], 42) make readData() report
+    // no data, so agents/pace/spare run the collector synchronously first — up
+    // to its own 120 s timeout. Give those commands 180 s; every assertion stays.
+    battery(w, FULL_COMMANDS(w), 180000);
     console.log(`  data.json wrong-shape variant survived: ${name}`);
   }
 }
