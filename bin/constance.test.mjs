@@ -14,10 +14,13 @@ const CLI = new URL("./constance.mjs", import.meta.url).pathname;
 // itself is the job's writable project.
 let root = "";
 for (const base of ["/var/tmp", path.join(os.homedir(), ".cache")]) {
+  if (!path.isAbsolute(base)) continue;
   try { fs.mkdirSync(base, { recursive: true }); root = fs.mkdtempSync(path.join(base, "constance-e2e-")); break; } catch {}
 }
 if (!root) root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-e2e-"));
+if (!path.isAbsolute(root)) throw new Error(`test scratch root is not absolute: ${root}`);
 const state = path.join(root, "state"), bin = path.join(root, "bin"), repo = path.join(root, "repo");
+if (!path.isAbsolute(bin)) throw new Error(`test fake-bin dir is not absolute: ${bin}`);
 const tabs = path.join(state, "omarchy/agent-usage-tabs");
 fs.mkdirSync(tabs, { recursive: true }); fs.mkdirSync(bin); fs.mkdirSync(repo);
 const git = (...a) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8" });
