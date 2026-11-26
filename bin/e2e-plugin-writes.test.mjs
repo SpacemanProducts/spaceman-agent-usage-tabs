@@ -27,13 +27,11 @@ const PROJECT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const underTmp = (p) => { const r = path.resolve(p); return r === "/tmp" || r.startsWith("/tmp/"); };
 let root = "";
 for (const base of ["/var/tmp", path.join(os.homedir(), ".cache"), path.join(os.homedir(), ".local", "share"), os.tmpdir()]) {
-  if (underTmp(base)) continue;
+  if (!path.isAbsolute(base) || underTmp(base)) continue;
   try { fs.mkdirSync(base, { recursive: true }); root = fs.mkdtempSync(path.join(base, "e2e-plugin-writes-")); break; } catch {}
 }
-if (!root) {
-  console.log("skip: no writable scratch folder outside /tmp");
-  process.exit(0);
-}
+if (!root) root = fs.mkdtempSync(path.join(os.tmpdir(), "e2e-plugin-writes-"));
+if (!path.isAbsolute(root)) throw new Error(`scratch root is not absolute: ${root}`);
 if (underTmp(root)) { console.log("skip: scratch folder is under /tmp, invisible to sandboxed jobs"); process.exit(0); }
 
 const bin = path.join(root, "bin");
@@ -122,6 +120,7 @@ fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePra
 fs.writeFileSync(path.join(proc, "loadavg"), "0.10 0.50 0.50 1/500 999\n");
 fs.writeFileSync(path.join(proc, "meminfo"), "MemTotal:       33554432 kB\nMemFree:        20971520 kB\nMemAvailable:   20971520 kB\n");
 
+assert.ok(path.isAbsolute(bin), `fake bin dir is not absolute: ${bin}`);
 const env = { ...process.env, HOME: fakeHome, XDG_STATE_HOME: state, XDG_CONFIG_HOME: path.join(fakeHome, ".config"), XDG_CACHE_HOME: path.join(fakeHome, ".cache"), XDG_DATA_HOME: path.join(fakeHome, ".local", "share"), SQUAD_PROJECTS: path.join(fakeHome, "Projects"), PATH: `${bin}:${process.env.PATH}`, CONSTANCE_WORKTREES: worktrees, CONSTANCE_PROC: proc, CONSTANCE_RAMP_GAP_MS: "0", CONSTANCE_TOKENS_GAP_MS: "500" };
 const run = (...a) => spawnSync("node", [CLI, ...a], { env, encoding: "utf8" });
 const status = () => JSON.parse(run("status").stdout);
