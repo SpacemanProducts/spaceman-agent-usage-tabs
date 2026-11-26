@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { kiloArgs, costCheck } from "./kilo-free.mjs";
 import { stripAds } from "./freebuff-ads.mjs";
+import { scoreRows } from "./constance-scorecard.mjs";
 
 export const RED = 0.85;                               // the panel's red line: a meter above it is near the wall
 export const FRESH_MS = 15 * 60 * 1000;
@@ -27,12 +28,12 @@ export const LAUNCH = {
   antigravity: { cli: "agy", args: (p) => ["--dangerously-skip-permissions", "-p", p], skip: "--dangerously-skip-permissions" },
   grok: { cli: "grok", args: (p) => ["--permission-mode", "bypassPermissions", "-p", p], skip: "--permission-mode bypassPermissions" },
   copilot: { cli: "copilot", args: (p) => ["--allow-all", "--no-ask-user", "-p", p], skip: "--allow-all" },
-  devin: { cli: "devin", args: (p) => ["--permission-mode", "dangerous", "--respect-workspace-trust", "false", "--model", "swe-2-flash-medium", "-p", p], skip: "--permission-mode dangerous --respect-workspace-trust false" },
+  devin: { cli: "devin", freeOnly: true, args: (p) => ["--permission-mode", "dangerous", "--respect-workspace-trust", "false", "--model", "swe-2-flash-medium", "-p", p], skip: "--permission-mode dangerous --respect-workspace-trust false" },
   codex: { cli: "codex", args: (p) => ["exec", "--dangerously-bypass-approvals-and-sandbox", p], skip: "--dangerously-bypass-approvals-and-sandbox" },
   cursor: { cli: "cursor-agent", args: (p) => ["-p", "--yolo", "--trust", p], skip: "--yolo --trust" },
   // kilo run is already inside its worktree (spawn cwd), so no --dir; the model
   // is pinned to the free router and costCheck fails the job if it ever bills.
-  kilo: { cli: "kilo", args: (p) => kiloArgs(p, "kilo/kilo-auto/free"), skip: "--auto" },
+  kilo: { cli: "kilo", freeOnly: true, args: (p) => kiloArgs(p, "kilo/kilo-auto/free"), skip: "--auto" },
 };
 
 export function launchCommand(id, prompt) {
@@ -143,24 +144,43 @@ export function accountEnv(agentId, accountId, env = process.env) {
   return { [spec[0]]: abs };
 }
 
-// Worker pick order: Devin first while it is available, kilo right behind it
-// whatever the scorecard says (free models only — see KILO_NOTE), everyone
-// else in the order given. Rows are judge() results or bare id strings; a row
-// with available:false never jumps the queue. Stable: equal ranks keep order.
-export function preferOrder(rows) {
+// Worker pick order, agent-neutral: the freest, best-proven agents first.
+// Rows are judge() results or bare id strings; `card` is an optional
+// readScorecard() result (without it every record reads as "no reviews").
+// Ranking: scorecard record (accept rate, then lower average tokens — the
+// same keys rankAgents uses, minus its input-order tiebreak), then the
+// lowest fullest-limit percent (`worst`; a missing reading sorts last, it
+// can't prove room), then the free-models-only preference
+// (LAUNCH[id].freeOnly or a row's own freeOnly flag — such an agent can't
+// charge, so it wins ties), then id. A row with available:false gets no
+// free-models boost. Fully deterministic: exact ties keep input order.
+export function preferOrder(rows, card = null) {
   const list = Array.isArray(rows) ? rows.slice() : [];
   const idOf = (r) => (typeof r === "string" ? r : r && r.id) || "";
   const open = (r) => typeof r !== "object" || r === null || r.available !== false;
-  const rank = (r) => {
-    const id = idOf(r);
-    if (open(r) && id === "devin") return 0;
-    if (open(r) && id === "kilo") return 1;
-    return 2;
+  const worstOf = (r) => {
+    const w = r && typeof r === "object" ? r.worst : NaN;
+    return Number.isFinite(w) ? w : Infinity;
   };
-  return list.map((r, i) => ({ r, i })).sort((a, b) => rank(a.r) - rank(b.r) || a.i - b.i).map((x) => x.r);
+  const freeOnly = (r) => open(r) && ((r !== null && typeof r === "object" && r.freeOnly === true) || LAUNCH[idOf(r)]?.freeOnly === true);
+  const record = new Map();
+  if (card) for (const row of scoreRows(card)) record.set(row.agent, { rate: row.acceptRate ?? 0.7, tokens: row.avgTokens ?? Infinity });
+  const recOf = (r) => record.get(idOf(r)) || { rate: 0.7, tokens: Infinity };
+  return list.map((r, i) => ({ r, i })).sort((a, b) => {
+    const ra = recOf(a.r), rb = recOf(b.r);
+    if (ra.rate !== rb.rate) return rb.rate - ra.rate;
+    if (ra.tokens !== rb.tokens) return ra.tokens - rb.tokens;
+    const wa = worstOf(a.r), wb = worstOf(b.r);
+    if (wa !== wb) return wa - wb;
+    const fa = freeOnly(a.r) ? 0 : 1, fb = freeOnly(b.r) ? 0 : 1;
+    if (fa !== fb) return fa - fb;
+    const ia = String(idOf(a.r)), ib = String(idOf(b.r));
+    if (ia !== ib) return ia < ib ? -1 : 1;
+    return a.i - b.i;
+  }).map((x) => x.r);
 }
 
-export const KILO_NOTE = "free models only; use when Devin's copy slots are full or Devin is out";
+export const KILO_NOTE = "free models only; lowest-cost fallback";
 
 // kilo bills per token on paid models: fail the job when its --format json
 // stream shows a non-free model or any cost > 0 (bin/kilo-free.mjs costCheck).
