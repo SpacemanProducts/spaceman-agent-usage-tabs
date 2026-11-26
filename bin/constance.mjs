@@ -202,6 +202,11 @@ function tailFile(f, n = 8192) {
   } catch { return ""; }
 }
 
+// A done file that won't parse is given this long (by its last write) to be
+// finished by its agent before the sweep believes it: agents write the file in
+// more than one write, and a read between them must not end a healthy job.
+const DONE_FILE_STALE_MS = 10e3;
+
 function sweep() {
   const signals = [];
   const recheck = [];
@@ -221,11 +226,20 @@ function sweep() {
       }
       const f = jobDoneFile(j);
       let done = null, source = "";
+      // A done file that exists but doesn't parse may just be caught mid-write:
+      // it only counts once the agent is gone AND the file has sat unparseable
+      // for DONE_FILE_STALE_MS, so a healthy run is never finished on a torn read.
+      let awaitingDone = false;
       try { done = JSON.parse(fs.readFileSync(f, "utf8")); j.finishedAt = fs.statSync(f).mtimeMs; source = "done-file"; }
       catch {
-        if (fs.existsSync(f)) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
+        if (fs.existsSync(f)) {
+          let age = Infinity;
+          try { age = Date.now() - fs.statSync(f).mtimeMs; } catch {}
+          if (!alive(j.pid, LAUNCH[j.agent]?.cli || "") && age > DONE_FILE_STALE_MS) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
+          else awaitingDone = true;
+        }
       }
-      if (!done && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
+      if (!done && !awaitingDone && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
       if (done) { j.status = "finished"; j.settling = Date.now(); j.summary = reviewText(j.agent, String(done.summary || "")); j.commit = String(done.commit || ""); if (done.tests !== undefined) j.tests = done.tests; changed.push(j); signals.push({ j, source }); }
       // Still running, but its own log says it finished: record the signal
       // (deduped in notify.jsonl) without touching its status.
