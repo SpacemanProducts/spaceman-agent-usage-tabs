@@ -49,7 +49,7 @@ import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps, s
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
 import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap, commitFiles } from "./constance-guard.mjs";
 import { NotifyParser, handleNotification, recentSignals, recordSignal, jobFinishSignal, logSaysFinished } from "./constance-notify.mjs";
-import { addTask, peekNext, finishTask, removeTask, queueView, readyTasks } from "./constance-queue.mjs";
+import { addTask, peekNext, finishTask, removeTask, queueView, readyTasks, expireTasks, pendingTasks } from "./constance-queue.mjs";
 import { withLock } from "./constance-mergelock.mjs";
 import { selfMerge, selfMergeBranch, runSuite, testCommands, addPending, pendingReviews, markReviewed, revertMerge } from "./constance-selfmerge.mjs";
 import { safeGit, trackedDirty } from "./constance-git.mjs";
@@ -755,12 +755,13 @@ function fillSlots() {
     const s = store.read(), g = s.goal;
     if (!g || g.status !== "running") return;
     const dir = g.dir;
+    expireStale(dir, g.id);
     const busyFiles = s.jobs.filter((j) => ["held", "waiting", "running"].includes(j.status)).flatMap((j) => j.files || []);
     let slots = 0;
     for (const agent of Object.keys(PUBLISHED_MAX)) slots += Math.max(0, limitOf(agent) - copySlots(s, agent, dir).length);
     if (!slots) return;
     let handed = 0;
-    for (const t of readyTasks(dir, { busyFiles, limit: slots }, store.dir)) {
+    for (const t of readyTasks(dir, { busyFiles, limit: slots, goal: g.id }, store.dir)) {
       if (!t.agent) continue;
       try {
         const r = handOut({ agent: t.agent, task: t.task, files: t.files || [], items: parseItemArg(t.items || []), title: t.title || "" });
@@ -772,7 +773,7 @@ function fillSlots() {
         if (!fillMissed.has(t.id)) { fillMissed.add(t.id); store.log({ kind: "note", text: `Ready queue: "${t.task.slice(0, 80)}" stays queued — ${e.message}` }); }
       }
     }
-    refillQueue(dir, { freeSlots: slots - handed, busyFiles });
+    refillQueue(dir, { freeSlots: slots - handed, busyFiles, goal: g.id });
   } catch {}
 }
 
@@ -790,6 +791,26 @@ function writeRefills(d) { try { writeAtomic(refillsFile(), JSON.stringify(d, nu
 function rememberRefill(dir, taskId, backlogId) {
   const d = readRefills(); (d[dir] ||= {})[taskId] = backlogId; writeRefills(d);
 }
+// The refills still waiting in this goal's queue. An entry whose task is no
+// longer pending for the goal (it expired with an older goal) is dropped, so
+// its backlog item can be refilled again instead of counting as queued forever.
+function liveRefills(dir, goal) {
+  const d = readRefills(), m = d[dir];
+  if (!m) return {};
+  const live = new Set(pendingTasks(dir, store.dir, goal).map((t) => String(t.id)));
+  let changed = false;
+  for (const k of Object.keys(m)) if (!live.has(String(k))) { delete m[k]; changed = true; }
+  if (changed) { if (!Object.keys(m).length) delete d[dir]; writeRefills(d); }
+  return m;
+}
+// Pending tasks an older goal left in this project's queue are retired, once,
+// with a log line: they never go to the running goal.
+function expireStale(dir, goal) {
+  try {
+    const gone = expireTasks(dir, goal, store.dir);
+    if (gone.length) store.log({ kind: "note", text: `Ready queue: ${gone.length} task${gone.length === 1 ? "" : "s"} left from an earlier goal expired (${gone.map((t) => `"${t.task.slice(0, 40)}"`).join(", ")}); they are not handed to this goal.` });
+  } catch {}
+}
 function markRefillTaken(dir, taskId, jobId) {
   const d = readRefills(), m = d[dir];
   if (!m || !(taskId in m)) return;
@@ -801,14 +822,14 @@ function markRefillTaken(dir, taskId, jobId) {
 // Queue length below REFILL_LOW with freeSlots to spare: add refill tasks,
 // skipping backlog items already queued (they aren't marked taken until they
 // start, so the map is what keeps a later sweep from queueing them twice).
-function refillQueue(dir, { freeSlots, busyFiles }) {
+function refillQueue(dir, { freeSlots, busyFiles, goal }) {
   try {
-    const queueLen = queueView(dir, store.dir).length;
+    const queueLen = queueView(dir, store.dir, goal).length;
     if (queueLen >= REFILL_LOW || freeSlots <= 0) return;
-    const queued = new Set(Object.values(readRefills()[dir] || {}));
+    const queued = new Set(Object.values(liveRefills(dir, goal)));
     const r = refill(dir, { queueLen, freeSlots, backlog: openBacklog(dir).filter((it) => !queued.has(it.id)), busyFiles });
     for (const t of r.tasks) {
-      const item = addTask(dir, { task: t.task, files: t.files || [] }, store.dir);
+      const item = addTask(dir, { task: t.task, files: t.files || [], goal }, store.dir);
       rememberRefill(dir, item.id, t.backlogId);
     }
     if (r.tasks.length) store.log({ kind: "note", text: `Ready queue refilled from the backlog: ${r.tasks.length} task${r.tasks.length === 1 ? "" : "s"} queued.` });
@@ -1069,7 +1090,10 @@ function delegate() {
 // same agent right away — that's the point of the ready queue. A refusal (the
 // agent hit a limit, files conflict) leaves the task queued and says why.
 function autoNext(j) {
-  const item = peekNext(j.dir, store.dir);
+  const g = store.read().goal;
+  if (!g || g.status !== "running" || g.dir !== j.dir) return "";
+  expireStale(j.dir, g.id);
+  const item = peekNext(j.dir, store.dir, g.id);
   if (!item) return "";
   const agent = item.agent || j.agent;
   try {
@@ -1103,12 +1127,12 @@ function queueCmd() {
   const task = arg("--task");
   if (task) {
     const files = arg("--files").split(",").map((x) => x.trim()).filter(Boolean);
-    const item = addTask(g.dir, { task, files, agent: arg("--agent"), items: parseItemArg(arg("--item")), title: arg("--title") }, store.dir);
+    const item = addTask(g.dir, { task, files, agent: arg("--agent"), items: parseItemArg(arg("--item")), title: arg("--title"), goal: g.id }, store.dir);
     store.log({ kind: "note", text: `Ready queue: "${task.slice(0, 80)}" queued (${files.length ? files.join(", ") : "read-only"}${item.agent ? ", for " + item.agent : ", any agent"}).` });
     out(`Queued as task ${item.id}. It goes to ${item.agent || "the finishing agent"} automatically when the current job is accepted.`);
     return;
   }
-  const q = queueView(g.dir, store.dir);
+  const q = queueView(g.dir, store.dir, g.id);
   if (!q.length) { out("The ready queue is empty."); return; }
   out(q.map((t) => `${t.id}. ${t.task}${t.files.length ? `  [${t.files.join(", ")}]` : "  [read-only]"}${t.agent ? `  → ${t.agent}` : ""}`).join("\n"));
 }
@@ -1156,7 +1180,7 @@ async function waitJob() {
     const next = [...reviewQueue(s.jobs).filter((j) => !inHand(j)), ...s.jobs.filter((j) => j.status === "merged" && !inHand(j))]
       .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0) || a.id - b.id)[0];
     if (next) {
-      return out({ review: { ...reviewPacket(next, s), queue: queueView(next.dir, store.dir) }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
+      return out({ review: { ...reviewPacket(next, s), queue: queueView(next.dir, store.dir, s.goal?.id || "") }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     const held = s.jobs.filter((j) => j.status === "held").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, heldReason: j.heldReason || "" }));
@@ -2150,7 +2174,7 @@ function boardView(s, d, records) {
   const gq = readGoalQueue(store.dir);
   return {
     checklist: checklist(s.goal, asAccepted(s.jobs)),
-    cards: cards({ jobs: s.jobs, goal: s.goal, queue: s.goal && ["running", "paused"].includes(s.goal.status) ? queueView(s.goal.dir, store.dir) : [], live, names: name }),
+    cards: cards({ jobs: s.jobs, goal: s.goal, queue: s.goal && ["running", "paused"].includes(s.goal.status) ? queueView(s.goal.dir, store.dir, s.goal.id) : [], live, names: name }),
     // A merged job still waits for her review, so the Now line counts it with the finished ones.
     now: nowLine({ goal: s.goal, jobs: s.jobs.map((j) => (j.status === "merged" ? { ...j, status: "finished" } : j)), names: name, goalQueue: gq.goals, queuePaused: gq.paused, queueHeld: gq.ownerPaused }),
     history: history({ records: readHistory(), log: store.readLog(5000), goal: s.goal, jobs: s.jobs, live }),
@@ -2287,7 +2311,7 @@ function statusPayload() {
     milkLabel: milkLabel(b.id) };
   return { goal: s.goal, board, progress: { line: pline }, tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p, brain,
     leverage: leverageView(s, tv.goal?.total ?? null), milk: milkStatus(), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
-    queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
+    queue: s.goal ? queueView(s.goal.dir, store.dir, s.goal.id) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
 }
 
 function status() { out(statusPayload()); }
@@ -2316,7 +2340,7 @@ if (process.argv[1] === SELF) {
     }).join("\n"));
   }
   else if (cmd === "pace") out(paceNow(freshData()));
-  else if (cmd === "jobs") { sweep(); releaseHeld(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], copies: copiesView(s), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
+  else if (cmd === "jobs") { sweep(); releaseHeld(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir, s.goal.id) : [], copies: copiesView(s), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
   else if (cmd === "queue") queueCmd();
   else if (cmd === "backlog") backlogCmd();
   else if (cmd === "scorecard") { const rows = scoreRows(readScorecard(store.dir)); out(rows.length ? rows.map((r) => `${scoreLine(r)} — ${sizeHint(r).note}`).join("\n") : "No reviewed jobs yet."); }

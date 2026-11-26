@@ -202,6 +202,41 @@ try {
     assert.deepEqual(s.goal.handoff.steps.map((x) => [x.kind, x.outcome]).slice(0, 2), [["plan", "interrupted (a restart or a crash)"], ["plan", "ok"]]);
     assert.equal(s.goal.handoff.decisions.filter((d) => /item 1/.test(d.text)).length, 1, "the decision is kept once");
   }
+
+  // ---- 5: a ready-queue task an earlier goal left pending (a failed goal's, or
+  // a spare goal's backlog refill queued after its last job) never goes to the
+  // next goal on the same project. Before, fillSlots handed it out mid-goal with
+  // the old goal's item numbers, and its finished job started review steps the
+  // new goal never planned. Now it expires: one planning and one review session,
+  // only the new goal's own job, and its refill entry is cleared.
+  fs.rmSync(path.join(root, "go"), { force: true });
+  fs.rmSync(path.join(root, "claude-runs.jsonl"), { force: true });
+  {
+    const rdir = fs.realpathSync(repo);
+    const old = jobsFile().goal.id;
+    fs.writeFileSync(path.join(cdir, "queue.json"), JSON.stringify({ next: 9, projects: { [rdir]: [
+      { id: 7, task: "leftover: add f9", files: ["f9.txt"], agent: "devin", status: "pending", createdAt: Date.now() - 60e3, goal: old, items: [1] },
+      { id: 8, task: "untagged leftover: add f8", files: ["f8.txt"], agent: "devin", status: "pending", createdAt: Date.now() - 60e3 },
+    ] } }));
+    fs.writeFileSync(path.join(cdir, "refills.json"), JSON.stringify({ [rdir]: { 7: "b1" } }));
+  }
+  fs.writeFileSync(path.join(root, "go"), "");
+  assert.equal(run("start", "--dir", repo, "--goal", "1. add f6").status, 0);
+  notePids();
+  assert.ok(await until(() => jobsFile().goal?.status === "done", 90000), "the new goal finishes: " + JSON.stringify(jobsFile().goal));
+  notePids();
+  {
+    const s = jobsFile();
+    const mine = s.jobs.filter((j) => j.goal === s.goal.id);
+    assert.ok(!s.jobs.some((j) => /leftover/.test(j.task)), "no leftover task was handed out: " + JSON.stringify(mine.map((j) => [j.id, j.task])));
+    assert.equal(mine.length, 1, "only the new goal's own job: " + JSON.stringify(mine.map((j) => [j.id, j.task])));
+    assert.deepEqual(runs().map((r) => r.argv.at(-1).split(".")[0]), ["Step: plan", "Step: review"], "one planning session, one review session, no extra review step");
+    const q = JSON.parse(fs.readFileSync(path.join(cdir, "queue.json"), "utf8")).projects[fs.realpathSync(repo)];
+    assert.deepEqual(q.filter((t) => t.id === 7 || t.id === 8).map((t) => t.status), ["expired", "expired"], "the leftovers are expired");
+    assert.ok(status().log.some((l) => l.kind === "note" && /2 tasks left from an earlier goal expired/.test(l.text)), "the expiry is logged");
+    const rf = JSON.parse(fs.readFileSync(path.join(cdir, "refills.json"), "utf8"));
+    assert.ok(!rf[fs.realpathSync(repo)]?.[7], "the expired task's refill entry is cleared, so its backlog item can be refilled again");
+  }
 } finally {
   notePids();
   for (const pid of pids) if (pid) kill(pid);

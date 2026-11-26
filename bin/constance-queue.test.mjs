@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { addTask, pendingTasks, peekNext, readyTasks, finishTask, removeTask, queueView, queueFile } from "./constance-queue.mjs";
+import { addTask, pendingTasks, peekNext, readyTasks, finishTask, removeTask, queueView, queueFile, expireTasks } from "./constance-queue.mjs";
 
 process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), "constance-queue-home-"));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-queue-"));
@@ -68,6 +68,32 @@ const s2 = addTask(projS, { task: "second shared.js", files: ["shared.js"] }, di
 const s3 = addTask(projS, { task: "third c.js", files: ["c.js"] }, dir);
 assert.deepEqual(readyTasks(projS, {}, dir).map((t) => t.id), [s1.id, s3.id], "no two picked tasks share a file");
 assert.deepEqual(readyTasks(projR, {}, dir), pendingTasks(projR, dir).filter((t) => t.id !== r4.id), "returns the same task objects pendingTasks returns");
+
+// Tasks belong to the goal they were queued in: only that goal sees them, and
+// expireTasks retires everything pending that isn't the running goal's.
+{
+  const projG = "/home/u/proj-g";
+  const a = addTask(projG, { task: "goal A task", files: ["a.txt"], goal: "A", items: [1] }, dir);
+  const b = addTask(projG, { task: "goal B task", files: ["b.txt"], goal: "B" }, dir);
+  const u = addTask(projG, { task: "untagged task", files: ["u.txt"] }, dir);
+  assert.equal(a.goal, "A"); assert.equal(u.goal, undefined, "no goal, no field");
+  assert.deepEqual(pendingTasks(projG, dir).map((t) => t.id), [a.id, b.id, u.id], "without a goal filter every pending task shows (older callers)");
+  assert.deepEqual(pendingTasks(projG, dir, "B").map((t) => t.id), [b.id], "goal B sees only its own task");
+  assert.deepEqual(readyTasks(projG, { goal: "B" }, dir).map((t) => t.id), [b.id]);
+  assert.equal(peekNext(projG, dir, "B").id, b.id);
+  assert.deepEqual(queueView(projG, dir, "B").map((t) => t.id), [b.id]);
+  for (const g of ["", null]) assert.deepEqual(pendingTasks(projG, dir, g), [], `goal ${JSON.stringify(g)} matches nothing`);
+  assert.equal(peekNext(projG, dir, "C"), null, "a goal with no tasks gets none of the others'");
+  assert.deepEqual(expireTasks(projG, "", dir), [], "no goal: nothing expires");
+  const gone = expireTasks(projG, "B", dir);
+  assert.deepEqual(gone.map((t) => t.id).sort(), [a.id, u.id].sort(), "goal A's and the untagged task expire while B runs");
+  assert.deepEqual(pendingTasks(projG, dir).map((t) => t.id), [b.id], "only B's task is still pending");
+  const all = JSON.parse(fs.readFileSync(queueFile(dir), "utf8")).projects[projG];
+  assert.ok(all.filter((t) => t.status === "expired").every((t) => t.expiredAt > 0), "expired tasks are kept with the time");
+  assert.deepEqual(expireTasks(projG, "B", dir), [], "a second expiry finds nothing");
+  finishTask(projG, b.id, 99, dir);
+  assert.deepEqual(expireTasks(projG, "C", dir), [], "a handed task never expires");
+}
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log("constance-queue: tests passed");

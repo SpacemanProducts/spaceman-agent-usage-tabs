@@ -239,6 +239,9 @@ keeps the developer in flow:
   goal is measured with `bin/constance-opus-bench.mjs` (results in `docs/opus-per-goal.md`).
   Since 1.56.0 no worker launches without a real project folder (`bin/constance-projectdir.mjs`, checked in
   `launchJob` and in `sandboxArgs`: missing/blank/relative/non-folder, `/`, home or above are refused).
+  Since 1.56.1 every ready-queue task carries the goal it was queued in (`goal`); only that goal hands it out,
+  shows or counts it. Pending tasks of other goals are expired (`expireTasks`) and their refills.json entries
+  dropped, so nothing queued in one goal leaks into the next (wrong item numbers, unplanned review steps).
 
   Since 1.50.2 (security review, 2026-11-25): workers can't write ANY git data or `.constance/`
   (read-only binds; `protectedPaths` in `bin/constance-sandbox.mjs`) and are told not to commit;

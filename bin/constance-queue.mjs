@@ -2,6 +2,11 @@
 // project, kept in her state folder (queue.json, outside any repo). She fills
 // it while planning a goal; when a job finishes and passes review, the next
 // queued task for that project is handed to the same agent automatically.
+// Every task belongs to the goal it was queued in (`goal`): it is only ever
+// handed out, shown or counted while that goal runs. A task left pending when
+// its goal ends never leaks into the next goal on the same project (its item
+// numbers would tick the wrong checklist, and its finished job would start
+// review steps that goal never asked for); expireTasks() retires it.
 import fs from "node:fs";
 import path from "node:path";
 import { stateDir } from "./constance-jobs.mjs";
@@ -73,33 +78,52 @@ const isTask = (t) => t !== null && typeof t === "object";
 
 // Add a ready task for a project. agent is optional: empty means "whoever
 // finishes the current job". Returns the stored task.
-export function addTask(projectDir, { task, files = [], agent = "", items = [], title = "" }, dir = stateDir()) {
+export function addTask(projectDir, { task, files = [], agent = "", items = [], title = "", goal = "" }, dir = stateDir()) {
   const text = String(task || "").trim();
   if (!text) throw new Error("queue needs a task");
   return withLock(dir, () => {
     const data = readAll(dir);
     const list = projectList(data, projectDir) || (data.projects[projectDir] = []);
     const item = { id: data.next++, task: text, files: files.filter(Boolean), agent: String(agent || ""), status: "pending", createdAt: Date.now(),
-      ...(items.length ? { items } : {}), ...(title ? { title: String(title) } : {}) };
+      ...(goal ? { goal: String(goal) } : {}), ...(items.length ? { items } : {}), ...(title ? { title: String(title) } : {}) };
     list.push(item);
     writeAll(dir, data);
     return item;
   });
 }
 
-export function pendingTasks(projectDir, dir = stateDir()) {
-  return (projectList(readAll(dir), projectDir) || []).filter((t) => isTask(t) && t.status === "pending");
+// With `goal`, only that goal's tasks (an untagged task belongs to no goal).
+const ofGoal = (t, goal) => goal === undefined || (typeof goal === "string" && goal !== "" && t.goal === goal);
+
+export function pendingTasks(projectDir, dir = stateDir(), goal = undefined) {
+  return (projectList(readAll(dir), projectDir) || []).filter((t) => isTask(t) && t.status === "pending" && ofGoal(t, goal));
+}
+
+// Retire every pending task of this project that doesn't belong to `goal`
+// (the running goal): status "expired". Returns the expired tasks.
+export function expireTasks(projectDir, goal, dir = stateDir()) {
+  if (typeof goal !== "string" || !goal) return [];
+  if (!(projectList(readAll(dir), projectDir) || []).some((t) => isTask(t) && t.status === "pending" && t.goal !== goal)) return [];
+  return withLock(dir, () => {
+    const data = readAll(dir);
+    const gone = [];
+    for (const t of projectList(data, projectDir) || []) {
+      if (isTask(t) && t.status === "pending" && t.goal !== goal) { t.status = "expired"; t.expiredAt = Date.now(); gone.push(t); }
+    }
+    if (gone.length) writeAll(dir, data);
+    return gone;
+  });
 }
 
 // Pending tasks that can start right now, oldest first: a task is skipped when
 // any of its files is in busyFiles or is already claimed by an earlier picked
 // task (two picked tasks never share a file). Tasks with no files are read-only
 // and always eligible. At most `limit` tasks.
-export function readyTasks(projectDir, { busyFiles = [], limit = Infinity } = {}, dir = stateDir()) {
+export function readyTasks(projectDir, { busyFiles = [], limit = Infinity, goal = undefined } = {}, dir = stateDir()) {
   const busy = new Set(busyFiles.filter(Boolean));
   const claimed = new Set();
   const ready = [];
-  for (const t of pendingTasks(projectDir, dir)) {
+  for (const t of pendingTasks(projectDir, dir, goal)) {
     if (ready.length >= limit) break;
     const files = (t.files || []).filter(Boolean);
     if (files.some((f) => busy.has(f) || claimed.has(f))) continue;
@@ -111,8 +135,8 @@ export function readyTasks(projectDir, { busyFiles = [], limit = Infinity } = {}
 
 // The next task to hand out, or null. Does not remove it — call finishTask or
 // failTask after the handoff is attempted.
-export function peekNext(projectDir, dir = stateDir()) {
-  return pendingTasks(projectDir, dir)[0] || null;
+export function peekNext(projectDir, dir = stateDir(), goal = undefined) {
+  return pendingTasks(projectDir, dir, goal)[0] || null;
 }
 
 export function finishTask(projectDir, taskId, jobId, dir = stateDir()) {
@@ -139,6 +163,6 @@ export function removeTask(projectDir, taskId, dir = stateDir()) {
 }
 
 // What the panel and `C queue` show: pending tasks for one project, oldest first.
-export function queueView(projectDir, dir = stateDir()) {
-  return pendingTasks(projectDir, dir).map((t) => ({ id: t.id, task: t.task, files: t.files || [], agent: t.agent || "" }));
+export function queueView(projectDir, dir = stateDir(), goal = undefined) {
+  return pendingTasks(projectDir, dir, goal).map((t) => ({ id: t.id, task: t.task, files: t.files || [], agent: t.agent || "" }));
 }
