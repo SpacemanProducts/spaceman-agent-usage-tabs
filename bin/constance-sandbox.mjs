@@ -104,7 +104,7 @@ function gitPointer(dir) {
 // folders that also belong to the agent (a non-seated account's login home).
 // Order matters: bwrap applies mounts in order, so the empty home comes first
 // and every bind on top of it after.
-export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], keyringAgents = [], busSock = "" }) {
+export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], keyringAgents = [], busSock = "", readOnly = [] }) {
   const problem = sandboxProblem(agent, keyringAgents);
   if (problem) throw new Error(`${agent} can't run sandboxed: ${problem}`);
   const home = path.resolve(env.HOME || os.homedir());
@@ -186,6 +186,16 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
       a.push("--ro-bind", wts, wts);
       if (exists(gi.gitDir)) a.push("--bind", gi.gitDir, gi.gitDir);
     }
+  }
+  // Folders inside the project that only the controller writes (her
+  // .constance/ with handoff.md, backlog.md and rules.md) go back read-only on
+  // top of the writable project bind. Only paths inside the project count, and
+  // only existing ones (bwrap can't bind a missing path; the caller makes it).
+  for (const raw of readOnly) {
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    if (!exists(raw)) continue;
+    const p = fs.realpathSync(raw);
+    if (p !== proj && under(p, proj)) a.push("--ro-bind", p, p);
   }
   // Keyring agents get the filtered proxy's socket as their only bus.
   if (busSock) a.push("--bind", busSock, `/run/user/${uid}/bus`);

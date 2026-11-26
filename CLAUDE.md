@@ -231,6 +231,12 @@ keeps the developer in flow:
   "antigravity" in constanceKeyringAgents, pacing from its model's pool bars renamed Session/Weekly, no resume
   (fresh prompt each start), a quota line is a wall ("Antigravity said it hit its limit"), and it is never a
   worker while it is her brain.
+  Since 1.55.0 there is no long brain session: each planning step and each review batch is a fresh session
+  (`bin/constance-steps.mjs`: `nextStep()` plans, reviews, waits with no brain running, or ends; a step that moved
+  nothing is a nudge, max 3) that reads only `<project>/.constance/handoff.md` (`bin/constance-handoff.mjs`,
+  rendered from `goal.handoff` in jobs.json, under 150 lines, controller-written only, read-only to workers)
+  plus lessons and the batch's job reports, then exits. Never reintroduce `--resume` across steps. Opus per
+  goal is measured with `bin/constance-opus-bench.mjs` (results in `docs/opus-per-goal.md`).
 
 ## Working rules
 

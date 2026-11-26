@@ -746,12 +746,13 @@ watcher.kill("SIGKILL");
   writeData();
   try { fs.rmSync(path.join(root, "go")); } catch {}
   try { fs.rmSync(path.join(root, "notified.txt")); } catch {}
-  // Fake Constance for queued goals: the goal text is in her first message. "build q1" delegates one
+  // Fake Constance for queued goals: the goal text is in her step's handoff. "build q1" delegates one
   // tagged job and waits for it; "ask owner" flags a question; anything else just reports.
   fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
 p="\${@: -1}"
-[[ "$p" == "Goal from the owner:"* ]] && echo "$p" | head -1 >> "${root}/queue-goals.txt"
+# A goal's first planning step (not a nudge) records the goal its handoff names.
+[[ "$p" == "Step: plan."* && "$p" != *"goal is not finished"* ]] && grep -m1 '^# Handoff: ' <<<"$p" >> "${root}/queue-goals.txt"
 while [[ ! -e "${root}/qgo" ]]; do sleep 0.2; done
 if grep -q "build q1" <<<"$p"; then
   $C delegate --agent grok --files q1.txt --item 1 --title "building q1" --task "add q1" >> "${root}/brain.out" 2>&1
@@ -820,7 +821,7 @@ echo "Report: done."
   assert.equal(sb.goalQueue.goals.length, 0); assert.equal(sb.goalQueue.paused, "");
   assert.match(sb.now, /^Free\. Last goal finished\.$/);
   assert.match(run("goals", "next").stderr, /empty/);
-  assert.deepEqual(fs.readFileSync(path.join(root, "queue-goals.txt"), "utf8").trim().split("\n").map((l) => l.replace(/^Goal from the owner: /, "")), ["build q1", "ask owner", "third goal, edited"]);
+  assert.deepEqual(fs.readFileSync(path.join(root, "queue-goals.txt"), "utf8").trim().split("\n").map((l) => l.replace(/^# Handoff: /, "")), ["build q1", "ask owner", "third goal, edited"]);
   // The queue ran empty: the morning report is written and sent (silently).
   assert.ok(await until(() => fs.existsSync(path.join(tabs, "constance", "morning-report.md")), 5000), "the morning report is written");
   const mr = fs.readFileSync(path.join(tabs, "constance", "morning-report.md"), "utf8");
@@ -844,7 +845,8 @@ echo "Report: done."
   try { fs.rmSync(path.join(root, "notified.txt")); } catch {}
   fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 p="\${@: -1}"; C="node ${CLI}"
-echo "$p" | head -1 >> "${root}/retry-goals.txt"
+# A goal's first planning step (not a nudge) records the goal its handoff names.
+[[ "$p" != *"goal is not finished"* ]] && grep -m1 '^# Handoff: ' <<<"$p" >> "${root}/retry-goals.txt"
 if grep -q "retry goal" <<<"$p"; then
   touch "${root}/go"
   $C delegate --agent grok --files r1.txt,r2.txt --task "add r" >> "${root}/retry.out" 2>&1
@@ -945,9 +947,10 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
   assert.ok(cg.log.some((l) => l.kind === "retry" && l.job === dj.id && l.text.includes(String(retry.id))), "the retry is logged");
   assert.equal(fs.readFileSync(path.join(repo, "cover.txt"), "utf8"), "x\n", "only the grok job's cover.txt is in the repo");
 }
-// "Never stop to ask": an exit-0 run with open checklist items is not a finished
-// goal — the driver resumes her session with a nudge, at most 3 per goal, then
-// ends as before. The fake claude does nothing and exits 0 every time.
+// "Never stop to ask": an exit-0 step that leaves open checklist items and moved
+// nothing is not a finished goal — the driver starts a FRESH session with a
+// nudge (never --resume: no session carries across steps), at most 3 per goal,
+// then ends as before. The fake claude does nothing and exits 0 every time.
 fs.rmSync(path.join(root, "go"), { force: true });
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 n=0; [[ -f "${root}/nudge-runs" ]] && n=$(cat "${root}/nudge-runs"); n=$((n+1)); echo "$n" > "${root}/nudge-runs"
@@ -960,9 +963,12 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 30
 {
   assert.equal(fs.readFileSync(path.join(root, "nudge-runs"), "utf8").trim(), "4", "the first run plus 3 nudges, then it ends");
   const last = fs.readFileSync(path.join(root, "nudge-args-4"), "utf8");
-  assert.match(last, /--resume/, "the nudge resumes her session");
+  assert.doesNotMatch(last, /--resume/, "a nudge is a fresh session, never a resume");
+  const sessions = [1, 2, 3, 4].map((n) => (fs.readFileSync(path.join(root, `nudge-args-${n}`), "utf8").match(/--session-id (\S+)/) || [])[1]);
+  assert.ok(sessions.every(Boolean) && new Set(sessions).size === 4, "every step got its own new session: " + sessions);
   assert.match(last, /The goal is not finished: items 1, 2 are still open/, "the nudge names what is open");
-  assert.match(last, /Keep going: delegate or wait, don't ask/, "and tells her to keep going");
+  assert.match(last, /Keep going: delegate or review, don't ask/, "and tells her to keep going");
+  assert.match(last, /=== .*handoff\.md ===/, "and hands her the handoff file");
   assert.equal(status().goal.nudges, 3, "the nudge count is kept on the goal");
   assert.ok(status().log.some((l) => l.kind === "note" && /nudge 3 of 3/.test(l.text)), "each nudge is logged");
 }
@@ -1259,7 +1265,8 @@ delete env.CONSTANCE_NOTIFY_CMD;
   const asks = fs.readFileSync(path.join(tabs, "constance", "asks.jsonl"), "utf8");
   assert.ok(asks.includes("probe ask") && asks.includes("Pick a color for the button"), "every needs-owner is in the ledger");
   const routes = status().log.filter((l) => l.kind === "route");
-  assert.ok(routes.length >= 1 && routes.every((l) => l.step === "plan" && l.model), "route lines in the log: " + JSON.stringify(routes.slice(0, 3)));
+  // One route line per brain step: planning steps and review batches.
+  assert.ok(routes.some((l) => l.step === "plan") && routes.every((l) => ["plan", "review"].includes(l.step) && l.model), "route lines in the log: " + JSON.stringify(routes.slice(0, 3)));
   assert.ok(fs.existsSync(path.join(tabs, "constance", "routes.jsonl")), "the routes tally file exists");
   const rp = JSON.parse(run("route", "plan").stdout);
   assert.equal(rp.model, "opus"); assert.ok(rp.why.length > 0);
@@ -1279,7 +1286,8 @@ delete env.CONSTANCE_NOTIFY_CMD;
 fs.rmSync(path.join(root, "go"), { force: true });
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 echo run >> "${root}/wall-resume-runs"
-if [[ "$*" == *"--session-id"* ]]; then
+echo "$@" > "${root}/wall-resume-args-$(wc -l < "${root}/wall-resume-runs")"
+if [[ "$(wc -l < "${root}/wall-resume-runs")" == "1" ]]; then
   echo "You've hit your 5-hour limit · resets $(date -u -d '+3 minutes' '+%-I:%M%p') (UTC)"
   exit 1
 fi
@@ -1295,6 +1303,12 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 36
   assert.equal(fs.readFileSync(path.join(root, "wall-resume-runs"), "utf8").trim().split("\n").length, 2, "one wall exit, one resume — no retries into the wall");
   const wl = status().log.filter((l) => l.kind === "resumed").pop();
   assert.ok(wl && /stated reset/.test(wl.text), "the wall resume is logged: " + JSON.stringify(wl));
+  // The resume is a fresh session that picks up from the handoff file, told why.
+  const a1 = fs.readFileSync(path.join(root, "wall-resume-args-1"), "utf8"), a2 = fs.readFileSync(path.join(root, "wall-resume-args-2"), "utf8");
+  assert.doesNotMatch(a2, /--resume/);
+  assert.notEqual(a1.match(/--session-id (\S+)/)[1], a2.match(/--session-id (\S+)/)[1], "a new session after the wall");
+  assert.match(a2, /Picking up after step 1 \(plan\), which ended: her limit wall/);
+  assert.match(a2, /# Handoff: wall resume goal/);
 }
 
 // Second wiring pass commands: `spec` fills a job-spec template, `split`
