@@ -89,7 +89,8 @@ keeps the developer in flow:
   `CHANGELOG.md`, and commit. The plugin folder is a git repo that pushes to `origin` (GitHub, see below).
 - **QML pitfalls that already broke the plugin:** never put non-Item children (e.g.
   `HoverHandler`) directly inside `KeyboardPanel`; after every QML edit restart the
-  shell and check `qs log` for `agent-usage` errors. A refactor once deleted the
+  shell and check `qs log` for `agent-usage` errors. Import a JS helper under its own name, never the component's
+  (`import "usage-chart.js" as Chart` in UsageChart.qml); `bin/qml-imports.test.mjs` checks every call. A refactor once deleted the
   reset block; `bin/reset-celebration.test.mjs` guards the collector's wiring.
 - The repo is public on GitHub (SpacemanProducts/spaceman-agent-usage-tabs). Scan for
   personal info (emails, tokens, usernames in paths) before every push, and use the

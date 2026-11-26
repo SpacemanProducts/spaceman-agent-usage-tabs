@@ -1,7 +1,9 @@
 import QtQuick
+import "usage-chart.js" as Chart
 
-// A 30-day usage bar chart for an agent tab. Bars come from usage-chart.js
-// (imported as UsageChart); the component hides itself when the series has no
+// A 30-day usage bar chart for an agent tab. Bars come from usage-chart.js,
+// imported as Chart (never as UsageChart: inside this file that name is the
+// component itself). The component hides itself when the series has no
 // reported data so a missing feed never draws a placeholder chart.
 Item {
   id: root
@@ -12,9 +14,9 @@ Item {
   property int chartHeight: 36
   property string fontFamily: ""
 
-  readonly property var bars: UsageChart.bars(series, chartHeight)
-  readonly property string peak: UsageChart.peakLabel(series)
-  readonly property bool hasData: UsageChart.hasData(series)
+  readonly property var bars: Chart.bars(series, chartHeight)
+  readonly property string peak: Chart.peakLabel(series)
+  readonly property bool hasData: Chart.hasData(series)
 
   visible: hasData
   implicitWidth: hasData ? bars.length * (barWidth + spacing) - spacing : 0

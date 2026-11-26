@@ -1,7 +1,7 @@
 .pragma library
 // 30-day usage bar chart helpers for agent tabs. Pure functions so
 // bin/usage-chart.test.mjs can run them in node; UsageChart.qml imports this
-// as UsageChart. series is [{date:'YYYY-MM-DD', tokens:number|null}] oldest
+// as Chart. series is [{date:'YYYY-MM-DD', tokens:number|null}] oldest
 // first — null means the source reported nothing that day, and it stays null
 // all the way through (a tick, never a fake bar: honest data).
 
