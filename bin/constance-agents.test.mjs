@@ -107,21 +107,68 @@ const collect = fs.readFileSync(new URL("./collect.mjs", import.meta.url), "utf8
 const d = collect.match(/DEVIN_FLASH_FREE_UNTIL = Date\.UTC\(([^)]*)\)/)[1].split(",").map(Number);
 assert.equal(Date.UTC(...d), DEVIN_FREE_UNTIL, "same Devin free date as bin/collect.mjs");
 
-// ---- preferOrder: Devin first while available, kilo right after it, rest in order.
+// ---- preferOrder: freest and best-proven first; free-models-only agents win ties.
 {
   const rows = [{ id: "grok" }, { id: "devin" }, { id: "kilo" }, { id: "codex" }];
-  assert.deepEqual(preferOrder(rows).map((r) => r.id), ["devin", "kilo", "grok", "codex"], "devin then kilo, scorecard order ignored for them");
+  assert.deepEqual(preferOrder(rows).map((r) => r.id), ["devin", "kilo", "codex", "grok"], "free-models-only agents lead ties, then id order");
   assert.equal(rows[0].id, "grok", "preferOrder doesn't mutate its input");
   // Devin out: kilo takes the lead — that is exactly what KILO_NOTE says it is for.
   const noDevin = [{ id: "devin", available: false }, { id: "grok" }, { id: "kilo" }];
   assert.deepEqual(preferOrder(noDevin).map((r) => r.id), ["kilo", "devin", "grok"]);
   // An unavailable kilo doesn't jump ahead of available agents.
   const noKilo = [{ id: "kilo", available: false }, { id: "grok" }, { id: "devin" }];
-  assert.deepEqual(preferOrder(noKilo).map((r) => r.id), ["devin", "kilo", "grok"]);
+  assert.deepEqual(preferOrder(noKilo).map((r) => r.id), ["devin", "grok", "kilo"]);
   // Bare ids and non-arrays are handled.
-  assert.deepEqual(preferOrder(["grok", "devin", "amp"]).map(String), ["devin", "grok", "amp"]);
+  assert.deepEqual(preferOrder(["grok", "devin", "amp"]).map(String), ["devin", "amp", "grok"]);
   assert.deepEqual(preferOrder(null), []);
-  assert.equal(KILO_NOTE, "free models only; use when Devin's copy slots are full or Devin is out");
+  assert.equal(KILO_NOTE, "free models only; lowest-cost fallback");
+}
+
+// ---- preferOrder: lowest fullest-limit percent beats the free-models flag.
+{
+  // Devin available but nearly full loses to a freer agent — "devin full"
+  // must not keep the lead just because it can't charge.
+  const full = preferOrder([{ id: "devin", available: true, worst: 0.9 }, { id: "grok", available: true, worst: 0.2 }]);
+  assert.deepEqual(full.map((r) => r.id), ["grok", "devin"], "the freer agent is picked over a full free-only one");
+  // Devin blocked outright: same result.
+  const walled = preferOrder([{ id: "devin", available: false, reason: "hit its limit", worst: 1 }, { id: "grok", available: true, worst: 0.2 }]);
+  assert.deepEqual(walled.map((r) => r.id), ["grok", "devin"]);
+  // Real judge() rows carry `worst`, so the same rule applies to live data.
+  const judgedRows = judgeAll({ generatedAt: now - 60e3, agents: [
+    ag("devin", { limits: [{ percent: 0.8 }] }),
+    ag("grok", { limits: [{ percent: 0.3 }] }),
+  ] }, now);
+  assert.deepEqual(preferOrder(judgedRows).map((r) => r.id), ["grok", "devin"], "judge() rows rank by fullest-limit percent too");
+}
+
+// ---- preferOrder: scorecard record outranks roominess; ties break by id.
+{
+  const card = { agents: {
+    devin: { jobs: 4, accepted: 4, sentBack: 0, tokensSum: 4000, tokensN: 4, msSum: 0, msN: 0, recent: [] },
+    grok: { jobs: 4, accepted: 1, sentBack: 3, tokensSum: 4000, tokensN: 4, msSum: 0, msN: 0, recent: [] },
+  }, seen: ["g1"] };
+  // Grok's record is worse, so devin leads even though grok has more room.
+  const proven = preferOrder([{ id: "grok", worst: 0.1 }, { id: "devin", worst: 0.7 }], card);
+  assert.deepEqual(proven.map((r) => r.id), ["devin", "grok"], "scorecard record outranks lowest fullest-limit percent");
+  // Same record, same room: the free-models-only agent wins the tie.
+  const tied = preferOrder([{ id: "grok", worst: 0.4 }, { id: "kilo", worst: 0.4 }]);
+  assert.deepEqual(tied.map((r) => r.id), ["kilo", "grok"], "freeOnly breaks an exact tie");
+  // Same record and room, neither free-only: id decides, deterministically.
+  const byId = preferOrder([{ id: "grok", worst: 0.4 }, { id: "codex", worst: 0.4 }, { id: "amp", worst: 0.4 }]);
+  assert.deepEqual(byId.map((r) => r.id), ["amp", "codex", "grok"], "id is the final tiebreak");
+  // Identical rows keep input order (the last, stable tiebreak).
+  const same = preferOrder([{ id: "kilo", tag: 1 }, { id: "devin" }, { id: "kilo", tag: 2 }]);
+  assert.deepEqual(same.map((r) => r.tag ?? r.id), ["devin", 1, 2]);
+}
+
+// ---- preferOrder: malformed rows never crash and never look roomier than they are.
+{
+  assert.deepEqual(preferOrder(null), []);
+  assert.deepEqual(preferOrder({}), []);
+  assert.deepEqual(preferOrder("devin"), [], "a bare string isn't a row list");
+  const weird = preferOrder([null, 5, { id: "grok", worst: "junk" }, { id: "devin", worst: NaN }, { id: "codex", worst: -1 }]);
+  assert.deepEqual(weird.map((r) => (r && typeof r === "object" ? r.id : r)), ["codex", "devin", null, 5, "grok"],
+    "non-numeric worst reads as no reading (Infinity); id-less rows tie on \"\" and keep input order");
 }
 
 // ---- kiloPaidVerdict: fail the job on a paid model or any reported cost.
