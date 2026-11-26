@@ -79,8 +79,20 @@ import { buildSummary } from "./constance-summary.mjs";
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
 const ENV = { ...process.env, PATH: `${process.env.HOME}/.local/bin:${process.env.PATH || ""}` };
-const STATE = path.dirname(openStore().dir);   // <state>/omarchy/agent-usage-tabs
-const store = openStore();
+const base = openStore();
+const STATE = path.dirname(base.dir);   // <state>/omarchy/agent-usage-tabs
+// jobs.json is hand-editable state: a null job entry or a goal/guards value that
+// isn't an object would crash readers and writers alike. Every read and update
+// sees only well-shaped entries — bad ones are skipped, never wiped by a crash.
+const cleanState = (s) => {
+  if (s && typeof s === "object") {
+    s.jobs = (Array.isArray(s.jobs) ? s.jobs : []).filter((j) => j && typeof j === "object");
+    if (!s.goal || typeof s.goal !== "object" || Array.isArray(s.goal)) s.goal = null;
+    if (!s.guards || typeof s.guards !== "object") s.guards = {};
+  }
+  return s;
+};
+const store = { ...base, read: () => cleanState(base.read()), update: (fn) => base.update((s) => fn(cleanState(s))) };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function arg(name, fallback = "") { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] ?? fallback : fallback; }
@@ -104,7 +116,16 @@ export function alive(pid, needle = "") {
 }
 function killGroup(pid) { try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch {} } }
 
-function readData() { try { return JSON.parse(fs.readFileSync(path.join(STATE, "data.json"), "utf8")); } catch { return { agents: [] }; } }
+// data.json is collector output but still just a file on disk: a payload that
+// isn't an object, or an agents list holding non-object entries, reads as no
+// data rather than crashing every command that uses it.
+function readData() {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(STATE, "data.json"), "utf8"));
+    if (!d || typeof d !== "object" || Array.isArray(d)) return { agents: [] };
+    return { ...d, agents: (Array.isArray(d.agents) ? d.agents : []).filter((a) => a && typeof a === "object" && !Array.isArray(a)) };
+  } catch { return { agents: [] }; }
+}
 // Fresh numbers before a handoff: run the collector when data.json is over 5 minutes old (same sound
 // settings as the panel's own runs).
 function freshData() {
@@ -224,7 +245,9 @@ function sweep() {
         if (j.status === "finished" && j.guardDeferred && !j.guardChecked) recheck.push(j);
         continue;
       }
-      const f = jobDoneFile(j);
+      // A running record with no dir, worktree or tmp has nowhere a done file
+      // could be: jobDoneFile() throws on it, so treat the file as missing.
+      const f = (() => { try { return jobDoneFile(j); } catch { return ""; } })();
       let done = null, source = "";
       // A done file that exists but doesn't parse may just be caught mid-write:
       // it only counts once the agent is gone AND the file has sat unparseable
@@ -1967,7 +1990,7 @@ if (process.argv[1] === SELF) {
     const text = process.argv.slice(3).join(" ").trim();
     if (!text) fail("Usage: needs-owner TEXT");
     logAsk(path.join(store.dir, "asks.jsonl"), { reason: text });
-    store.update((s) => { if (s.goal) s.goal.needsOwner = text; });
+    store.update((s) => { if (s.goal && typeof s.goal === "object") s.goal.needsOwner = text; });
     store.log({ kind: "needs-you", text });
     out("noted: the goal queue waits for the owner after this goal");
   }
