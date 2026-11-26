@@ -123,6 +123,18 @@ const PLUGIN_CMD = { kind: "test", cmd: 'for t in bin/*.test.mjs; do node "$t" |
   assert.equal(s.ok, true, `cwd/HOME contract broke: ${s.output}`);
 }
 
+// runSuite runs Qt headless: the suite sandbox's env pins QT_QPA_PLATFORM to
+// offscreen even when the caller's session says wayland;xcb, so a test
+// running qml6 never aborts.
+{
+  const dir = path.join(root, "suite-qt");
+  fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "bin", "a.test.mjs"),
+    `if (process.env.QT_QPA_PLATFORM !== "offscreen") { console.log("QT_QPA_PLATFORM=" + process.env.QT_QPA_PLATFORM); process.exit(5); }\n`);
+  const s = runSuite(dir, { commands: [PLUGIN_CMD], env: { ...process.env, QT_QPA_PLATFORM: "wayland;xcb" } });
+  assert.equal(s.ok, true, `suite Qt env not offscreen: ${s.output}`);
+}
+
 // selfMerge: the default suite is runSuite with no commands, which never
 // passes, so nothing merges by default. The default merge is the --no-ff
 // selfMergeBranch — a copy on an unmoved main still lands as a merge commit.

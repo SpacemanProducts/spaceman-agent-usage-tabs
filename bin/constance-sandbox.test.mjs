@@ -200,5 +200,24 @@ assert.equal(busDirs(), busBefore, "a refused launch leaves nothing behind");
   }
 }
 
+// Qt tools run headless inside. The owner's session exports
+// QT_QPA_PLATFORM=wayland;xcb and WAYLAND_DISPLAY; passed through as they were,
+// a sandboxed `qml6 --help` found no display and aborted (SIGABRT, a core dump
+// and a crash notification on the desktop). The Wayland socket itself stays out.
+if (spawnSync("sh", ["-c", "command -v qml6"], { stdio: "ignore" }).status === 0) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
+  const qenv = { ...env, QT_QPA_PLATFORM: "wayland;xcb", WAYLAND_DISPLAY: "wayland-1", DISPLAY: ":0" };
+  const inner = `[ -z "$WAYLAND_DISPLAY" ] || { echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY" >&2; exit 90; }
+for s in /run/user/${uid}/wayland-*; do [ -e "$s" ] && { echo "socket $s visible" >&2; exit 91; }; done
+[ "$QT_QPA_PLATFORM" = offscreen ] || { echo "QT_QPA_PLATFORM=$QT_QPA_PLATFORM" >&2; exit 92; }
+exec qml6 --help`;
+  const q = spawnSync("bwrap", [...sandboxArgs({ agent: "grok", dir: proj, tmp, env: qenv }), "--", "sh", "-c", inner],
+    { env: sandboxEnv(qenv, "grok"), encoding: "utf8", timeout: 30e3 });
+  assert.equal(q.signal, null, `sandboxed qml6 --help was killed by ${q.signal}: ${q.stderr}`);
+  assert.equal(q.status, 0, `sandboxed qml6 --help exited ${q.status}: ${q.stderr}`);
+  assert.match(q.stdout + q.stderr, /Usage:/, "qml6 printed its help");
+  assert.ok(!sandboxArgs({ agent: "grok", dir: proj, tmp, env: qenv }).some((x) => /wayland/i.test(x)), "no Wayland path is bound into the box");
+} else console.log("constance-sandbox: qml6 not installed, headless Qt test skipped");
+
 fs.rmSync(base, { recursive: true, force: true });
 console.log("constance-sandbox: tests passed");

@@ -25,6 +25,7 @@ assert.match(p, /tests and build/);
 assert.match(p, /Don.t commit, stage, stash/, "workers are told their git data is read-only");
 assert.match(p, /Constance commits exactly the files you were allowed to change/);
 assert.doesNotMatch(p, /git add the files|git commit. with/, "no commit instruction");
+assert.ok(lines.includes("To check QML, use `QT_QPA_PLATFORM=offscreen qml6 <file>`."), "the prompt says how to check QML headless");
 assert.match(p, /Do not push or deploy unless the task explicitly says to/);
 assert.match(p, /Report in plain text: what you changed, the test and build results, and which files you touched/);
 assert.match(p, /No screenshots unless checking the look itself is the task/);

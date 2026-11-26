@@ -227,6 +227,11 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   assert.equal(sandboxEnv(dirty, "grok", true).DBUS_SESSION_BUS_ADDRESS, `unix:path=/run/user/${uid}/bus`, "withBus points at the proxy socket");
   assert.equal(sandboxEnv(dirty, "cursor").DISPLAY, ":99", "cursor's profile re-adds its dead DISPLAY");
   assert.ok(!("DISPLAY" in sandboxEnv(dirty, "grok")), "other agents get no display");
+  // Qt runs offscreen inside, overriding the session's wayland;xcb, for every agent.
+  for (const id of [...Object.keys(PROFILES), ""]) {
+    assert.equal(sandboxEnv({ ...dirty, QT_QPA_PLATFORM: "wayland;xcb" }, id).QT_QPA_PLATFORM, "offscreen", `${id || "no agent"}: Qt pinned offscreen`);
+    assert.equal(sandboxEnv(dirty, id, true).QT_QPA_PLATFORM, "offscreen", `${id || "no agent"}: offscreen with the bus too`);
+  }
 }
 
 // ============================================================ 6. error paths
@@ -287,7 +292,7 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
 {
   const e0 = sandboxEnv();
   assert.equal(e0.TMPDIR, "/tmp", "a no-arg env still gets TMPDIR");
-  assert.deepEqual(Object.keys(sandboxEnv({})).sort(), ["TMPDIR"], "an empty env yields only TMPDIR");
+  assert.deepEqual(Object.keys(sandboxEnv({})).sort(), ["QT_QPA_PLATFORM", "TMPDIR"], "an empty env yields only TMPDIR and the offscreen Qt pin");
   assert.equal(sandboxEnv(null).TMPDIR, "/tmp", "a null env doesn't throw");
   const src = { KEEP: "1", N: 5, DBUS_SESSION_BUS_ADDRESS: "unix:path=/x" };
   const out = sandboxEnv(src, "nobody", 1);
@@ -302,7 +307,7 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   assert.equal(ce.DBUS_SESSION_BUS_ADDRESS, `unix:path=/run/user/${uid}/bus`);
   // Profile env is per-agent: an unknown agent gets no extras at all.
   const ue = sandboxEnv({}, "not-an-agent");
-  assert.deepEqual(Object.keys(ue), ["TMPDIR"]);
+  assert.deepEqual(Object.keys(ue).sort(), ["QT_QPA_PLATFORM", "TMPDIR"]);
 }
 
 // ============================================================ 9. path and .git edge cases

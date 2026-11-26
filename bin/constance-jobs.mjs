@@ -91,6 +91,7 @@ export function handoffPrompt({ id, dir, task, files = [], account = null, workt
       : `Only edit these files: ${files.join(", ")}. Everything else is off-limits; if the task needs other files, say so in your report instead of editing them.`,
     `Run the project's tests and build, if it has them, and make sure they pass.`,
     `Don't commit, stage, stash or run any other git command that writes: this folder's git data is read-only for you. Leave your changes in the working tree; Constance commits exactly the files you were allowed to change.`,
+    `To check QML, use \`QT_QPA_PLATFORM=offscreen qml6 <file>\`.`,
     `Do not push or deploy${branch ? " or merge" : ""} unless the task explicitly says to.`,
     ``,
     `Report in plain text: what you changed, the test and build results, and which files you touched. No screenshots unless checking the look itself is the task. If you could not finish, say why in a few lines and stop.`,
