@@ -1332,6 +1332,7 @@ Panel {
   }
   // The raw log: folded away by default, filtered by job, worker and kind.
   property bool constanceLogOpen: false
+  property bool constanceJobsCollapsed: false   // the JOBS board folds to its header (with the count) until asked
   property string constanceLogJob: ""
   property string constanceLogWorker: ""
   property string constanceLogKind: ""
@@ -2415,7 +2416,7 @@ Panel {
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
         acceptedButtons: root.constanceLogPointing ? Qt.NoButton : Qt.LeftButton
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AlwaysOn; interactive: true }
 
         Column {
           id: column
@@ -3663,9 +3664,19 @@ Panel {
               visible: (root.constanceBoard.cards || []).length > 0 && (!root.constanceFinished || root.constanceLastOpen)
               width: parent.width
               spacing: Style.space(6)
-              PanelSectionHeader { width: parent.width; text: "JOBS" }
+              Item {
+                width: parent.width
+                height: jobsHeader.implicitHeight
+                PanelSectionHeader {
+                  id: jobsHeader
+                  width: parent.width
+                  text: (root.constanceJobsCollapsed ? "▸ " : "▾ ") + "JOBS" + (((root.constanceBoard.cards || []).length) ? " (" + (root.constanceBoard.cards || []).length + ")" : "")
+                  MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.constanceJobsCollapsed = !root.constanceJobsCollapsed }
+                }
+              }
               Flow {
                 id: cardFlow
+                visible: !root.constanceJobsCollapsed
                 width: parent.width
                 spacing: Style.space(6)
                 readonly property real half: Math.floor((width - spacing) / 2)
@@ -3823,7 +3834,7 @@ Panel {
               }
               // Token totals (bin/constance-tokens.mjs): this goal by agent, and today.
               Text {
-                visible: text !== ""
+                visible: !root.constanceJobsCollapsed && text !== ""
                 width: parent.width
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
@@ -5198,6 +5209,17 @@ Panel {
             }
           }
         }
+      }
+
+      // Jump to either end of the scroll view; the always-on bar covers dragging too.
+      Row {
+        anchors.right: parent.right
+        anchors.rightMargin: Style.space(14)
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Style.space(6)
+        spacing: Style.space(4)
+        MiniChip { label: "Top"; tip: "Scroll to the top"; onClicked: flick.contentY = 0 }
+        MiniChip { label: "Bottom"; tip: "Scroll to the bottom"; onClicked: flick.contentY = Math.max(0, flick.contentHeight - flick.height) }
       }
     }
   }
