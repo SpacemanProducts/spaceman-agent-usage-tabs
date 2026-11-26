@@ -4,11 +4,12 @@
 // Usage: settings-set.mjs <key> <true|false>   |   settings-set.mjs hidden <agentId> <true|false>
 //        |   settings-set.mjs volume <0-100>   |   settings-set.mjs order <id,id,...|reset>
 //        |   settings-set.mjs maxCopies <1-10>   |   settings-set.mjs constanceMilk <0-100>
-//        |   settings-set.mjs constanceBrain <claude|antigravity>   (alias: brain)
+//        |   settings-set.mjs constanceBrain <claude|antigravity|grok|codex|copilot>   (alias: brain)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { catalogIds } from "./catalog.mjs";
+import { BRAINS } from "./constance-brain.mjs";
 
 export const ALLOWED = ["hideUninstalledAgents", "showUnusedModels", "resetAnimation", "resetSound", "autoOpenOnReset", "handoffNote", "angryRobot", "skipPermissions", "constancePractice", "constanceUseItOrLoseIt", "welcomeDismissed"];
 export const CORE_IDS = ["claude", "antigravity", "grok", "codex", "copilot", "cursor", "opencode", "kimi", "kiro", "devin", "amp"];
@@ -41,10 +42,10 @@ export function applyMilk(current, value) {
   return { ...base, constanceMilk: Math.min(100, Math.max(0, n)) };
 }
 
-// Constance's brain backend: only "claude" or "antigravity", trimmed and lower-cased.
+// Constance's brain backend: one of constance-brain.mjs's BRAINS ids, trimmed and lower-cased.
 export function applyBrain(base, value) {
   const chosen = String(value).trim().toLowerCase();
-  if (chosen !== "claude" && chosen !== "antigravity") throw new Error(`constanceBrain must be claude or antigravity: ${value}`);
+  if (!Object.hasOwn(BRAINS, chosen)) throw new Error(`constanceBrain must be one of ${Object.keys(BRAINS).join(", ")}: ${value}`);
   const current = base && typeof base === "object" && !Array.isArray(base) ? base : {};
   return { ...current, constanceBrain: chosen };
 }

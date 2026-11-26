@@ -84,7 +84,7 @@ import { goalReport } from "./constance-report.mjs";
 import { memoryOf, addDecision, addProblem, solveProblem, addNext, beginStep, endStep, openStep, renderHandoff, handoffFile, writeHandoff, insidePlugins } from "./constance-handoff.mjs";
 import { nextStep, stepPrompt, resumedFrom, progressMark, MAX_NUDGES } from "./constance-steps.mjs";
 import { routeModel, logRoute } from "./constance-route.mjs";
-import { pickBrain, topModel, brainLimits, brainCommand, brainWall, milkLabel } from "./constance-brain.mjs";
+import { BRAINS, pickBrain, topModel, brainLimits, brainCommand, brainWall, milkLabel } from "./constance-brain.mjs";
 import { weekStatus, readWeekState, writeWeekState } from "./constance-weekwire.mjs";
 import { buildSummary } from "./constance-summary.mjs";
 
@@ -152,24 +152,26 @@ function freshData() {
   }
   return d;
 }
-// Her planning brain (constance-brain.mjs): Claude Code by default, or Antigravity's
-// `agy` when the owner picked it and opted it into the sandboxed keyring. brainOf()/paceNow()
+// Her planning brain (constance-brain.mjs): Claude Code by default, or another
+// agent's CLI when the owner picked it and it passed its opt-ins. brainOf()/paceNow()
 // hand pace() the brain's own limits — for agy that's only the quota pool her chosen model
 // burns, renamed to plain Session/Weekly so the pacing windows line up with Claude's.
 const brainNow = () => pickBrain(readSettings());
-const agyOf = (d) => (d.agents || []).find((a) => a.id === "antigravity");
-const brainTop = (d, b) => (b.id === "antigravity" ? topModel(agyOf(d), readSettings()) : null);
-const brainName = (b) => (b && b.id === "antigravity" ? "Antigravity" : "Claude");
-const brainCli = (id) => (id === "antigravity" ? "agy" : "claude");
-// The model one brain run spawns with: agy's picked model id, else her Claude model.
+const agentOf = (d, id) => (d.agents || []).find((a) => a.id === id);
+const capId = (id) => String(id || "").replace(/^./, (c) => c.toUpperCase());
+// Any non-Claude brain burns its own agent's top model; Claude keeps her goal model.
+const brainTop = (d, b) => (b.id === "claude" ? null : topModel(agentOf(d, b.id), readSettings()));
+const brainName = (d, b) => (b && b.id !== "claude" ? (agentOf(d, b.id)?.name || capId(b.id)) : "Claude");
+const brainCli = (id) => (BRAINS[id]?.cli || "claude");
+// The model one brain run spawns with: a non-Claude brain's picked model id, else her Claude model.
 function brainModel(d, b) {
-  if (b.id === "antigravity") return brainTop(d, b)?.id || "";
+  if (b.id !== "claude") return brainTop(d, b)?.id || "";
   return store.read().goal?.model || "opus";
 }
 function brainOf(d) { const b = brainNow(); return brainLimits(d, b.id, brainTop(d, b)); }
 function paceNow(d) {
   const b = brainNow();
-  return pace(brainLimits(d, b.id, brainTop(d, b)), Date.now(), undefined, { name: brainName(b) });
+  return pace(brainLimits(d, b.id, brainTop(d, b)), Date.now(), undefined, { name: brainName(d, b) });
 }
 
 // Agents the owner lets reach the desktop keyring from inside the sandbox
@@ -186,9 +188,10 @@ function boxProblem(id) {
 }
 const judged = (d) => {
   const list = judgeAll(d, Date.now(), { sandbox: boxProblem });
-  // While agy is her brain it never doubles as a worker.
-  if (brainNow().id === "antigravity")
-    for (const a of list) if (a.id === "antigravity") { a.available = false; a.reason = "it is her brain right now"; }
+  // While a non-Claude agent is her brain it never doubles as a worker.
+  const brainId = brainNow().id;
+  if (brainId !== "claude")
+    for (const a of list) if (a.id === brainId) { a.available = false; a.reason = "it is her brain right now"; }
   return list;
 };
 
@@ -1935,7 +1938,7 @@ async function drive() {
       // limit is gone (Keep going is the owner's own call and doesn't need one).
       const kept = keptGoing(p);
       if (!canResume(p, brainOf(readData()))) {
-        const why = `Waiting for a current reading of ${brainName(brainNow())}'s limits before picking the goal up again.`;
+        const why = `Waiting for a current reading of ${brainName(readData(), brainNow())}'s limits before picking the goal up again.`;
         if (g.pauseReason !== why) { store.update((s) => { s.goal.pauseReason = why; }); store.log({ kind: "paused", text: why }); }
         pausedLogged = true;
         await sleep(60e3); continue;
@@ -1995,7 +1998,7 @@ async function drive() {
     // settings.constanceBrain between runs. Wanted-but-not-allowed is told to
     // the owner once per goal, then she quietly stays on Claude Code.
     const b = brainNow();
-    if (b.wanted === "antigravity" && !b.ok && !g.brainNoteLogged) {
+    if (b.wanted !== "claude" && !b.ok && !g.brainNoteLogged) {
       store.update((s) => { if (s.goal) s.goal.brainNoteLogged = true; });
       store.log({ kind: "note", text: b.why });
     }
@@ -2012,7 +2015,7 @@ async function drive() {
       const n = (st.goal.nudges || 0) + 1;
       store.update((x) => { if (x.goal) x.goal.nudges = n; });
       nudgeText = `The goal is not finished: ${openWork(st) || "work is still open"}. The last session ended without moving it. Keep going: delegate or review, don't ask.`;
-      store.log({ kind: "note", text: `${brainName(b)} ended a step but the goal is unfinished (${openWork(st)}); a fresh session picks it up, nudge ${n} of ${MAX_NUDGES}.` });
+      store.log({ kind: "note", text: `${brainName(dNow, b)} ended a step but the goal is unfinished (${openWork(st)}); a fresh session picks it up, nudge ${n} of ${MAX_NUDGES}.` });
     }
     st = store.read();
     const batch = kind === "review" ? step.jobs.map((id) => st.jobs.find((j) => j.id === id)).filter(Boolean).map((j) => reviewPacket(j, st)) : [];
@@ -2064,7 +2067,7 @@ async function drive() {
       // The pause reason must name the wall even when its stated reset already
       // passed (the readings then show "on pace"): resumePlan only follows
       // wall.json for a pause whose reason starts "<Brain> said it hit its limit".
-      const wallReason = `${brainName(b)} said it hit its limit; paused until ${clock(wall.until)}.`;
+      const wallReason = `${brainName(freshData(), b)} said it hit its limit; paused until ${clock(wall.until)}.`;
       store.update((s) => { if (s.goal) { s.goal.status = "paused"; s.goal.pauseReason = wallReason; } });
       store.log({ kind: "paused", text: wallReason });
       pausedLogged = true;
@@ -2083,7 +2086,7 @@ async function drive() {
     close(`a failed run (exit ${code})`);
     if (++failures >= 3) {
       const last = report.split("\n").map((l) => l.trim()).filter(Boolean).at(-1) || "";
-      const reason = `${brainName(b)} exited with code ${code} three times: ${last ? last.slice(0, 200) : "no output"}`;
+      const reason = `${brainName(freshData(), b)} exited with code ${code} three times: ${last ? last.slice(0, 200) : "no output"}`;
       store.update((s) => { s.goal.status = "failed"; s.goal.finishedAt = Date.now(); s.goal.failReason = reason; });
       logStepTotals();
       store.log({ kind: "failed", text: reason });
@@ -2092,7 +2095,7 @@ async function drive() {
       if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
     }
-    store.log({ kind: "note", text: `${brainName(b)} exited with code ${code}; retrying in a minute.` });
+    store.log({ kind: "note", text: `${brainName(freshData(), b)} exited with code ${code}; retrying in a minute.` });
     await sleep(60e3);
   }
 }
@@ -2387,10 +2390,10 @@ function statusPayload() {
   if (pline) board.now += ` · ${pline}`;
   lastProgressArgs = pargs;
   // The brain picker the panel shows: the live pick (wanted vs ok), the model it
-  // would run on (agy's top model name, else her Claude model) and its milk label.
+  // would run on (the non-Claude brain's top model name, else her Claude model) and its milk label.
   const b = brainNow();
   const brain = { id: b.id, name: b.name, wanted: b.wanted, ok: b.ok, why: b.why || "",
-    model: b.id === "antigravity" ? (brainTop(d, b)?.name || "") : modelName(s.goal?.model || "opus"),
+    model: b.id !== "claude" ? (brainTop(d, b)?.name || "") : modelName(s.goal?.model || "opus"),
     milkLabel: milkLabel(b.id) };
   return { goal: s.goal, board, progress: { line: pline }, tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p, brain,
     leverage: leverageView(s, tv.goal?.total ?? null), milk: milkStatus(), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
