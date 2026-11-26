@@ -1,7 +1,7 @@
 // The job board, the "Now" line and goal history: each job's status in the owner's words, a compact
 // card, a plain sentence of what is happening, and past goals (recorded, or rebuilt from the log).
 import assert from "node:assert/strict";
-import { jobStatus, jobTitle, jobResult, cards, nowLine, goalRecord, goalsFromLog, history, took } from "./constance-board.mjs";
+import { jobStatus, jobTitle, jobResult, cards, nowLine, goalRecord, goalsFromLog, history, took, meters } from "./constance-board.mjs";
 
 const PRACTICE = "(practice run: the prompt is in the log, nothing was launched)";
 assert.equal(jobStatus({ status: "waiting" }), "queued");
@@ -99,4 +99,40 @@ assert.equal(h2[2].leverage, lev);
 const h3 = history({ records: [], log, goal: null });
 assert.equal(h3.find((r) => r.text === "Old goal").summary, "2 jobs · 2h 46m", "log-rebuilt goals have no item counts to show");
 assert.equal(h3.find((r) => r.text === "Practice goal").summary, "1 job · 33m");
+
+// The stage bar and Rev Meter (bin/constance-meters.mjs) as the board carries them.
+const mGoal = { id: "mg", text: "1. a\n2. b", status: "running", startedAt: 1000 };
+const mNow = 61e3;
+// Preparing: a running goal with no jobs stays red and small even when the
+// checklist's items are all still todo — they only count once work is handed out.
+const mPrep = meters({ goal: mGoal, items: [{ state: "todo" }, { state: "todo" }], jobs: [], now: mNow });
+assert.equal(mPrep.stage.stage, "preparing"); assert.equal(mPrep.stage.hue, 0); assert.equal(mPrep.stage.active, true);
+assert.match(mPrep.stage.label, /^Preparing/);
+// Checklist: once a job exists the items drive the bar — yellow, mid-span.
+const mJobs = [{ id: 1, goal: "mg", agent: "grok", status: "running", startedAt: 2000 }];
+const mCheck = meters({ goal: mGoal, items: [{ state: "done" }, { state: "working" }], jobs: mJobs, now: mNow });
+assert.equal(mCheck.stage.stage, "checklist"); assert.equal(mCheck.stage.hue, 55);
+assert.match(mCheck.stage.label, /1 of 2 done/);
+assert.ok(mCheck.stage.overall >= 0.2 && mCheck.stage.overall < 0.85);
+// Review: every item done or back — green, near the end of the bar.
+const mReview = meters({ goal: mGoal, items: [{ state: "done" }, { state: "review" }], jobs: mJobs, now: mNow });
+assert.equal(mReview.stage.stage, "review"); assert.equal(mReview.stage.hue, 120);
+assert.ok(mReview.stage.overall >= 0.85 && mReview.stage.overall < 1);
+// Done: the bar fills and stops; a paused goal sits still (active false).
+const mDone = meters({ goal: { ...mGoal, status: "done" }, items: [{ state: "done" }, { state: "done" }], jobs: mJobs, now: mNow });
+assert.equal(mDone.stage.stage, "done"); assert.equal(mDone.stage.overall, 1); assert.equal(mDone.stage.active, false);
+const mPaused = meters({ goal: { ...mGoal, status: "paused", pauseReason: "Session at 91%" }, items: [{ state: "done" }, { state: "working" }], jobs: mJobs, now: mNow });
+assert.equal(mPaused.stage.stage, "checklist"); assert.equal(mPaused.stage.active, false, "a paused goal's bar does not animate");
+// No goal: no stage at all (the panel hides the bar), but rev still reports.
+assert.equal(meters({}).stage, null);
+assert.equal(meters({}).rev.grade, "idle");
+// Rev with measurable tokens: score against the 5M target and the lead's share.
+const mRev = meters({ goal: mGoal, jobs: mJobs, now: mNow, running: 3, lanes: 1, slots: 8, perPct: 5e6, workerTokens: 9e6, leadTokens: 1e6 });
+assert.equal(mRev.rev.score, 1); assert.equal(mRev.rev.share, 0.1); assert.equal(mRev.rev.grade, "cooking");
+assert.equal(mRev.rev.needle, 0.5);
+// Rev without measurable tokens: score and share stay null — the panel shows nothing for them.
+const mCold = meters({ goal: mGoal, jobs: mJobs, now: mNow, running: 1, slots: 4 });
+assert.equal(mCold.rev.score, null); assert.equal(mCold.rev.share, null);
+assert.equal(mCold.rev.needle, 0.25); assert.equal(mCold.rev.grade, "warming up");
+assert.equal(meters({ goal: mGoal, jobs: mJobs, perPct: NaN }).rev.score, null, "a non-number perPct is not a score");
 console.log("constance-board: ok");

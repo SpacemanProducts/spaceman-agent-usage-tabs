@@ -3,6 +3,7 @@
 // formats elapsed time live.
 import { jobItems, checklist } from "./constance-checklist.mjs";
 import { jobTokens, fmtTokens } from "./constance-tokens.mjs";
+import { stageProgress, revMeter } from "./constance-meters.mjs";
 
 const isPractice = (j) => String(j.summary || "").startsWith("(practice run");
 
@@ -81,6 +82,32 @@ export function nowLine({ goal = null, jobs = [], names = (id) => id, goalQueue 
   if (review) parts.push(`${plural(review, "job")} waiting for review`);
   if (waiting) parts.push(`${plural(waiting, "job")} waiting to start`);
   return parts.join("; ") + "." + next;
+}
+
+// ---------------------------------------------------------------- meters
+
+// The board's two moving parts (bin/constance-meters.mjs): `stage`, the goal's
+// progress bar, and `rev`, the Rev Meter. Spread into the board so the panel
+// reads board.stage and board.rev.
+//   items        the checklist's items (checklist(...).items or the whole result), or [] — they only
+//                count once a job for the goal exists, or an all-todo list would
+//                fake a "checklist" stage while she is still preparing
+//   steps        the goal's logged step count (memoryOf(goal).steps.length)
+//   prepHistory  how long preparing took on earlier goals (start to first job), ms
+//   running      workers running; lanes  lead lanes running; slots  copy slots open + running
+//   perPct       free-agent tokens per 1% of her session (the leverage view), or null
+//   workerTokens / leadTokens  this goal's measured token split, or null
+export function meters({ goal = null, items = [], jobs = [], steps = 0, prepHistory = [], now = Date.now(),
+  running = 0, lanes = 0, slots = 0, perPct = null, workerTokens = null, leadTokens = null } = {}) {
+  const handedOut = !!goal && jobs.some((j) => !j.goal || j.goal === goal.id);
+  const list = Array.isArray(items) ? items : (items && Array.isArray(items.items) ? items.items : []);
+  // Goal-less jobs count as this goal's everywhere else on the board; tag them so
+  // stageProgress's strict goal filter agrees.
+  const mine = goal ? jobs.map((j) => (j.goal ? j : { ...j, goal: goal.id })) : jobs;
+  return {
+    stage: stageProgress({ goal, items: handedOut ? list : [], jobs: mine, steps, prepHistory, now }),
+    rev: revMeter({ running, lanes, slots, perPct, workerTokens, leadTokens }),
+  };
 }
 
 // ---------------------------------------------------------------- history
