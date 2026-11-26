@@ -16,7 +16,12 @@ import { conflicts } from "./constance-jobs.mjs";
 import { roomForCopy, rampGap, RAMP } from "./constance-ramp.mjs";
 
 let root = "";
-for (const base of ["/var/tmp", os.tmpdir()]) { try { root = fs.mkdtempSync(path.join(base, "constance-sec-")); break; } catch {} }
+for (const base of ["/var/tmp", os.tmpdir()]) {
+  if (!path.isAbsolute(base)) continue;
+  try { root = fs.mkdtempSync(path.join(base, "constance-sec-")); break; } catch {}
+}
+if (!root) root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-sec-"));
+assert.ok(path.isAbsolute(root), "scratch root must be absolute");
 const home = path.join(root, "home");
 fs.mkdirSync(path.join(home, "Projects"), { recursive: true });
 fs.writeFileSync(path.join(home, "secret.txt"), "owner secret\n");

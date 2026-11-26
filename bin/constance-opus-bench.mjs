@@ -109,12 +109,15 @@ echo "{\"summary\": \"added ${"$"}{name%.*}; its check passes\", \"commit\": \"$
 export async function runBench({ cli = path.join(HERE, "constance.mjs"), items = 6, timeoutMs = 240e3, keep = false } = {}) {
   let root = "";
   for (const base of ["/var/tmp", path.join(os.homedir(), ".cache")]) {
+    if (!path.isAbsolute(base)) continue;
     try { fs.mkdirSync(base, { recursive: true }); root = fs.mkdtempSync(path.join(base, "constance-bench-")); break; } catch {}
   }
   if (!root) root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-bench-"));
+  if (!path.isAbsolute(root)) throw new Error("scratch root must be absolute");
   const state = path.join(root, "state"), bin = path.join(root, "bin"), repo = path.join(root, "repo"), sessions = path.join(root, "sessions");
   const tabs = path.join(state, "omarchy/agent-usage-tabs"), cdir = path.join(tabs, "constance");
   for (const d of [tabs, bin, repo, sessions]) fs.mkdirSync(d, { recursive: true });
+  if (!path.isAbsolute(bin)) throw new Error("the fake bin dir on PATH must be absolute");
   const git = (...a) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8" });
   git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t");
   fs.writeFileSync(path.join(repo, "a.txt"), "a\n"); git("add", "a.txt"); git("commit", "-qm", "init");
