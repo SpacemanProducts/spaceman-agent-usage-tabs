@@ -24,15 +24,18 @@ const CLI = new URL("./constance.mjs", import.meta.url).pathname;
 const underTmp = (p) => { const r = path.resolve(p); return r === "/tmp" || r.startsWith("/tmp/"); };
 let root = "";
 for (const base of ["/var/tmp", path.join(os.homedir(), ".cache"), path.join(os.homedir(), ".local", "share"), os.tmpdir()]) {
-  if (underTmp(base)) continue;
+  if (!path.isAbsolute(base) || underTmp(base)) continue;
   try { fs.mkdirSync(base, { recursive: true }); root = fs.mkdtempSync(path.join(base, "constance-ten-copies-")); break; } catch {}
 }
-if (!root || underTmp(root)) {
+if (!root) root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-ten-copies-"));
+assert.ok(path.isAbsolute(root), "scratch root must be absolute");
+if (underTmp(root)) {
   console.log("skip: no writable scratch folder outside /tmp");
   process.exit(0);
 }
 
 const bin = path.join(root, "bin"), fakeHome = path.join(root, "home"), state = path.join(root, "state");
+assert.ok(path.isAbsolute(bin), "fake bin dir must be absolute before it goes on PATH");
 const tabs = path.join(state, "omarchy/agent-usage-tabs");
 const storeDir = path.join(tabs, "constance");
 const repo = path.join(root, "repo"), worktrees = path.join(root, "worktrees"), proc = path.join(root, "proc");

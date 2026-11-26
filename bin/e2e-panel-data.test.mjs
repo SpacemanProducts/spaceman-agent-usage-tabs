@@ -30,10 +30,13 @@ const HERE = new URL(".", import.meta.url).pathname;
 // ---- scratch world (same shape as constance.test.mjs) ---------------------
 let root = "";
 for (const base of ["/var/tmp", path.join(os.homedir(), ".cache")]) {
+  if (!path.isAbsolute(base)) continue;
   try { fs.mkdirSync(base, { recursive: true }); root = fs.mkdtempSync(path.join(base, "constance-panel-e2e-")); break; } catch {}
 }
 if (!root) root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-panel-e2e-"));
+assert.ok(path.isAbsolute(root), "scratch root must be absolute");
 const state = path.join(root, "state"), bin = path.join(root, "bin"), repo = path.join(root, "repo");
+assert.ok(path.isAbsolute(bin), "fake bin dir must be absolute before it goes on PATH");
 const fakeHome = path.join(root, "home");
 const tabs = path.join(state, "omarchy/agent-usage-tabs");
 const cdir = path.join(tabs, "constance");
