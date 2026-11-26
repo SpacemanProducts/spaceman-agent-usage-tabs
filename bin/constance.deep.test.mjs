@@ -5,7 +5,9 @@
 // XDG_CACHE_HOME and XDG_DATA_HOME all point inside it, so nothing here can
 // touch the real home folder, the real session bus (a fake busctl sleeps) or
 // the real notify-send. data.json is always written fresh so the collector
-// never runs. Plain node asserts like the other bin/*.test.mjs.
+// never runs; the wrong-shape variants that do trigger it get a `node` stub
+// (see world()) that answers collect.mjs instantly instead of running it.
+// Plain node asserts like the other bin/*.test.mjs.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -15,6 +17,9 @@ import { spawn, spawnSync } from "node:child_process";
 const CLI = new URL("./constance.mjs", import.meta.url).pathname;
 
 const worlds = [];
+// Temp roots are removed on ANY exit — including a failed assertion — so a
+// red run can't leave fake-home worlds behind in /tmp.
+process.on("exit", () => { for (const w of worlds) { try { fs.rmSync(w.root, { recursive: true, force: true }); } catch {} } });
 function world() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-deep-"));
   const w = { root };
@@ -30,6 +35,15 @@ function world() {
   const bin = path.join(root, "bin"); fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, "busctl"), "#!/bin/bash\nsleep 30\n", { mode: 0o755 });
   fs.writeFileSync(path.join(bin, "notify-send"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+  // freshData() refreshes a stale data.json by spawning `node collect.mjs`.
+  // The real collector would run every agent CLI inside the fake home — mise
+  // downloads toolchains into the fake XDG cache (~800 MB per run) and the
+  // rest can reach the network. Answer collect.mjs instantly; hand every
+  // other `node ...` call to the real binary.
+  fs.writeFileSync(path.join(bin, "node"), `#!/bin/bash
+for a in "$@"; do case "$a" in */collect.mjs|collect.mjs) exit 0 ;; esac; done
+exec ${process.execPath} "$@"
+`, { mode: 0o755 });
   w.env = { ...process.env, HOME: w.home, SQUAD_PROJECTS: path.join(w.home, "Projects"),
     XDG_STATE_HOME: w.state, XDG_CONFIG_HOME: path.join(root, "config"), XDG_CACHE_HOME: path.join(root, "cache"),
     XDG_DATA_HOME: path.join(w.home, ".local", "share"), CONSTANCE_PROC: proc,
@@ -321,8 +335,9 @@ function battery(w, commands = SAFE_COMMANDS(w), timeoutMs = 60000) { for (const
   ]) {
     const w = world(); writeTabs(w, "data.json", typeof content === "function" ? content() : content);
     // Payloads without a fresh generatedAt (null, [], 42) make readData() report
-    // no data, so agents/pace/spare run the collector synchronously first — up
-    // to its own 120 s timeout. Give those commands 180 s; every assertion stays.
+    // no data, so agents/pace/spare refresh first — freshData() still spawns
+    // collect.mjs, but the world's `node` stub answers it instantly. The 180 s
+    // budget stays as headroom; every assertion stays.
     battery(w, FULL_COMMANDS(w), 180000);
     console.log(`  data.json wrong-shape variant survived: ${name}`);
   }
@@ -398,7 +413,7 @@ function battery(w, commands = SAFE_COMMANDS(w), timeoutMs = 60000) { for (const
 }
 
 // ------------------------------------------------------------------ cleanup
-for (const w of worlds) { try { fs.rmSync(w.root, { recursive: true, force: true }); } catch {} }
+// (the process "exit" handler above removes every world's temp root, pass or fail)
 console.log("constance.deep: tests passed");
 
 // The crash cases this file used to document as BUG notes are regression
