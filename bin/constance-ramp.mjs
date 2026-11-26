@@ -1,7 +1,7 @@
 // How many copies of one agent Constance may run, and whether the machine has
-// room to start one more right now. Copies start as fast as work is ready:
-// the ONLY thing that may hold a new copy is low free memory. A copy that
-// can't start yet is held, and starts by itself later.
+// room to start one more right now: enough free memory (read fresh before each
+// start) and a few seconds since the previous start. A copy that can't start
+// yet is held, and starts by itself later.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,11 +18,22 @@ export function copyLimit(id, settings = {}) {
 }
 
 // Room for one more copy: at least minFreeBytes and minFreeShare of memory
-// available. Load and time since the last copy no longer matter.
+// available, read fresh before EVERY start, and at least minGapMs since the
+// last copy started. The gap matters because a CLI takes a few seconds to
+// allocate: without it ten copies all read the same free memory in the same
+// second and start together (finding 17). CONSTANCE_RAMP_GAP_MS overrides the
+// gap (the tests use 0).
 export const RAMP = {
   minFreeBytes: 2 * 1024 ** 3,
   minFreeShare: 0.1,
+  minGapMs: 5000,
 };
+
+export function rampGap(env = process.env, ramp = RAMP) {
+  const v = env.CONSTANCE_RAMP_GAP_MS;
+  const n = v === undefined || v === "" ? NaN : Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : ramp.minGapMs;
+}
 
 // Reads /proc (or CONSTANCE_PROC, a fake one in tests). null when unreadable.
 export function readMachine(proc = process.env.CONSTANCE_PROC || "/proc", cpus = os.availableParallelism?.() || os.cpus().length || 1) {
@@ -38,11 +49,12 @@ export function readMachine(proc = process.env.CONSTANCE_PROC || "/proc", cpus =
 
 const gib = (b) => (b / 1024 ** 3).toFixed(1);
 
-// { ok, reason }. `running` = copies of this agent already started; `lastStartAt`
-// is accepted for callers' convenience but ignored. The first copy only needs
-// readable, healthy numbers; an unreadable machine allows the first copy and
-// holds the rest.
-export function roomForCopy(machine, { running = 0, lastStartAt = 0, now = Date.now(), ramp = RAMP } = {}) {
+// { ok, reason }. `running` = copies of this agent already started;
+// `lastStartAt` = when the newest copy started (0 = never). An unreadable
+// machine allows the first copy and holds the rest.
+export function roomForCopy(machine, { running = 0, lastStartAt = 0, now = Date.now(), ramp = RAMP, gapMs = rampGap(process.env, ramp) } = {}) {
+  const since = now - (Number(lastStartAt) || 0);
+  if (lastStartAt > 0 && since < gapMs) return { ok: false, reason: `spacing copy starts: the last one started ${Math.max(0, Math.round(since / 1000))} s ago (next after ${Math.round(gapMs / 1000)} s)` };
   if (!machine) return running === 0 ? { ok: true, reason: "" } : { ok: false, reason: "can't read the machine's load and memory, so only one copy runs" };
   const memNeed = Math.max(ramp.minFreeBytes, ramp.minFreeShare * machine.memTotal);
   if (machine.memAvailable < memNeed) return { ok: false, reason: `low memory: ${gib(machine.memAvailable)} GiB free (starts at ${gib(memNeed)} GiB)` };

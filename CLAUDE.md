@@ -208,6 +208,17 @@ keeps the developer in flow:
   after 60 s), cleared once the guard and the self-merge decision are done; `wait` skips such jobs and
   `review` refuses them, so she is never handed a job a self-merge is about to take.
 
+  Since 1.50.2 (security review, 2026-11-25): workers can't write ANY git data or `.constance/`
+  (read-only binds; `protectedPaths` in `bin/constance-sandbox.mjs`) and are told not to commit;
+  `commitForJob` in `bin/constance.mjs` commits the job's own changed, listed files on the host after
+  the guard. Every host git call on a job folder uses `safeGit` (`bin/constance-git.mjs`). The guard
+  attributes no commit to a job except the one Constance vouches for, so it never reverts others' work.
+  Self-merge needs `testCommands()` (rules.md `test:`/`build:`, committed package.json, or bin/*.test.mjs)
+  run via `suiteLaunch` (no net, no /run, empty env); an agent's "tests pass" is never a signal.
+  `mergeBranch` refuses a checkout with tracked uncommitted changes. Accept locks first (`acceptMerge`,
+  `CONSTANCE_ACCEPT_WAIT_MS`). A dirty worktree at self-merge -> status `failed` (frees the slot).
+  Copy starts are spaced (`RAMP.minGapMs` 5 s, `CONSTANCE_RAMP_GAP_MS`), memory read per start.
+
 ## Working rules
 
 - Back up `~/.config/omarchy/shell.json` and the plugin folder before editing —

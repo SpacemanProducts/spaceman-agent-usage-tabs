@@ -10,27 +10,78 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { mergeBranch, repoBranch } from "./constance-worktree.mjs";
 import { stateDir } from "./constance-jobs.mjs";
+import { safeGit, trackedDirty } from "./constance-git.mjs";
+import { suiteLaunch } from "./constance-sandbox.mjs";
 
-const git = (dir, ...args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+const git = (dir, ...args) => safeGit(dir, args);
 
-// Run every bin/*.test.mjs in dir under node with cwd dir, each with HOME
-// pointed at a fresh temp folder that is removed afterwards, so the suite
-// never sees the real home. ok only when every file exits 0; output keeps the
-// last 2000 chars of what the tests printed.
-export function runSuite(dir, { env = process.env } = {}) {
-  const bin = path.join(dir, "bin");
-  const files = fs.existsSync(bin) ? fs.readdirSync(bin).filter((f) => f.endsWith(".test.mjs")).sort() : [];
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "constance-suite-home-"));
+// ---------------------------------------------------------------- the project's real test commands
+// A self-merge needs the project's own test (and build) commands. They come
+// only from places the worker can't touch:
+//   1. <repo>/.constance/rules.md in the main checkout (read-only to workers):
+//      lines like `test: npm test` or `- Build command: \`make\``.
+//   2. package.json as it is on the repo's current branch (git show HEAD:…),
+//      never the copy's edited one: scripts.test -> `npm test`, scripts.build ->
+//      `npm run build`. npm's placeholder "no test specified" doesn't count.
+//   3. This plugin's own convention, when the current branch has bin/*.test.mjs:
+//      run every one of them (from the worktree, so new tests run too).
+// No command found means no self-merge: the job goes to the normal review.
+const RULE_RE = /^\s*(?:[-*]\s*)?(test|build)(?:\s+command)?\s*:\s*(.+?)\s*$/i;
+const NPM_PLACEHOLDER = /no test specified/i;
+
+export function testCommands(repo) {
+  const cmds = [];
+  let rules = "";
+  try { rules = fs.readFileSync(path.join(repo, ".constance", "rules.md"), "utf8"); } catch {}
+  for (const line of rules.split("\n")) {
+    const m = line.match(RULE_RE);
+    if (!m) continue;
+    const cmd = m[2].replace(/^`+|`+$/g, "").trim();
+    if (cmd) cmds.push({ kind: m[1].toLowerCase(), cmd, source: ".constance/rules.md" });
+  }
+  if (!cmds.length) {
+    const pj = git(repo, "show", "HEAD:package.json");
+    if (pj.status === 0) {
+      try {
+        const scripts = JSON.parse(pj.stdout).scripts || {};
+        if (typeof scripts.test === "string" && scripts.test.trim() && !NPM_PLACEHOLDER.test(scripts.test)) cmds.push({ kind: "test", cmd: "npm test", source: "package.json" });
+        if (typeof scripts.build === "string" && scripts.build.trim()) cmds.push({ kind: "build", cmd: "npm run build", source: "package.json" });
+      } catch {}
+    }
+  }
+  if (!cmds.length) {
+    const ls = git(repo, "ls-tree", "--name-only", "HEAD", "bin/");
+    if (ls.status === 0 && ls.stdout.split("\n").some((f) => /^bin\/[^/]+\.test\.mjs$/.test(f))) {
+      cmds.push({ kind: "test", cmd: 'for t in bin/*.test.mjs; do node "$t" || { echo "FAILED: $t"; exit 1; }; done', source: "bin/*.test.mjs" });
+    }
+  }
+  return cmds;
+}
+
+// Run the commands in dir (a copy's worktree) inside the suite sandbox
+// (constance-sandbox.mjs suiteLaunch: no network, no bus, no ssh-agent, fake
+// HOME/XDG). ok only when there was at least one command and every one exited
+// 0; an empty list is `{ ok: false, empty: true }`. Output keeps the last 2000
+// chars. `launch` is injectable for tests.
+export function runSuite(dir, { commands = [], env = process.env, timeoutMs = 45 * 60e3, launch = suiteLaunch } = {}) {
+  if (!commands.length) return { ok: false, empty: true, failed: [], output: "no test command for this project" };
   const chunks = [];
   const failed = [];
-  try {
-    for (const f of files) {
-      const r = spawnSync(process.execPath, [path.join(bin, f)], { cwd: dir, encoding: "utf8", env: { ...env, HOME: home } });
-      chunks.push(r.stdout || "", r.stderr || "");
-      if (r.status !== 0 || r.error) failed.push(f);
+  for (const c of commands) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "constance-suite-"));
+    try {
+      const box = launch(c.cmd, { dir, tmp, env });
+      const [cmd, ...args] = box.cmd;
+      const r = spawnSync(cmd, args, { cwd: dir, encoding: "utf8", env: box.env, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 });
+      chunks.push(`$ ${c.cmd}\n`, r.stdout || "", r.stderr || "");
+      if (r.status !== 0 || r.error) failed.push(c.cmd);
+    } catch (e) {
+      chunks.push(`$ ${c.cmd}\n${e.message}\n`);
+      failed.push(c.cmd);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
+    if (failed.length) break;
   }
   return { ok: failed.length === 0, failed, output: chunks.join("").slice(-2000) };
 }
@@ -40,7 +91,10 @@ export function runSuite(dir, { env = process.env } = {}) {
 // and so undoes all of the copy's commits, not just its last.
 export const selfMergeBranch = (repo, branch) => mergeBranch(repo, branch, { noFf: true });
 
-const CHECKS = ["ownTests", "guard", "diff"];
+// The report regex is gone: the agent's own word is never a merge signal. The
+// checks are the guard's clean bill and the branch diff; the suite (the
+// project's real commands, sandboxed) is the test signal.
+const CHECKS = ["guard", "diff"];
 
 // Merge a finished copy's branch once its checks and the whole suite pass.
 // The suite runs first, outside the merge lock (it is the slow part). Then,
@@ -53,17 +107,27 @@ const CHECKS = ["ownTests", "guard", "diff"];
 export function selfMerge({ repo, worktree, branch, checks = {}, suite = runSuite, merge = selfMergeBranch, lock = (fn) => fn() }) {
   const failed = CHECKS.find((k) => checks[k] !== true);
   if (failed) return { merged: false, reason: `${failed} check failed` };
+  // A worktree with uncommitted tracked changes can't be rebased, and its tests
+  // would not be testing what merges: the job failed, it is not a conflict.
+  const dirty = trackedDirty(worktree);
+  if (dirty === null || dirty.length) return { merged: false, failed: true, reason: dirty ? `worktree has uncommitted changes: ${dirty.slice(0, 5).join(", ")}` : "worktree status unreadable" };
   const s = suite(worktree);
+  if (s.empty) return { merged: false, noSuite: true, reason: "no test command for this project, so no self-merge" };
   if (!s.ok) return { merged: false, reason: "full test suite failed", failed: s.failed || [] };
   return lock(() => {
     const base = repoBranch(repo);
     let moved = false;
     if (base) {
+      // The suite may have left changes behind; a dirty tree can't rebase.
+      const d2 = trackedDirty(worktree);
+      if (d2 === null || d2.length) return { merged: false, failed: true, reason: d2 ? `worktree has uncommitted changes: ${d2.slice(0, 5).join(", ")}` : "worktree status unreadable" };
       const head = () => git(worktree, "rev-parse", "HEAD").stdout.trim();
       const before = head();
       const rb = git(worktree, "rebase", base);
       if (rb.status !== 0) {
-        git(worktree, "rebase", "--abort");
+        // Only a rebase that actually started is aborted.
+        const gd = git(worktree, "rev-parse", "--absolute-git-dir").stdout.trim();
+        if (gd && ["rebase-merge", "rebase-apply"].some((d) => fs.existsSync(path.join(gd, d)))) git(worktree, "rebase", "--abort");
         return { merged: false, conflict: true, flagged: true, reason: "conflict, rebase failed" };
       }
       moved = head() !== before;
@@ -122,6 +186,10 @@ export function markReviewed(file = defaultReviews(), job, verdict) {
 // the repo's own line), a plain commit a normal revert. A failed revert is
 // aborted so the repo is never left mid-revert.
 export function revertMerge(repo, commit) {
+  // Never revert on top of someone's uncommitted work: a failed revert's
+  // --abort could take it with it. Flag instead.
+  const dirty = trackedDirty(repo);
+  if (dirty === null || dirty.length) return { ok: false, commit, dirty: true, output: dirty ? `the checkout has uncommitted changes (${dirty.slice(0, 5).join(", ")}); nothing was reverted` : "git status unreadable; nothing was reverted" };
   const p = git(repo, "rev-list", "--parents", "-n", "1", commit);
   const parents = p.status === 0 ? p.stdout.trim().split(/\s+/).length - 1 : 1;
   const args = parents > 1 ? ["revert", "-m", "1", "--no-edit", commit] : ["revert", "--no-edit", commit];
