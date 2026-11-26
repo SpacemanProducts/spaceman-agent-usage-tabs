@@ -60,6 +60,20 @@ Panel {
   // ("unsure"). Amber and red still show, since a high reading is a real warning either way.
   readonly property color unsureColor: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.45)
   function tintFor(p, unsure) { return unsure && p < 0.6 ? unsureColor : meterColor(p) }
+  // Constance's stage bar (board.stage.hue, bin/constance-meters.mjs): 0 red while
+  // preparing, 55 yellow on the checklist, 120 green in review/done. The color is
+  // built from the hue and kept readable on the panel's own background.
+  function stageColor(hue) {
+    var h = Number(hue)
+    if (!isFinite(h)) h = 120
+    var hh = (((h % 360) + 360) % 360) / 360
+    return UsageColors.ensure(UsageColors.hslToRgb({ h: hh, s: 0.85, l: 0.55 }), panelUsage.bg || panelBackground)
+  }
+  // The Rev Meter's grade picks the needle color: idle gray, warming amber,
+  // cooking green, redline red.
+  function revGradeColor(g) {
+    return ({ idle: root.dim, "warming up": root.amber, cooking: root.green, redline: root.red })[String(g)] || root.dim
+  }
   // The whole file is unsure when the collector hasn't written it for three refreshes.
   property double dataGeneratedAt: 0
   readonly property bool dataStale: dataGeneratedAt > 0 && nowMs - dataGeneratedAt > 3 * Math.max(60, Number(setting("refreshIntervalSec", 300))) * 1000
@@ -1081,6 +1095,23 @@ Panel {
   // ---- The at-a-glance board (bin/constance-board.mjs, constance-checklist.mjs, constance-goalqueue.mjs):
   // the checklist, the goal queue, one card per job, the Now line, history, and the log folded away.
   readonly property var constanceBoard: constance.board || ({ checklist: { items: [], done: 0, total: 0, line: "" }, cards: [], now: "", history: [], goalQueue: { goals: [], paused: "" } })
+  // The stage bar and Rev Meter (bin/constance-meters.mjs, spread into board by
+  // constance-board.mjs meters()): null on an older payload — the bar falls back
+  // to the checklist fraction and the Rev Meter hides itself.
+  readonly property var constanceStage: constanceBoard.stage || null
+  readonly property var constanceRev: constanceBoard.rev || null
+  readonly property real constanceRevNeedle: {
+    var n = root.constanceRev ? Number(root.constanceRev.needle) : NaN
+    return isFinite(n) ? Math.max(0, Math.min(1, n)) : 0
+  }
+  // Grade always; the score only when the meter could measure it (never null shown).
+  readonly property string constanceRevCaption: {
+    var r = root.constanceRev
+    if (!r) return ""
+    var g = String(r.grade || "")
+    var s = r.score
+    return g + ((typeof s === "number" && isFinite(s)) ? " · score " + Number(s).toFixed(2) : "")
+  }
   readonly property var constanceGoalQueue: constanceBoard.goalQueue || ({ goals: [], paused: "" })
   // Scorecard: per-agent reviewed-job stats and the "use it or lose it" spare line (absent on older data).
   readonly property var constanceScorecard: constanceBoard.scorecard || ({ rows: [], spareOn: true, spare: "" })
@@ -3361,15 +3392,86 @@ Panel {
               }
             }
 
+            // The Rev Meter (board.rev): lanes busy against the slots open to them
+            // on the needle bar, her grade, and the leverage score only when it can
+            // be measured. Anything null stays hidden; no rev on the payload, no tile.
+            Rectangle {
+              visible: root.constanceRev !== null && (root.constanceActive || root.constanceLastOpen)
+              width: parent.width
+              height: revNeedle.height + revCap.implicitHeight + Style.space(14)
+              radius: Style.cornerRadius
+              color: root.soft(root.foreground, 0.04)
+              border.width: 1
+              border.color: root.soft(root.foreground, 0.12)
+              Item {
+                id: revNeedle
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(10)
+                height: Style.space(12)
+                Rectangle {
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  height: Style.space(4)
+                  radius: height / 2
+                  color: root.track
+                  Rectangle {
+                    width: parent.width * root.constanceRevNeedle
+                    height: parent.height
+                    radius: height / 2
+                    color: root.revGradeColor(root.constanceRev ? root.constanceRev.grade : "")
+                    Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                  }
+                  Rectangle {
+                    x: parent.width * root.constanceRevNeedle - width / 2
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(2)
+                    height: Style.space(10)
+                    radius: width / 2
+                    color: root.foreground
+                  }
+                }
+              }
+              Text {
+                id: revCap
+                anchors.left: revNeedle.left
+                anchors.right: revNeedle.right
+                anchors.top: revNeedle.bottom
+                anchors.topMargin: Style.space(2)
+                visible: text !== ""
+                textFormat: Text.PlainText
+                text: root.constanceRevCaption
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
             // The goal checklist: its items, ticked as their jobs merge, with a progress bar.
+            // The bar is the stage meter (board.stage): hue colors it — red preparing,
+            // yellow checklist, green review/done — overall sets the width, label sits
+            // in the header, and a paused or finished goal's bar does not animate.
             Column {
               visible: root.constanceBoard.checklist && root.constanceBoard.checklist.total > 0 && (!root.constanceFinished || root.constanceLastOpen)
               width: parent.width
               spacing: Style.space(6)
               Item {
                 width: parent.width
-                height: checkHeader.implicitHeight
+                height: Math.max(checkHeader.implicitHeight, stageTag.implicitHeight)
                 PanelSectionHeader { id: checkHeader; anchors.left: parent.left; text: "CHECKLIST" }
+                Text {
+                  id: stageTag
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: text !== ""
+                  textFormat: Text.PlainText
+                  text: root.constanceStage ? String(root.constanceStage.label || "") : ""
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
               }
               Rectangle {
                 width: parent.width
@@ -3377,11 +3479,16 @@ Panel {
                 radius: height / 2
                 color: root.track
                 Rectangle {
-                  width: parent.width * (root.constanceBoard.checklist.total ? root.constanceBoard.checklist.done / root.constanceBoard.checklist.total : 0)
+                  width: parent.width * (root.constanceStage && isFinite(Number(root.constanceStage.overall))
+                    ? Math.max(0, Math.min(1, Number(root.constanceStage.overall)))
+                    : (root.constanceBoard.checklist.total ? root.constanceBoard.checklist.done / root.constanceBoard.checklist.total : 0))
                   height: parent.height
                   radius: height / 2
-                  color: root.green
-                  Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                  color: root.constanceStage ? root.stageColor(root.constanceStage.hue) : root.green
+                  Behavior on width {
+                    enabled: !root.constanceStage || root.constanceStage.active !== false
+                    NumberAnimation { duration: 400; easing.type: Easing.OutCubic }
+                  }
                 }
               }
               Repeater {
