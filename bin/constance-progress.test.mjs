@@ -14,34 +14,44 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "constance-progress-"));
 
 const { progressLine, due, notify, tick } = await import("./constance-progress.mjs");
 
-// progressLine: the happy path matches the spec's shape exactly.
+// progressLine: the happy path matches the spec's shape exactly. The label
+// is agent-neutral ("Workers") and workerTokens is the total across all free
+// workers; devinTokens is still accepted as the old name.
+assert.equal(
+  progressLine({ workerTokens: 42e6, sessionUsedPct: 62, sessionStartPct: 52, copiesRunning: 9 }),
+  "Workers 42M · 4.2M per 1% of session (target 5M) · 9 copies running · session 62%");
 assert.equal(
   progressLine({ devinTokens: 42e6, sessionUsedPct: 62, sessionStartPct: 52, copiesRunning: 9 }),
-  "Devin 42M · 4.2M per 1% of session (target 5M) · 9 copies running · session 62%");
+  "Workers 42M · 4.2M per 1% of session (target 5M) · 9 copies running · session 62%",
+  "devinTokens falls back when workerTokens is absent");
+assert.equal(
+  progressLine({ workerTokens: 1e6, devinTokens: 9e6, sessionUsedPct: 62, sessionStartPct: 52 }),
+  "Workers 1M · 100K per 1% of session (target 5M) · 0 copies running · session 62%",
+  "workerTokens wins over devinTokens when both are given");
 
 // A delta of zero (and a negative one, e.g. the window just reset) says so
 // instead of dividing.
 assert.equal(
   progressLine({ devinTokens: 42e6, sessionUsedPct: 62, sessionStartPct: 62, copiesRunning: 9 }),
-  "Devin 42M · no session spent yet · 9 copies running · session 62%");
+  "Workers 42M · no session spent yet · 9 copies running · session 62%");
 assert.equal(
   progressLine({ devinTokens: 42e6, sessionUsedPct: 40, sessionStartPct: 62, copiesRunning: 9 }),
-  "Devin 42M · no session spent yet · 9 copies running · session 40%");
+  "Workers 42M · no session spent yet · 9 copies running · session 40%");
 
 // A positive delta under 0.1 still divides — by the 0.1 floor.
 assert.equal(
   progressLine({ devinTokens: 1e6, sessionUsedPct: 50.05, sessionStartPct: 50, copiesRunning: 2 }),
-  "Devin 1M · 10M per 1% of session (target 5M) · 2 copies running · session 50%");
+  "Workers 1M · 10M per 1% of session (target 5M) · 2 copies running · session 50%");
 
 // Unknown tokens are "can't tell", never a guess; target is overridable.
 assert.equal(
   progressLine({ devinTokens: null, sessionUsedPct: 62, sessionStartPct: 52, copiesRunning: 0, target: 2e6 }),
-  "Devin can't tell · can't tell per 1% of session (target 2M) · 0 copies running · session 62%");
+  "Workers can't tell · can't tell per 1% of session (target 2M) · 0 copies running · session 62%");
 
 // Singular/plural copy, fractional session percent, defaults.
 assert.equal(
   progressLine({ devinTokens: 500e3, sessionUsedPct: 62.5, sessionStartPct: 60, copiesRunning: 1 }),
-  "Devin 500K · 200K per 1% of session (target 5M) · 1 copy running · session 62.5%");
+  "Workers 500K · 200K per 1% of session (target 5M) · 1 copy running · session 62.5%");
 assert.equal(progressLine().includes("can't tell"), true, "no args still yields a line");
 
 // due: true the first time, then at most once per interval.
@@ -78,7 +88,7 @@ const tickState = path.join(dir, "tick.json");
 const tickCalls = [];
 const exec = (cmd, args) => { tickCalls.push({ cmd, args }); return { status: 0 }; };
 const t = { devinTokens: 42e6, sessionUsedPct: 62, sessionStartPct: 52, copiesRunning: 9 };
-const line = "Devin 42M · 4.2M per 1% of session (target 5M) · 9 copies running · session 62%";
+const line = "Workers 42M · 4.2M per 1% of session (target 5M) · 9 copies running · session 62%";
 const r1 = tick({ ...t, stateFile: tickState, now: 5000, every: 1000, exec });
 assert.deepEqual(r1, { line, notified: true });
 assert.equal(tickCalls.length, 1);

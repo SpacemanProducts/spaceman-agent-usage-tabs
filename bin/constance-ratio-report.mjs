@@ -5,7 +5,8 @@
 // ratioReport() turns a goal's jobs (tokens plus start/finish times), its step
 // routes ({step, model, tokens?} — tokens summed when reported, step counts
 // otherwise), slot samples ({at, copiesRunning}) and her session pct before
-// and after into the report: devinTokens, perPct, opusByStep, copiesAvg,
+// and after into the report: workerTokens (kept as devinTokens for older
+// callers), perPct, opusByStep, copiesAvg,
 // idleSlotMinutes, topFixes and a plain-text summary. saveReport() appends it
 // to dir/history.jsonl as {kind:'ratio', ...} and returns 1-3 lesson lines
 // for the worst items. Pure functions; the only I/O is the history append.
@@ -103,27 +104,32 @@ function lessonsOf(r, fixes) {
 // tokens and (for copiesAvg context) nothing else — times are accepted but not
 // required. perPct is null until at least MIN_SPENT_PCT of her window was
 // spent or when no job reported tokens.
-export function ratioReport({ goal = null, jobs = [], routes = [], samples = [], sessionStartPct = null, sessionEndPct = null, slots = 10 } = {}) {
+export function ratioReport({ goal = null, jobs = [], routes = [], samples = [], sessionStartPct = null, sessionEndPct = null, slots = 10, workerTokens, devinTokens } = {}) {
   const goalId = goal && typeof goal === "object" ? goal.id ?? null : goal ?? null;
   const goalName = goal && typeof goal === "object" ? (goal.title || goal.id || "") : "";
 
-  let devinTokens = 0, tokN = 0;
+  // An explicit workerTokens (all free workers' tokens) wins; the old
+  // devinTokens input is the fallback for callers that only know that name;
+  // with neither, the jobs' own token fields are summed as before.
+  const given = Number.isFinite(workerTokens) ? workerTokens : Number.isFinite(devinTokens) ? devinTokens : null;
+
+  let summed = 0, tokN = 0;
   let sentBack = 0, decided = 0;
   for (const j of jobs || []) {
     if (!j) continue;
     const t = tokensOf(j);
-    if (t !== null) { devinTokens += t; tokN += 1; }
+    if (t !== null) { summed += t; tokN += 1; }
     if (j.verdict === "accept" || j.verdict === "send-back") {
       decided += 1;
       if (j.verdict === "send-back") sentBack += 1;
     }
   }
-  devinTokens = tokN ? devinTokens : null;
+  const devinTokensTotal = given !== null ? given : (tokN ? summed : null);
 
   const start = Number.isFinite(sessionStartPct) ? sessionStartPct : null;
   const end = Number.isFinite(sessionEndPct) ? sessionEndPct : null;
   const spent = start !== null && end !== null ? end - start : null;
-  const perPct = spent !== null && spent >= MIN_SPENT_PCT && devinTokens !== null ? devinTokens / spent : null;
+  const perPct = spent !== null && spent >= MIN_SPENT_PCT && devinTokensTotal !== null ? devinTokensTotal / spent : null;
 
   const steps = opusByStep(routes);
   const idle = idleMinutes(samples, slots);
@@ -132,7 +138,7 @@ export function ratioReport({ goal = null, jobs = [], routes = [], samples = [],
 
   const r = {
     goal: goalId, goalName, slots,
-    devinTokens, perPct, sessionPct: { start, end, spent },
+    devinTokens: devinTokensTotal, workerTokens: devinTokensTotal, perPct, sessionPct: { start, end, spent },
     opusByStep: steps, copiesAvg: avg, idleSlotMinutes: idle,
     sentBack, decided, sentBackRate,
     samples: (samples || []).filter((s) => s && Number.isFinite(s.at)).length,
@@ -149,7 +155,7 @@ export function ratioReport({ goal = null, jobs = [], routes = [], samples = [],
     ? `${Math.round(rev.share * 100)}% Opus (${rev.unit === "tokens" ? fmtTokens(rev.opus) : rev.opus} of ${rev.unit === "tokens" ? fmtTokens(rev.total) : rev.total})`
     : "no reviews routed";
   const lines = [
-    `Goal ${goalName || goalId || "?"}: ${devinTokens === null ? "no worker tokens reported" : `${fmtTokens(devinTokens)} free-worker tokens`} for ${spent === null ? "?" : Math.round(spent * 10) / 10}% of her session — ${pctTxt}.`,
+    `Goal ${goalName || goalId || "?"}: ${devinTokensTotal === null ? "no worker tokens reported" : `${fmtTokens(devinTokensTotal)} free-worker tokens`} for ${spent === null ? "?" : Math.round(spent * 10) / 10}% of her session — ${pctTxt}.`,
     `Slots: avg ${avg === null ? "?" : avg} copies, ${idle} slot-minutes idle over ${r.samples} samples.`,
     `Opus by step — planning ${steps.planning.share === null ? "-" : Math.round(steps.planning.share * 100) + "%"}, specs ${steps.specs.share === null ? "-" : Math.round(steps.specs.share * 100) + "%"}, reviews ${revTxt}, fixes ${steps.fixes.share === null ? "-" : Math.round(steps.fixes.share * 100) + "%"}.`,
     sentBackRate === null ? "No decided jobs yet." : `${sentBack} of ${decided} decided jobs sent back (${Math.round(sentBackRate * 100)}%).`,

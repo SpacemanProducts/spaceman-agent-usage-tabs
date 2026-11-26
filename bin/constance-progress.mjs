@@ -1,4 +1,4 @@
-// Constance's progress ping: one line for her Now row — what Devin's free
+// Constance's progress ping: one line for her Now row — what the free
 // workers have burned, what that buys per 1% of her own session window, how
 // many copies are running and where the session stands — plus a throttled
 // notify-send so the owner sees the pace without watching the panel.
@@ -12,13 +12,16 @@ import { CANT_TELL, fmtTokens } from "./constance-tokens.mjs";
 
 const pct = (n) => (Number.isFinite(n) ? String(+n.toFixed(1)) : "?");
 
-// "Devin 42M · 4.2M per 1% of session (target 5M) · 9 copies running · session 62%".
-// perPct = devinTokens / max(0.1, sessionUsedPct - sessionStartPct): the 0.1
+// "Workers 42M · 4.2M per 1% of session (target 5M) · 9 copies running · session 62%".
+// perPct = workerTokens / max(0.1, sessionUsedPct - sessionStartPct): the 0.1
 // floor keeps a barely-moved window from producing a silly number, and a
 // non-positive delta (nothing spent yet, or the window just reset) says so
 // instead of dividing. Unknown tokens are "can't tell", never a guess.
-export function progressLine({ devinTokens, sessionUsedPct, sessionStartPct, copiesRunning = 0, target = 5e6 } = {}) {
-  const tokens = Number.isFinite(devinTokens) ? devinTokens : null;
+// workerTokens is the total across all free workers; devinTokens is the old
+// name, still accepted when workerTokens is absent.
+export function progressLine({ workerTokens, devinTokens, sessionUsedPct, sessionStartPct, copiesRunning = 0, target = 5e6 } = {}) {
+  const rawTokens = workerTokens ?? devinTokens;
+  const tokens = Number.isFinite(rawTokens) ? rawTokens : null;
   const goal = Number.isFinite(target) ? target : null;
   const used = Number(sessionUsedPct);
   const delta = used - Number(sessionStartPct);
@@ -28,7 +31,7 @@ export function progressLine({ devinTokens, sessionUsedPct, sessionStartPct, cop
     : perPct === null ? `${CANT_TELL} per 1% of session (target ${fmtTokens(goal)})`
     : `${fmtTokens(perPct)} per 1% of session (target ${fmtTokens(goal)})`;
   const copies = Number.isFinite(copiesRunning) ? copiesRunning : 0;
-  return `Devin ${fmtTokens(tokens)} · ${pace} · ${copies} ${copies === 1 ? "copy" : "copies"} running · session ${pct(used)}%`;
+  return `Workers ${fmtTokens(tokens)} · ${pace} · ${copies} ${copies === 1 ? "copy" : "copies"} running · session ${pct(used)}%`;
 }
 
 // True at most once per `every` ms: the stamp { at } lives in stateFile, so a
