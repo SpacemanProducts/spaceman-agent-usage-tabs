@@ -46,6 +46,8 @@ assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).hiddenAgents, []);
 assert.equal(run("volume", "35").status, 0); assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).resetVolume, 35);
 assert.equal(run("constanceBrain", "antigravity").status, 0);
 assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).constanceBrain, "antigravity");
+assert.equal(run("constanceBrain", "grok").status, 0);
+assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).constanceBrain, "grok");
 assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).resetVolume, 35);
 assert.notEqual(run("volume", "999").status, 0);
 assert.notEqual(run("bogus", "true").status, 0);
@@ -69,10 +71,14 @@ console.log("settings-set: catalog ids ok");
 assert.deepEqual(applySetting({}, "angryRobot", "false"), { angryRobot: false }, "angry robot switch");
 assert.deepEqual(applySetting({}, "constancePractice", "false"), { constancePractice: false }, "Constance practice switch");
 
-// Constance's brain backend: claude or antigravity only.
+// Constance's brain backend: any brain id constance-brain.mjs knows.
 assert.deepEqual(applyBrain({}, "claude"), { constanceBrain: "claude" });
 assert.deepEqual(applyBrain({ resetSound: true }, "antigravity"), { resetSound: true, constanceBrain: "antigravity" }, "other keys kept");
 assert.deepEqual(applyBrain({}, "  CLAUDE "), { constanceBrain: "claude" }, "trim and lower-case");
 assert.deepEqual(applyBrain({}, " Antigravity"), { constanceBrain: "antigravity" }, "trim and mixed case");
-assert.throws(() => applyBrain({}, "grok"), /constanceBrain must be claude or antigravity: grok/);
+for (const id of ["grok", "codex", "copilot"]) {
+  assert.deepEqual(applyBrain({}, id), { constanceBrain: id }, `${id} is a brain`);
+  assert.deepEqual(applyBrain({ resetSound: true }, ` ${id.toUpperCase()} `), { resetSound: true, constanceBrain: id }, `${id} trims and lower-cases`);
+}
+for (const bad of ["agy", "cursor", "devin", "", "claude,grok"]) assert.throws(() => applyBrain({}, bad), /constanceBrain must be one of/, `rejects ${JSON.stringify(bad)}`);
 console.log("settings-set: brain tests passed");
