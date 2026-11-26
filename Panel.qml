@@ -1336,6 +1336,10 @@ Panel {
   property string constanceLogJob: ""
   property string constanceLogWorker: ""
   property string constanceLogKind: ""
+  // Group-by for the log ("", "job", "worker" or "kind"; "" is the flat list). A group's
+  // folded state lives here, keyed "<mode>:<value>", so switching modes keeps each its own.
+  property string constanceLogGroup: ""
+  property var constanceLogCollapsed: ({})
   property bool constanceHistoryAll: false
   function constanceLogWho(e) { return e.agent ? (e.worker || root.constanceAgentName(e.agent)) : "" }
   readonly property var constanceLogFilters: {
@@ -1360,6 +1364,60 @@ Panel {
       out.push(e)
     }
     return out
+  }
+  // The group an entry falls in for the picked group-by: "<mode>:<value>" as the key,
+  // the bare value as what the header shows ("" reads as "none").
+  function constanceLogGroupOf(e) {
+    var mode = root.constanceLogGroup
+    if (mode === "job") return "job:" + (e.job === undefined || e.job === null ? "" : "#" + String(e.job))
+    if (mode === "worker") return "worker:" + root.constanceLogWho(e)
+    if (mode === "kind") return "kind:" + String(e.kind || "")
+    return ""
+  }
+  // The filtered lines split into one group per distinct value, in the order they appear
+  // (newest first, like the flat list).
+  readonly property var constanceLogGroups: {
+    var out = [], shown = root.constanceLogShown
+    if (root.constanceLogGroup === "") return out
+    var byKey = {}
+    for (var i = 0; i < shown.length; i++) {
+      var e = shown[i], key = root.constanceLogGroupOf(e), g = byKey[key]
+      if (!g) {
+        var v = key.slice(root.constanceLogGroup.length + 1)
+        g = { key: key, label: v === "" ? "none" : v, entries: [] }
+        byKey[key] = g; out.push(g)
+      }
+      g.entries.push(e)
+    }
+    return out
+  }
+  function toggleConstanceLogGroup(key) {
+    var c = Object.assign({}, root.constanceLogCollapsed)
+    c[key] = !c[key]
+    root.constanceLogCollapsed = c
+  }
+  // One entry as `constance.mjs log` prints it (bin/constance-logtext.mjs entryText), so a
+  // group's Copy all matches the big Copy all's text format.
+  function constanceLogEntryText(e) {
+    var pad = function(n) { n = Number(n); return (n < 10 ? "0" : "") + n }
+    var d = new Date(Number(e.at) || 0)
+    var stamp = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes())
+    var who = e.agent ? (e.worker || root.constanceAgentName(e.agent)) + (e.account ? " (" + e.account + ")" : "") : ""
+    var head = { goal: "Goal", handoff: "Job " + e.job + " → " + who, practice: "Practice job " + e.job + " → " + who + (e.reason ? " (" + e.reason + ")" : ""),
+                 returned: "Job " + e.job + " back from " + who, held: "Job " + e.job + " → " + who + " (held)", model: "Model",
+                 review: "Job " + e.job + (e.verdict === "accept" ? " accepted" : " sent back"), report: "Report", paused: "Paused",
+                 signal: "Signal", queue: "Queue", lesson: "Lesson",
+                 resumed: "Resumed", stopped: "Stopped", failed: "Failed", note: "Note" }[e.kind] || e.kind || "Entry"
+    var line = stamp + "  " + head + (e.text ? ": " + e.text : "")
+    if (e.kind === "practice" && e.worktree) line += "\n(a real run works in " + e.worktree + " on " + (e.branch || "its own branch") + ")"
+    if (e.prompt) line += "\n" + String(e.prompt)
+    return line
+  }
+  // A group's Copy all: just its lines, oldest first like the whole-log copy.
+  function copyConstanceLogGroup(g) {
+    var parts = []
+    for (var i = (g.entries || []).length - 1; i >= 0; i--) parts.push(root.constanceLogEntryText(g.entries[i]))
+    root.copyText(parts.join("\n\n") + "\n")
   }
   function constanceHistoryLine(h) {
     var when = h.startedAt ? Qt.formatDateTime(new Date(Number(h.startedAt)), "MMM d, h:mm AP") : ""
@@ -1732,6 +1790,65 @@ Panel {
     Repeater {
       model: lfr.values
       MiniChip { required property var modelData; label: lfr.labelFor(modelData); on: lfr.picked === String(modelData); onClicked: lfr.pick(lfr.picked === String(modelData) ? "" : String(modelData)) }
+    }
+  }
+  // One Constance log line, shared by the flat list and the grouped one: selectable text
+  // (drag to select, Ctrl+C copies) with its own Copy chip. Long entries show their first
+  // lines until "Show all"; Copy always has it all.
+  component ConstanceLogEntry: Item {
+    id: logEntry
+    required property var modelData
+    readonly property string full: root.constanceLogLine(modelData)
+    readonly property int maxLines: modelData.kind === "report" ? 30 : (modelData.kind === "practice" ? 40 : 4)
+    readonly property real cap: maxLines * logText.font.pixelSize * 1.4
+    readonly property bool tall: logText.contentHeight > cap + 1
+    property bool expanded: false
+    width: parent.width
+    height: Math.max(entryCopy.height, logClip.height + (tall ? moreLabel.implicitHeight + Style.space(2) : 0))
+    Item {
+      id: logClip
+      anchors.left: parent.left
+      anchors.right: entryCopy.left
+      anchors.rightMargin: Style.space(8)
+      height: logEntry.tall && !logEntry.expanded ? logEntry.cap : logText.contentHeight
+      clip: true
+      TextEdit {
+        id: logText
+        width: parent.width
+        readOnly: true
+        selectByMouse: true
+        persistentSelection: false
+        textFormat: TextEdit.PlainText
+        wrapMode: TextEdit.Wrap
+        text: logEntry.full
+        color: logEntry.modelData.kind === "report" || logEntry.modelData.kind === "review" ? root.foreground : root.dim
+        selectionColor: root.soft(Color.accent, 0.35)
+        selectedTextColor: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        // While it has focus the panel's own keys (tabs, close) wait; Escape hands them back.
+        onActiveFocusChanged: root.constanceTyping = activeFocus
+        Keys.onEscapePressed: { logText.deselect(); logText.focus = false; keyCatcher.forceActiveFocus() }
+      }
+    }
+    Text {
+      id: moreLabel
+      visible: logEntry.tall
+      anchors.top: logClip.bottom
+      anchors.topMargin: Style.space(2)
+      textFormat: Text.PlainText
+      text: logEntry.expanded ? "Show less" : "Show all"
+      color: Color.accent
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: logEntry.expanded = !logEntry.expanded }
+    }
+    CopyChip {
+      id: entryCopy
+      anchors.right: parent.right
+      anchors.top: parent.top
+      tip: logEntry.modelData.kind === "practice" ? "Copy this entry with its full prompt" : "Copy this entry"
+      onCopy: root.copyText(logEntry.full)
     }
   }
   component SettingSwitch: Item {
@@ -4029,6 +4146,7 @@ Panel {
               LogFilterRow { title: "Job"; values: root.constanceLogFilters.jobs; picked: root.constanceLogJob; labelFor: function(v) { return "#" + v }; onPick: function(v) { root.constanceLogJob = v } }
               LogFilterRow { title: "Worker"; values: root.constanceLogFilters.workers; picked: root.constanceLogWorker; onPick: function(v) { root.constanceLogWorker = v } }
               LogFilterRow { title: "Kind"; values: root.constanceLogFilters.kinds; picked: root.constanceLogKind; onPick: function(v) { root.constanceLogKind = v } }
+              LogFilterRow { title: "Group"; values: ["job", "worker", "kind"]; picked: root.constanceLogGroup; labelFor: function(v) { return v.charAt(0).toUpperCase() + v.slice(1) }; onPick: function(v) { root.constanceLogGroup = v } }
             }
             Text {
               visible: root.constanceLogOpen && root.constanceLogShown.length === 0
@@ -4040,68 +4158,68 @@ Panel {
               font.pixelSize: Style.font.caption
             }
             Column {
-              visible: root.constanceLogOpen
+              visible: root.constanceLogOpen && root.constanceLogGroup === ""
               width: parent.width
               spacing: Style.space(6)
               HoverHandler { onHoveredChanged: root.constanceLogPointing = hovered }
               Repeater {
                 model: root.constanceLogOpen ? root.constanceLogShown : []
-                // Each entry is selectable text (drag to select, Ctrl+C copies) with its own Copy
-                // chip. Long entries show their first lines until "Show all"; Copy always has it all.
+                ConstanceLogEntry { }
+              }
+            }
+            // Grouped view (Group row above): the same filtered lines split into one
+            // collapsible group per distinct value, each with its own Copy all.
+            Column {
+              visible: root.constanceLogOpen && root.constanceLogGroup !== ""
+              width: parent.width
+              spacing: Style.space(8)
+              HoverHandler { onHoveredChanged: root.constanceLogPointing = hovered }
+              Repeater {
+                model: root.constanceLogOpen ? root.constanceLogGroups : []
                 Item {
-                  id: logEntry
+                  id: logGroup
                   required property var modelData
-                  readonly property string full: root.constanceLogLine(modelData)
-                  readonly property int maxLines: modelData.kind === "report" ? 30 : (modelData.kind === "practice" ? 40 : 4)
-                  readonly property real cap: maxLines * logText.font.pixelSize * 1.4
-                  readonly property bool tall: logText.contentHeight > cap + 1
-                  property bool expanded: false
+                  readonly property bool folded: !!root.constanceLogCollapsed[modelData.key]
                   width: parent.width
-                  height: Math.max(entryCopy.height, logClip.height + (tall ? moreLabel.implicitHeight + Style.space(2) : 0))
+                  height: groupHeader.height + (folded ? 0 : groupEntries.implicitHeight + Style.space(4))
                   Item {
-                    id: logClip
-                    anchors.left: parent.left
-                    anchors.right: entryCopy.left
-                    anchors.rightMargin: Style.space(8)
-                    height: logEntry.tall && !logEntry.expanded ? logEntry.cap : logText.contentHeight
-                    clip: true
-                    TextEdit {
-                      id: logText
-                      width: parent.width
-                      readOnly: true
-                      selectByMouse: true
-                      persistentSelection: false
-                      textFormat: TextEdit.PlainText
-                      wrapMode: TextEdit.Wrap
-                      text: logEntry.full
-                      color: logEntry.modelData.kind === "report" || logEntry.modelData.kind === "review" ? root.foreground : root.dim
-                      selectionColor: root.soft(Color.accent, 0.35)
-                      selectedTextColor: root.foreground
+                    id: groupHeader
+                    width: parent.width
+                    height: Math.max(groupLabel.implicitHeight, groupCopy.height)
+                    Text {
+                      id: groupLabel
+                      anchors.left: parent.left
+                      anchors.right: groupCopy.left
+                      anchors.rightMargin: Style.space(8)
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      text: (logGroup.folded ? "▸ " : "▾ ") + logGroup.modelData.label + " (" + logGroup.modelData.entries.length + ")"
+                      color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
-                      // While it has focus the panel's own keys (tabs, close) wait; Escape hands them back.
-                      onActiveFocusChanged: root.constanceTyping = activeFocus
-                      Keys.onEscapePressed: { logText.deselect(); logText.focus = false; keyCatcher.forceActiveFocus() }
+                      MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleConstanceLogGroup(logGroup.modelData.key) }
+                    }
+                    MiniChip {
+                      id: groupCopy
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      label: "Copy all"
+                      tip: "Copy this group's log lines as text"
+                      onClicked: root.copyConstanceLogGroup(logGroup.modelData)
                     }
                   }
-                  Text {
-                    id: moreLabel
-                    visible: logEntry.tall
-                    anchors.top: logClip.bottom
-                    anchors.topMargin: Style.space(2)
-                    textFormat: Text.PlainText
-                    text: logEntry.expanded ? "Show less" : "Show all"
-                    color: Color.accent
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: logEntry.expanded = !logEntry.expanded }
-                  }
-                  CopyChip {
-                    id: entryCopy
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    tip: logEntry.modelData.kind === "practice" ? "Copy this entry with its full prompt" : "Copy this entry"
-                    onCopy: root.copyText(logEntry.full)
+                  Column {
+                    id: groupEntries
+                    visible: !logGroup.folded
+                    anchors.top: groupHeader.bottom
+                    anchors.topMargin: Style.space(4)
+                    width: parent.width
+                    spacing: Style.space(6)
+                    Repeater {
+                      model: logGroup.modelData.entries
+                      ConstanceLogEntry { }
+                    }
                   }
                 }
               }
