@@ -3,7 +3,13 @@
 // limits before running it). When a goal ends with a problem that needs the owner, the queue stops
 // and says why instead of moving on; it stays stopped until the owner starts the next goal.
 //
-// goal-queue.json in her state dir: { goals: [{ id, text, dir, addedAt }], paused: "" | "why" }.
+// The owner can also pause the queue by hand (the panel's "Pause queue"): the current goal keeps
+// running, but no queued goal starts until "Resume queue". Goals can still be added, edited,
+// reordered and removed while it is paused, and the pause is in the file, so it survives restarts.
+// It is separate from `paused` (a stop for the owner, cleared by "Start next").
+//
+// goal-queue.json in her state dir:
+//   { goals: [{ id, text, dir, addedAt }], paused: "" | "why", ownerPaused: false, ownerPausedAt: 0 }.
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -15,8 +21,9 @@ const lockOf = (dir) => fileOf(dir) + ".lock";
 export function readGoalQueue(dir) {
   try {
     const d = JSON.parse(fs.readFileSync(fileOf(dir), "utf8"));
-    return { goals: Array.isArray(d.goals) ? d.goals.filter((g) => g && g.text && g.dir) : [], paused: String(d.paused || "") };
-  } catch { return { goals: [], paused: "" }; }
+    return { goals: Array.isArray(d.goals) ? d.goals.filter((g) => g && g.text && g.dir) : [], paused: String(d.paused || ""),
+      ownerPaused: d.ownerPaused === true, ownerPausedAt: d.ownerPaused === true ? Number(d.ownerPausedAt) || 0 : 0 };
+  } catch { return { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 }; }
 }
 
 // change() is read-modify-write across processes (the driver, the panel's C commands,
@@ -144,9 +151,11 @@ export function moveGoal(dir, id, to) {
   });
 }
 
-// Take the first goal off the queue (null when empty or stopped for the owner, unless `force`).
+// Take the first goal off the queue (null when empty, paused by the owner, or stopped for the
+// owner unless `force`). `force` ("Start next") clears a stop for the owner, never the owner's pause.
 export function takeNext(dir, { force = false } = {}) {
   return change(dir, (q) => {
+    if (q.ownerPaused) return null;
     if (q.paused && !force) return null;
     q.paused = "";
     return q.goals.shift() || null;
@@ -155,6 +164,14 @@ export function takeNext(dir, { force = false } = {}) {
 
 export function pauseQueue(dir, why) { return change(dir, (q) => { q.paused = String(why || "stopped"); return q.paused; }); }
 export function resumeQueue(dir) { return change(dir, (q) => { q.paused = ""; return true; }); }
+
+// The owner's own pause ("Pause queue" / "Resume queue"). Returns the queue as saved.
+export function holdQueue(dir, now = Date.now()) {
+  return change(dir, (q) => { if (!q.ownerPaused) { q.ownerPaused = true; q.ownerPausedAt = now; } return { ...q }; });
+}
+export function releaseQueue(dir) {
+  return change(dir, (q) => { q.ownerPaused = false; q.ownerPausedAt = 0; return { ...q }; });
+}
 
 // Why a finished goal needs the owner before the queue moves on ([] = it doesn't). `practice`
 // skips the checklist check: a practice run merges nothing, so nothing ever ticks.

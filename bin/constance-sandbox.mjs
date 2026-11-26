@@ -38,6 +38,9 @@ export const PROFILES = {
   cursor: { rw: [".cursor", ".config/cursor", ".local/share/cursor-agent", ".local/state/cursor", ".cache/cursor-compile-cache"], keyring: true, env: { DISPLAY: ":99" } },
   freebuff: { rw: [".config/manicode", ".freebuff"] },
   kilo: { rw: [".config/kilo", ".local/share/kilo", ".cache/kilo"] },
+  // Opus as a worker ("Give it to Opus", bin/constance-takeover.mjs): Claude Code's own
+  // config/login folder, and its settings file, bound only when it already exists.
+  claude: { rw: [".claude"], files: [".claude.json"] },
 };
 
 // Read-only toolchain and git identity, brought back into the empty home.
@@ -195,6 +198,10 @@ export function sandboxArgs({ agent, dir, tmp, env = process.env, extraRw = [], 
     // The agent's own folders are made if missing, so a first login can land.
     if (!exists(p) && under(p, home)) fs.mkdirSync(p, { recursive: true });
     if (exists(p)) a.push("--bind", p, p);
+  }
+  for (const rel of profile(agent).files || []) {
+    const p = path.join(home, rel);
+    if (exists(p) && fs.statSync(p).isFile()) a.push("--bind", p, p);
   }
   a.push("--bind", proj, proj);
   a.push(...protectedBinds(proj, exists));

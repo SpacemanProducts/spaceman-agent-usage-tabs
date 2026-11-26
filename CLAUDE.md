@@ -120,8 +120,8 @@ keeps the developer in flow:
   Since 1.42.0 every worker runs in bubblewrap (`bin/constance-sandbox.mjs`, test
   `constance-sandbox.test.mjs`): writable = project, the agent's own config/login folders
   (`PROFILES`), a per-job /tmp. The home folder is an empty tmpfs with only the toolchains
-  bound back read-only. There is no bus, ssh-agent or display (Qt is pinned to `QT_QPA_PLATFORM=offscreen`, there and in the self-merge suite, so `qml6` runs headless instead of aborting), and `.git/config` and
-  `.git/hooks` are read-only. `judge()` refuses any agent that can't be sandboxed, and
+  bound back read-only. There is no bus, ssh-agent or display (Qt is pinned to `QT_QPA_PLATFORM=offscreen`, there and in the self-merge suite, so `qml6` runs headless instead of aborting), and all git data (`.git`, or a worktree's
+  pointer and the shared git dir) plus `.constance/` are read-only (see 1.50.2 below). `judge()` refuses any agent that can't be sandboxed, and
   without bwrap none launch. Keyring-login agents (copilot, cursor, antigravity) need the
   owner's opt-in via `constanceKeyringAgents` in settings.json, because the filtered bus
   proxy (`--talk=org.freedesktop.secrets`) exposes the whole keyring. Cursor only looks
@@ -185,7 +185,7 @@ keeps the developer in flow:
   Since 1.50.0: copies start as soon as memory allows (no load check, no
   30 s spacing; `bin/constance-ramp.mjs`), and the ready queue fills every free slot after each sweep
   (`readyTasks` in `bin/constance-queue.mjs`, `fillSlots`), not only on accept. A clean copy (guard clean,
-  diff inside its list, its report says tests pass) self-merges after the full suite passes
+  diff inside its list; since 1.50.2 the report is never a signal) self-merges after the project's real suite passes
   (`bin/constance-selfmerge.mjs`, one rebase-and-retry on conflict, else status `conflict`); her review comes
   later (`reviews.json`, `C reviews`): accept confirms, send-back runs `git revert`. `constanceSelfMerge:
   false` turns it off. Leverage meter (`bin/constance-leverage.mjs`, `leverage.jsonl`): free-agent goal
@@ -242,6 +242,30 @@ keeps the developer in flow:
   `mergeBranch` refuses a checkout with tracked uncommitted changes. Accept locks first (`acceptMerge`,
   `CONSTANCE_ACCEPT_WAIT_MS`). A dirty worktree at self-merge -> status `failed` (frees the slot).
   Copy starts are spaced (`RAMP.minGapMs` 5 s, `CONSTANCE_RAMP_GAP_MS`), memory read per start.
+
+  Since 1.55.0 (constance-next, -qt, -panel landed on the security fixes, 2026-11-26): on every conflict
+  the 1.50.2 rule won and the feature was re-applied on top. The shared-job guard deferral and the
+  copy-merge excuse from 1.54.0 are gone (the guard never blames commits it didn't vouch for, and
+  `mergeBranch` won't merge into a dirty checkout); `mergeBranch` never resets/cleans on a failed merge
+  (it flags it). Qt's offscreen pin for the suite lives in `suiteEnv`. A worktree pointer naming a
+  missing git dir refuses to launch. The repo brief, batch-review diff, autosplit, stuck check and
+  takeover use `safeGit`. A failed self-merge suite leaves the copy `finished` for review; only a dirty
+  or unreadable worktree makes it `failed`. Smoke-tested 2026-11-26 with a real Devin copy job: Devin
+  works with read-only git data (git status reads fine, every write gets EROFS) and Constance commits
+  its files on the host.
+  Since 1.52.0 (owner request): "Give it to Opus" (`C takeover ID`, `bin/constance-takeover.mjs`) is the
+  ONE way Claude works as a worker; `judge()` still never lists Claude. It stops the worker, keeps its
+  changes and log, and relaunches the same job (same id, files, guard snapshot, done file, review) as the
+  real `claude` CLI, sandboxed with the `claude` profile (`~/.claude`, `~/.claude.json` if present);
+  `handedFrom` names the replaced worker, and the job is never auto-retried. Stuck (`bin/constance-stuck.mjs`):
+  > 2x the scorecard's avgMs (floor 5 min) or 15 min with no file/log activity; orange card, one silent
+  notify per job. Auto-handoff only at Milk >= 51 and every Claude meter < 70%; a click is refused at 90%.
+  The owner's "Pause queue" is `ownerPaused` in goal-queue.json, separate from `paused` (a stop for the
+  owner): nothing starts from a paused queue, not even Start next or a spare goal; Resume starts the next
+  goal when she is free. Tests shorten the windows with `CONSTANCE_STUCK_IDLE_MS` / `CONSTANCE_STUCK_CHECK_MS`.
+  Caution: the `claude` profile binds `~/.claude` and `~/.claude.json` writable inside the sandbox, so a
+  sandboxed Opus can change Claude Code's own settings/hooks, which the owner's unsandboxed Claude Code
+  later runs (open question, 2026-11-26).
 
 ## Working rules
 

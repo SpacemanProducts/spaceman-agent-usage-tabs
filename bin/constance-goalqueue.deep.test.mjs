@@ -23,19 +23,19 @@ const noTmp = () => assert.deepEqual(fs.readdirSync(dir).filter((f) => f.include
 
 // ---- readGoalQueue: missing, malformed and wrong-shaped files -------------------------
 fresh();
-assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" }, "missing file");
+assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 }, "missing file");
 writeQueue("{not json");
-assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" }, "malformed JSON");
+assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 }, "malformed JSON");
 writeQueue("﻿{}"); // BOM prefix: JSON.parse rejects it
-assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" }, "BOM-prefixed JSON");
+assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 }, "BOM-prefixed JSON");
 for (const bad of ["null", "[]", '"x"', "42", "true"]) {
   writeQueue(bad);
-  assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" }, bad);
+  assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 }, bad);
 }
 writeQueue({ goals: "nope", paused: 7 });
-assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "7" }, "non-array goals dropped, numeric paused stringified");
+assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "7", ownerPaused: false, ownerPausedAt: 0 }, "non-array goals dropped, numeric paused stringified");
 writeQueue({ goals: null });
-assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" });
+assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 });
 // Entries survive only with truthy text AND dir; everything else is dropped.
 writeQueue({
   goals: [null, 42, "x", {}, { text: "no dir" }, { dir: "/d" }, { text: "ok", dir: "/ok", extra: 1 }],
@@ -381,9 +381,9 @@ assert.equal(takeNext(dir), null, "only takeNext honours the pause");
 // ---- side effects: reads never create anything; writes create dir+file even when they change
 // nothing, and wrong-type dir arguments read as an empty queue ----------------------------------
 const ghost = path.join(dir, "ghost-state");
-assert.deepEqual(readGoalQueue(ghost), { goals: [], paused: "" });
-assert.deepEqual(readGoalQueue(null), { goals: [], paused: "" }, "path.join throws inside the try: swallowed");
-assert.deepEqual(readGoalQueue(42), { goals: [], paused: "" });
+assert.deepEqual(readGoalQueue(ghost), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 });
+assert.deepEqual(readGoalQueue(null), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 }, "path.join throws inside the try: swallowed");
+assert.deepEqual(readGoalQueue(42), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 });
 assert.ok(!fs.existsSync(ghost), "readGoalQueue creates nothing");
 const tstate = path.join(dir, "t-state");
 assert.equal(takeNext(tstate), null);
@@ -396,7 +396,7 @@ assert.ok(fs.existsSync(path.join(rstate, "goal-queue.json")), "resumeQueue on a
 // ---- goal-queue.json being a directory: reads as empty, writes fail without corrupting it ------
 fresh();
 fs.mkdirSync(qfile);
-assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "" }, "EISDIR on read is swallowed like any read error");
+assert.deepEqual(readGoalQueue(dir), { goals: [], paused: "", ownerPaused: false, ownerPausedAt: 0 }, "EISDIR on read is swallowed like any read error");
 assert.throws(() => addGoal(dir, { text: "x", dir: "/x" }), /EISDIR|ENOTDIR/, "rename onto a directory fails");
 assert.ok(fs.statSync(qfile).isDirectory(), "the directory itself is untouched");
 assert.equal(fs.readdirSync(dir).filter((f) => f.includes(".tmp")).length, 0,
