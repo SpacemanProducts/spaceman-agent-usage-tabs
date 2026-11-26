@@ -235,17 +235,23 @@ const runChild = (body, args = ["--input-type=module", "-e", body]) =>
 // ============================================================ races: real child processes
 {
   // Several children race to take over the SAME dead-holder lock, ten rounds
-  // in one run. The takeover must be race-safe every time: every child gets
-  // in, one at a time — an `inside` marker proves no two critical sections
-  // ever overlap — and the counter loses nothing.
+  // in one run — under CPU load, so contenders really do get descheduled
+  // mid-takeover (the engine race: a slow contender judging a corpse stale
+  // while another publishes a live lock). The takeover must be race-safe
+  // every time: every child gets in, one at a time — an `inside` marker
+  // proves no two critical sections ever overlap — and the counter loses
+  // nothing.
   const N = 8, ROUNDS = 10;
-  for (let round = 0; round < ROUNDS; round++) {
-    const lock = fakeLock(`race-dead-${round}`, { owner: deadPid() });
-    const counter = path.join(root, `counter-dead-${round}`);
-    const inside = path.join(root, `inside-dead-${round}`);
-    const violations = path.join(root, `violations-dead-${round}`);
-    fs.writeFileSync(counter, "0");
-    const code = `import fs from "node:fs"; import { withLock } from ${JSON.stringify(MOD)};
+  const loadKids = Array.from({ length: Math.min(8, Math.max(2, os.cpus().length)) },
+    () => spawn(process.execPath, ["-e", "for(;;){}"], { stdio: "ignore" }));
+  try {
+    for (let round = 0; round < ROUNDS; round++) {
+      const lock = fakeLock(`race-dead-${round}`, { owner: deadPid() });
+      const counter = path.join(root, `counter-dead-${round}`);
+      const inside = path.join(root, `inside-dead-${round}`);
+      const violations = path.join(root, `violations-dead-${round}`);
+      fs.writeFileSync(counter, "0");
+      const code = `import fs from "node:fs"; import { withLock } from ${JSON.stringify(MOD)};
 withLock(${JSON.stringify(lock)}, () => {
   if (fs.existsSync(${JSON.stringify(inside)})) fs.appendFileSync(${JSON.stringify(violations)}, "overlap\\n");
   fs.writeFileSync(${JSON.stringify(inside)}, "1");
@@ -254,12 +260,18 @@ withLock(${JSON.stringify(lock)}, () => {
   const n = Number(fs.readFileSync(${JSON.stringify(counter)}, "utf8"));
   fs.writeFileSync(${JSON.stringify(counter)}, String(n + 1));
 }, { waitMs: 30000, pollMs: 5 });`;
-    const kids = Array.from({ length: N }, () => runChild(code));
-    assert.deepEqual(await Promise.all(kids), Array(N).fill(0), `round ${round}: every child exited 0`);
-    assert.equal(fs.readFileSync(counter, "utf8"), String(N), `round ${round}: no holder's update was lost`);
-    assert.equal(fs.existsSync(violations), false, `round ${round}: two children were inside the lock at once`);
-    assert.equal(fs.existsSync(lock), false);
+      const kids = Array.from({ length: N }, () => runChild(code));
+      assert.deepEqual(await Promise.all(kids), Array(N).fill(0), `round ${round}: every child exited 0`);
+      assert.equal(fs.readFileSync(counter, "utf8"), String(N), `round ${round}: no holder's update was lost`);
+      assert.equal(fs.existsSync(violations), false, `round ${round}: two children were inside the lock at once`);
+      assert.equal(fs.existsSync(lock), false);
+    }
+  } finally {
+    for (const k of loadKids) k.kill("SIGKILL");
+    await Promise.all(loadKids.map((k) => new Promise((r) => k.on("exit", r))));
   }
+  const strayGuards = fs.readdirSync(root).filter((f) => f.endsWith(".tmutex"));
+  assert.deepEqual(strayGuards, [], `guard mutexes left behind: ${strayGuards}`);
 }
 {
   // Same race, but the stale lock has NO owner file (an old version's lock,
@@ -534,6 +546,33 @@ withLock(${JSON.stringify(lock)}, () => {
   assert.equal(codeWaiter, 0, "the contender still acquired the released lock");
   assert.equal(fs.readFileSync(counter, "utf8"), "1", "the waiter's update landed");
   assert.equal(fs.existsSync(lock), false);
+}
+
+// ============================================================ the guard mutex itself
+{
+  // An orphaned guard mutex — its holder crashed between mkdirSync and
+  // rmdirSync — blocks acquisition only until it is older than
+  // GUARD_STALE_MS (10 s), when it is certainly dead and gets broken.
+  const lock = L("orphan-guard");
+  const gmutex = `${lock}.tmutex`;
+  fs.mkdirSync(gmutex);
+  const old = new Date(Date.now() - 11000);
+  fs.utimesSync(gmutex, old, old);
+  assert.equal(withLock(lock, () => "acquired past the orphan", { waitMs: 3000, pollMs: 5 }),
+    "acquired past the orphan");
+  assert.equal(fs.existsSync(lock), false);
+  assert.equal(fs.existsSync(gmutex), false, "the orphaned guard was removed");
+}
+{
+  // A FRESH guard mutex is a live holder mid-step: withLock waits on it and
+  // gives up at waitMs like any other contention, never breaking it early.
+  const lock = L("fresh-guard");
+  const gmutex = `${lock}.tmutex`;
+  fs.mkdirSync(gmutex);
+  assert.throws(() => withLock(lock, () => 1, { waitMs: 120, pollMs: 10 }), /still running/);
+  assert.equal(fs.existsSync(lock), false, "no lock was published while the guard was held");
+  assert.ok(fs.existsSync(gmutex), "the fresh guard was not broken");
+  fs.rmdirSync(gmutex);
 }
 
 // ============================================================ cleanup sweep
