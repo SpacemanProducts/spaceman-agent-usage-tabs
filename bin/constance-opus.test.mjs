@@ -19,9 +19,11 @@ const CLI = new URL("./constance.mjs", import.meta.url).pathname;
 // when /var/tmp can't be used), which the sandbox shows read-only.
 let root = "";
 for (const base of ["/var/tmp", path.join(os.homedir(), ".cache")]) {
+  if (!path.isAbsolute(base)) continue;
   try { fs.mkdirSync(base, { recursive: true }); root = fs.mkdtempSync(path.join(base, "constance-opus-")); break; } catch {}
 }
 if (!root) root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-opus-"));
+if (!path.isAbsolute(root)) throw new Error(`scratch root is not absolute: ${root}`);
 const state = path.join(root, "state"), bin = path.join(root, "bin"), repo = path.join(root, "repo");
 const tabs = path.join(state, "omarchy/agent-usage-tabs");
 fs.mkdirSync(tabs, { recursive: true }); fs.mkdirSync(bin); fs.mkdirSync(repo);
@@ -90,6 +92,7 @@ fs.writeFileSync(path.join(bin, "notify-send"), `#!/bin/bash\nprintf '%s\\n' "$*
 const proc = path.join(root, "proc"); fs.mkdirSync(proc);
 fs.writeFileSync(path.join(proc, "loadavg"), "0.10 0.50 0.50 1/500 999\n");
 fs.writeFileSync(path.join(proc, "meminfo"), "MemTotal:       33554432 kB\nMemFree:        20971520 kB\nMemAvailable:   20971520 kB\n");
+assert.ok(path.isAbsolute(bin), `fake bin dir is not absolute: ${bin}`);
 const env = { ...process.env, CONSTANCE_WORKTREES: path.join(root, "worktrees"), HOME: fakeHome, SQUAD_PROJECTS: path.join(fakeHome, "Projects"),
   XDG_STATE_HOME: state, XDG_DATA_HOME: path.join(fakeHome, ".local", "share"), PATH: `${bin}:${process.env.PATH}`, CONSTANCE_PROC: proc,
   CONSTANCE_RAMP_GAP_MS: "0", CONSTANCE_TOKENS_GAP_MS: "500", CONSTANCE_NO_NOTIFY: "1",
