@@ -1,6 +1,6 @@
 .pragma library
 // Theme-aware usage colors. Stock panels read colors from qs.Commons Color/Style;
-// this module keeps the plugin's semantic meter colors (low/mid/high) readable on
+// this module keeps the plugin's meter colors (the low/mid/high set and the usage gradient) readable on
 // whatever background a theme gives a surface: it picks the bright or deep palette
 // by the background's lightness, then verifies WCAG contrast and mixes each color
 // toward black or white until it reads. Pure functions so bin/usage-colors.test.mjs
@@ -164,10 +164,39 @@ function palette(bg, under) {
     var rebuilt = clashPalette(set, back);
     if (rebuilt) cols = [rebuilt.low, rebuilt.mid, rebuilt.high];
   }
-  return { light: isLight(back), low: toHex(cols[0]), mid: toHex(cols[1]), high: toHex(cols[2]) };
+  return { light: isLight(back), low: toHex(cols[0]), mid: toHex(cols[1]), high: toHex(cols[2]), bg: toHex(back) };
 }
 
-// The same thresholds the tabs always used: > 85% high, >= 60% mid, else low.
+// The bands every rule keys off (unchanged): > 85% high, >= 60% mid, else low.
+// Only the displayed color is continuous now; use this for decisions.
+function levelOf(p) {
+  return p > 0.85 ? "high" : (p >= 0.6 ? "mid" : "low");
+}
+
+// The displayed meter color: one smooth HSL gradient, hue 120 (green) at 0%
+// down to hue 0 (red) at 100%. Saturation and lightness are fixed per surface,
+// so every percentage has its own color. The dark pair is bright enough that
+// every hue reads on the dark themes; the light pair is deep enough for yellow
+// to read on white.
+var GRADIENT_DARK = { s: 0.80, l: 0.71 };
+var GRADIENT_LIGHT = { s: 0.90, l: 0.22 };
+
+function usageHue(p) {
+  var x = Number(p);
+  if (!isFinite(x)) x = 0;
+  return 120 * (1 - Math.min(1, Math.max(0, x)));
+}
+
+// `pal` is a palette() result: its bg decides the pair, and ensure() only steps
+// in on an unusual background where the fixed pair would not read.
+function gradient(p, pal) {
+  var light = !!(pal && pal.light);
+  var g = light ? GRADIENT_LIGHT : GRADIENT_DARK;
+  var color = toHex(hslToRgb({ h: usageHue(p) / 360, s: g.s, l: g.l }));
+  return pal && pal.bg ? ensure(color, pal.bg) : color;
+}
+
+// The name Panel.qml has always called for a meter's color.
 function forLevel(p, pal) {
-  return p > 0.85 ? pal.high : (p >= 0.6 ? pal.mid : pal.low);
+  return gradient(p, pal);
 }

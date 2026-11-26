@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const src = fs.readFileSync(path.join(here, "..", "usage-colors.js"), "utf8").replace(/^\.pragma library\s*$/m, "");
 const ctx = {}; vm.createContext(ctx); vm.runInContext(src, ctx);
-const { parseColor, composite, isLight, luminance, contrast, toHex, ensure, palette, forLevel } = ctx;
+const { parseColor, composite, isLight, luminance, contrast, toHex, ensure, palette, forLevel, levelOf, usageHue, gradient } = ctx;
 
 const J = (v) => JSON.parse(JSON.stringify(v));
 // ---- parsing / math
@@ -25,17 +25,23 @@ assert.equal(isLight("#ffffff"), true); assert.equal(isLight("#101315"), false);
 assert.equal(toHex({ r: 1, g: 0, b: 0 }), "#ff0000");
 
 // ---- palette on every real built-in theme background + synthetic edge cases
+// Pinned copy of Omarchy's built-in theme backgrounds, so this runs on any machine; an installed
+// Omarchy adds whatever it ships on top.
+const PINNED = { "catppuccin-latte": "#eff1f5", catppuccin: "#1e1e2e", ethereal: "#060B1E", everforest: "#2d353b", "flexoki-light": "#FFFCF0",
+  gruvbox: "#282828", hackerman: "#0B0C16", "jade-horse": "#142620", kanagawa: "#1f1f28", "last-horizon": "#0c0b0c", lumon: "#16242d",
+  lupine: "#fafafa", "matte-black": "#121212", miasma: "#222222", nord: "#2e3440", "retro-82": "#05182e", ristretto: "#2c2525",
+  "rose-pine": "#faf4ed", solitude: "#101315", starship: "#1c1c1e", "tokyo-night": "#1a1b26", vantablack: "#000000", white: "#ffffff" };
 const themeDir = "/usr/share/omarchy/themes";
-const bgs = [];
+const bgs = Object.entries(PINNED);
 if (fs.existsSync(themeDir)) {
   for (const t of fs.readdirSync(themeDir)) {
     const f = path.join(themeDir, t, "colors.toml");
     if (!fs.existsSync(f)) continue;
     const m = fs.readFileSync(f, "utf8").match(/^background\s*=\s*"(#[0-9a-fA-F]{6})"/m);
-    if (m) bgs.push([t, m[1]]);
+    if (m && PINNED[t] !== m[1]) bgs.push([t, m[1]]);
   }
 }
-assert.ok(bgs.length >= 10, "found the built-in themes to test against");
+const realBgs = bgs.slice();
 bgs.push(["mid-gray", "#808080"], ["mid-blue", "#4a6a8a"], ["sepia", "#8a7a5a"]);
 const dist = (a, b) => { const A = parseColor(a), B = parseColor(b); return Math.hypot(A.r - B.r, A.g - B.g, A.b - B.b); };
 for (const [name, bg] of bgs) {
@@ -54,10 +60,10 @@ for (const [name, bg] of bgs) {
 }
 
 // ---- the base sets are unchanged where they already worked (no visual churn)
-assert.deepEqual(J(palette("#101315")), { light: false, low: "#4caf50", mid: "#f2a900", high: "#e5484d" }, "dark theme keeps the bright set");
-assert.deepEqual(J(palette("#eff1f5")), { light: true, low: "#1b7a31", mid: "#9a5b00", high: "#c0262d" }, "light theme keeps the deep set");
-assert.deepEqual(J(palette("#ffffff")), { light: true, low: "#1b7a31", mid: "#9a5b00", high: "#c0262d" });
-assert.deepEqual(J(palette("#000000")), { light: false, low: "#4caf50", mid: "#f2a900", high: "#e5484d" });
+assert.deepEqual(J(palette("#101315")), { light: false, low: "#4caf50", mid: "#f2a900", high: "#e5484d", bg: "#101315" }, "dark theme keeps the bright set");
+assert.deepEqual(J(palette("#eff1f5")), { light: true, low: "#1b7a31", mid: "#9a5b00", high: "#c0262d", bg: "#eff1f5" }, "light theme keeps the deep set");
+assert.deepEqual(J(palette("#ffffff")), { light: true, low: "#1b7a31", mid: "#9a5b00", high: "#c0262d", bg: "#ffffff" });
+assert.deepEqual(J(palette("#000000")), { light: false, low: "#4caf50", mid: "#f2a900", high: "#e5484d", bg: "#000000" });
 
 // ---- translucent popup backgrounds composite over the shell background
 {
@@ -72,12 +78,61 @@ assert.deepEqual(J(palette("#000000")), { light: false, low: "#4caf50", mid: "#f
   assert.equal(ensure("not-a-color", "#fff"), "#000000", "unparseable input falls back safely");
 }
 
-// ---- forLevel keeps the exact 60/85 thresholds
+// ---- the 60/85 bands that rules key off are unchanged
 {
-  const p = palette("#101315");
-  assert.equal(forLevel(0.51, p), "#4caf50"); assert.equal(forLevel(0.6, p), "#f2a900");
-  assert.equal(forLevel(0.85, p), "#f2a900"); assert.equal(forLevel(0.851, p), "#e5484d");
-  assert.equal(forLevel(1, p), "#e5484d");
+  assert.equal(levelOf(0.51), "low"); assert.equal(levelOf(0.599), "low"); assert.equal(levelOf(0.6), "mid");
+  assert.equal(levelOf(0.85), "mid"); assert.equal(levelOf(0.851), "high"); assert.equal(levelOf(1), "high");
+}
+
+// ---- the smooth gradient: green (120) at 0% to red (0) at 100%
+const hueOf = (hex) => {
+  const { r, g, b } = parseColor(hex);
+  const max = Math.max(r, g, b), d = max - Math.min(r, g, b);
+  if (!d) return NaN;
+  const h = max === r ? ((g - b) / d + 6) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return (h * 60) > 300 ? h * 60 - 360 : h * 60;
+};
+{
+  const dark = palette("#101315");
+  // The named stops, as shown on a dark theme.
+  const want = { 0: [120, "#7af07a"], 15: [102, null], 30: [84, null], 45: [66, null], 60: [48, null], 75: [30, null], 90: [12, null], 100: [0, "#f07a7a"] };
+  for (const [pct, [hue, hex]] of Object.entries(want)) {
+    const c = forLevel(pct / 100, dark);
+    assert.ok(Math.abs(usageHue(pct / 100) - hue) < 1e-9, `${pct}% asks for hue ${hue}`);
+    assert.ok(Math.abs(hueOf(c) - hue) < 1, `${pct}%: ${c} has hue ${hueOf(c).toFixed(1)}, wanted ${hue}`);
+    if (hex) assert.equal(c, hex, `${pct}% color`);
+  }
+  assert.equal(new Set(Object.keys(want).map((p) => forLevel(p / 100, dark))).size, 8, "all eight stops differ");
+  assert.equal(usageHue(-1), 120); assert.equal(usageHue(7), 0); assert.equal(usageHue(NaN), 120, "junk clamps");
+  assert.equal(forLevel(0.5, dark), gradient(0.5, dark), "forLevel is the gradient");
+}
+// ---- hue never goes back up, and every whole percentage has its own color
+for (const bg of ["#101315", "#ffffff"]) {
+  const pal = palette(bg);
+  let last = Infinity; const seen = new Set();
+  for (let i = 0; i <= 1000; i++) {
+    const h = usageHue(i / 1000);
+    assert.ok(h <= last, `requested hue rose at ${i / 10}%`); last = h;
+  }
+  last = Infinity;
+  for (let i = 0; i <= 100; i++) {
+    const c = gradient(i / 100, pal); seen.add(c);
+    const h = hueOf(c);
+    assert.ok(h <= last + 0.01, `${bg}: shown hue rose at ${i}% (${last.toFixed(2)} -> ${h.toFixed(2)})`); last = h;
+  }
+  assert.equal(seen.size, 101, `${bg}: 101 percentages, 101 colors`);
+}
+// ---- readable at every point on every built-in theme (yellow included)
+for (const [name, bg] of realBgs) {
+  const pal = palette(bg);
+  for (let i = 0; i <= 100; i++) {
+    const c = gradient(i / 100, pal);
+    assert.ok(contrast(c, bg) >= 4.5, `${name} (${bg}): ${i}% ${c} only ${contrast(c, bg).toFixed(2)}:1`);
+  }
+}
+// ---- on the dark themes the fixed saturation/lightness is used untouched
+for (const [name, bg] of realBgs.filter(([, bg]) => !isLight(bg))) {
+  for (let i = 0; i <= 100; i += 5) assert.equal(gradient(i / 100, palette(bg)), gradient(i / 100, { light: false }), `${name}: ${i}% needed no adjustment`);
 }
 
 // ---- Panel.qml wiring: theme colors in, palette out, no hardcoded meter hex

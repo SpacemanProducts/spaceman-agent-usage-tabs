@@ -9,9 +9,10 @@ Use this goal to make small design calls. When a choice is unclear, pick what
 keeps the developer in flow:
 
 - **Glanceable first.** The bar number and tab-chip colors must answer "am I
-  about to hit a wall, and where?" without opening anything. Green < 60%,
-  amber 60–85%, red > 85%, gray = no data. Never change these thresholds
-  casually; they appear in the bar, meters, and chips.
+  about to hit a wall, and where?" without opening anything. Colors are one smooth
+  gradient, green at 0% to red at 100% (`usage-colors.js`), gray = no data. The
+  bands behind the rules are unchanged (low < 60%, mid 60–85%, high > 85%); never
+  change those thresholds casually.
 - **Quiet by default.** The only sound is the reset cha-ching the user asked for
   (on by default, with a switch and a volume control); alerts are silent. Alert once per window, never repeat on
   a blip. No error cards: missing data is one calm line of status.

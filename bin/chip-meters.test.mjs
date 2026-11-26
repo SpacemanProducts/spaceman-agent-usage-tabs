@@ -64,13 +64,12 @@ const uctx = {}; vm.createContext(uctx); vm.runInContext(ucsrc, uctx);
 const { palette, forLevel } = uctx;
 const darkPal = palette("#101315");   // a dark surface keeps the bright set
 const colorOf = (p) => forLevel(p, darkPal);
-assert.equal(colorOf(0.51), "#4caf50", "51% -> green, same as the tab bar");
-assert.equal(colorOf(0.94), "#e5484d", "94% -> red, same as the tab bar");
-assert.equal(colorOf(0.99), "#e5484d", "99% -> red");
-assert.equal(colorOf(1), "#e5484d", "100% -> red");
-assert.equal(colorOf(0.6), "#f2a900", "60% boundary -> amber");
-assert.equal(colorOf(0.85), "#f2a900", "85% stays amber (> 85% is red)");
-assert.equal(colorOf(0.851), "#e5484d", "just over 85% -> red, matching the tab");
+assert.equal(colorOf(0), "#7af07a", "0% is the green end");
+assert.equal(colorOf(1), "#f07a7a", "100% is the red end: a used-up robot is never green");
+assert.notEqual(colorOf(0.6), colorOf(0.61), "the bar color moves smoothly with the reading");
+assert.equal(uctx.levelOf(0.6), "mid", "60% boundary is still the middle band");
+assert.equal(uctx.levelOf(0.85), "mid", "85% stays in the middle band");
+assert.equal(uctx.levelOf(0.851), "high", "just over 85% is still the high band");
 
 // The panel wires the two readings to the percent, the robot and the tooltip,
 // mirroring the tab chip: the chip's outside border is the session meter and

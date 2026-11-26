@@ -80,13 +80,13 @@ so in one line. These need a login first:
 
 **In the bar**
 - A number next to the icon, like the battery: the highest *session* usage across your
-  agents. Amber from 60%, red above 85%.
+  agents. Its color moves smoothly from green (0%) through yellow and orange to red (100%).
 
 **The tabs**
 - One tab per installed agent, with full names, in an order you choose.
 - Each tab chip shows two meters at a glance: the **outer border is the session meter** and
-  the **inner fill is the weekly meter**. Green under 60%, amber 60-85%, red above 85%, gray
-  when there is no data. An agent with one meter uses it for both. The selected tab has a
+  the **inner fill is the weekly meter**. Each is colored on one smooth
+  gradient, green at 0% to red at 100%, gray when there is no data. An agent with one meter uses it for both. The selected tab has a
   thicker border.
 - Tabs for agents that aren't installed are hidden; they appear automatically once you
   install the tool, with a one-time notification. You can also hide any installed tab on
@@ -363,9 +363,9 @@ the agent in a terminal.
 ### Themes
 
 The panel follows the active Omarchy theme live (switch themes and it changes with no restart): text, background and
-borders come from the theme's popup colors and icons from its accent. The green, amber and red meter colors, and the
-celebration colors, switch to deeper variants on a light theme so they stay readable. The chrome is kept quiet so the usage bars stand
-out: chip borders are soft and thin, the buttons are faint theme-colored tints, and the chips keep their green/amber/red meter
+borders come from the theme's popup colors and icons from its accent. The usage gradient and the
+celebration colors switch to deeper variants on a light theme so they stay readable. The chrome is kept quiet so the usage bars stand
+out: chip borders are soft and thin, the buttons are faint theme-colored tints, and the chips keep their usage
 color (the point of a chip) at a lower volume.
 
 ### Week view, 30-day history and CSV export
