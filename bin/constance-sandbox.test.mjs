@@ -122,12 +122,16 @@ assert.equal(busDirs(), busBefore, "a refused launch leaves nothing behind");
 // When the CLI exits, whatever it left running inside (a daemon, even one that
 // left the process group) dies with the sandbox, and the job's exit code comes through.
 {
-  const box = sandboxLaunch(["sh", "-c", "setsid sleep 77 >/dev/null 2>&1 & sleep 0.3; exit 3"], { agent: "grok", dir: proj, tmp, env });
+  // A random fractional duration marks this run's sleep so a parallel suite's
+  // own `sleep` can't be mistaken for a survivor (pgrep -f is global).
+  const dur = `77.${String(Math.floor(Math.random() * 1e6)).padStart(6, "0")}`;
+  const box = sandboxLaunch(["sh", "-c", `setsid sleep ${dur} >/dev/null 2>&1 & sleep 0.3; exit 3`], { agent: "grok", dir: proj, tmp, env });
   const c = spawn(box.cmd[0], box.cmd.slice(1), { env: box.env, detached: true, stdio: "ignore" });
   const code = await new Promise((r) => c.on("exit", r));
   assert.equal(code, 3, "the agent's exit code is the job's");
   await new Promise((r) => setTimeout(r, 700));
-  assert.equal(spawnSync("pgrep", ["-f", "^sleep 77$"], { encoding: "utf8" }).stdout.trim(), "", "nothing it started outlives the job");
+  const pat = `^sleep ${dur.replace(".", "[.]")}$`;
+  assert.equal(spawnSync("pgrep", ["-f", pat], { encoding: "utf8" }).stdout.trim(), "", "nothing it started outlives the job");
 }
 // The job survives its short-lived launcher (delegate exits right after spawning it).
 {
