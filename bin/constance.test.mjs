@@ -1280,7 +1280,7 @@ assert.equal(run("start", "--dir", repo, "--goal", "wire goal").status, 0);
 assert.ok(await until(() => status().jobs.some((j) => j.status === "running" && j.goal === status().goal?.id), 30000), "the wire job runs");
 {
   const ws = status();
-  assert.match(ws.progress.line, /^Devin can't tell · no session spent yet · 0 copies running · session \d+%$/, "progress line: " + ws.progress.line);
+  assert.match(ws.progress.line, /^Workers can't tell · no session spent yet · 0 copies running · session \d+%$/, "progress line: " + ws.progress.line);
   assert.ok(ws.board.now.endsWith(" · " + ws.progress.line), "the Now line ends with the progress line: " + ws.board.now);
   const wj = ws.jobs.find((j) => j.status === "running");
   const pj = JSON.parse(run("job", String(wj.id)).stdout);
@@ -1293,7 +1293,7 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
 delete env.CONSTANCE_NOTIFY_CMD;
 {
   assert.ok(fs.readdirSync(path.join(tabs, "constance", "briefs")).some((f) => f.endsWith(".json")), "the brief is cached in her state dir");
-  assert.ok(await until(() => { try { return /Devin can't tell · no session spent yet · 0 copies running · session \d+%/.test(fs.readFileSync(path.join(root, "prog-notify.txt"), "utf8")); } catch { return false; } }, 30000),
+  assert.ok(await until(() => { try { return /Workers can't tell · no session spent yet · 0 copies running · session \d+%/.test(fs.readFileSync(path.join(root, "prog-notify.txt"), "utf8")); } catch { return false; } }, 30000),
     "the heartbeat's tick sent the progress line through CONSTANCE_NOTIFY_CMD");
   assert.match(fs.readFileSync(path.join(root, "prog-notify.txt"), "utf8"), /suppress-sound:true/);
   const asks = fs.readFileSync(path.join(tabs, "constance", "asks.jsonl"), "utf8");
