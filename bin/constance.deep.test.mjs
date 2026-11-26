@@ -249,8 +249,8 @@ function battery(w, commands = SAFE_COMMANDS(w)) { for (const a of commands) run
     ["a JSON string", '"just a string"'],
     ["a JSON number", "42"],
     ["jobs not an array", '{"goal": null, "jobs": {"a": 1}, "next": 1}'],
-    ["junk job entries (no null)", '{"goal": null, "jobs": [{}, "x", 5, true], "next": 1}'],
-    ["a string goal", '{"goal": "oops", "jobs": [], "next": 1}', (w) => FULL_COMMANDS(w).filter((a) => a[0] !== "needs-owner")],
+    ["junk job entries", '{"goal": null, "jobs": [null, {}, "x", 5, true], "next": 1}'],
+    ["a string goal", '{"goal": "oops", "jobs": [], "next": 1}'],
     ["an array goal", '{"goal": [1, 2], "jobs": [], "next": 1}'],
     ["an empty-object goal", '{"goal": {}, "jobs": [], "next": 1}'],
     ["a done goal, no jobs", (w) => JSON.stringify({ goal: { id: "g", text: "old goal", dir: w.proj, status: "done", startedAt: 1, finishedAt: 2 }, jobs: [], next: 1 })],
@@ -260,6 +260,10 @@ function battery(w, commands = SAFE_COMMANDS(w)) { for (const a of commands) run
       jobs: [{ id: 1, goal: "g", agent: "grok", status: "finished", task: "t", summary: "s", startedAt: 1, finishedAt: 2 }] })],
     ["a dead running job, junk guard", (w) => JSON.stringify({ goal: { id: "g", "text": "x", "dir": w.proj, "status": "running", "startedAt": 1 }, next: 2, guards: {},
       jobs: [{ id: 1, goal: "g", agent: "grok", dir: w.proj, repo: w.proj, files: [], task: "t", status: "running", pid: 999999, guardBefore: "junk", startedAt: 1 }] })],
+    // A running record with no dir, worktree or tmp: there is nowhere its done
+    // file could be, so the sweep must not die on path.join(undefined).
+    ["a running job with no dir", (w) => JSON.stringify({ goal: { id: "g", text: "x", dir: w.proj, status: "running", startedAt: 1 }, next: 2, guards: {},
+      jobs: [{ id: 1, goal: "g", agent: "grok", status: "running", task: "t", startedAt: 1 }] })],
   ];
   for (const [name, content, commands] of JOBS_VARIANTS) {
     const w = world(); writeData(w);
@@ -301,23 +305,12 @@ function battery(w, commands = SAFE_COMMANDS(w)) { for (const a of commands) run
     battery(w, SAFE_COMMANDS(w));
     console.log(`  data.json variant survived: ${JSON.stringify(content)}`);
   }
-  // data.json valid JSON but the wrong shape. Commands that read data.json
-  // unguarded (status, agents, pace, summary, remote, log, spare — pace crashes
-  // in freshData on a null payload) — see the BUG notes at the bottom — so
-  // those variants run the rest of the battery only.
-  const DATA_SKIP = new Set(["status", "agents", "pace", "summary", "remote", "log", "spare"]);
-  const dataCommands = (w, skip) => FULL_COMMANDS(w).filter((a) => !skip.has(a[0]));
+  // data.json valid JSON but the wrong shape: readData() treats a bad payload
+  // or agent list as no data, so the whole battery is safe.
   for (const [name, content] of [
     ["null", "null"],
     ["agents not an array", () => JSON.stringify({ generatedAt: Date.now(), agents: "nope" })],
     ["null agent entries", () => JSON.stringify({ generatedAt: Date.now(), agents: [null, 5, "x", { id: "grok" }] })],
-  ]) {
-    const w = world(); writeTabs(w, "data.json", typeof content === "function" ? content() : content);
-    battery(w, dataCommands(w, DATA_SKIP));
-    console.log(`  data.json wrong-shape variant survived (unguarded readers skipped): ${name}`);
-  }
-  // data.json valid JSON, wrong shape but still readable: the full battery is safe.
-  for (const [name, content] of [
     ["no agents key", () => JSON.stringify({ generatedAt: Date.now() })],
     ["an array payload", "[]"],
     ["a number payload", "42"],
@@ -402,48 +395,8 @@ function battery(w, commands = SAFE_COMMANDS(w)) { for (const a of commands) run
 for (const w of worlds) { try { fs.rmSync(w.root, { recursive: true, force: true }); } catch {} }
 console.log("constance.deep: tests passed");
 
-// BUG: a jobs.json whose jobs array holds null (or any non-object) crashes
-// sweep() — `j.status` on null throws inside store.update, so status, jobs,
-// wait, review and stop all die with a TypeError stack instead of recovering.
-// Repro that fails today:
-//   const w = world(); writeData(w);
-//   writeJobs(w, { goal: null, jobs: [null], next: 1 });
-//   const r = run(w, "status");   // crashes: TypeError at constance.mjs sweep
-//   assert.doesNotMatch(r.stderr, /(^|\n)\s+at\s/);
-//
-// BUG: a "running" job record with no dir, worktree or tmp crashes sweep() —
-// jobDoneFile() calls path.join(undefined) outside its try block, so status and
-// every sweeping command die with ERR_INVALID_ARG_TYPE. Repro that fails today:
-//   const w = world(); writeData(w);
-//   writeJobs(w, { goal: { id: "g", text: "x", dir: w.proj, status: "running", startedAt: 1 },
-//     jobs: [{ id: 1, status: "running", agent: "grok" }], next: 2 });
-//   const r = run(w, "status");   // crashes: TypeError at constance-jobs.mjs doneFile
-//   assert.doesNotMatch(r.stderr, /(^|\n)\s+at\s/);
-//
-// BUG: `needs-owner TEXT` crashes when jobs.json's goal is a string (or any
-// primitive): store.update does `s.goal.needsOwner = text`, which throws
-// "Cannot create property 'needsOwner' on string 'oops'" in strict mode. Every
-// other command survives a string goal. Repro that fails today:
-//   const w = world(); writeData(w);
-//   writeJobs(w, { goal: "oops", jobs: [], next: 1 });
-//   const r = run(w, "needs-owner", "x");   // crashes with a TypeError stack
-//   assert.doesNotMatch(r.stderr, /(^|\n)\s+at\s/);
-//
-// BUG: a data.json that parses to null crashes every command that reads it
-// unguarded — readData() returns the parsed null instead of the
-// { agents: [] } fallback. `status` dies in tokensView, `pace`/`agents`/`spare`
-// die in freshData or on d.agents ("Cannot read properties of null"), and
-// agents, summary, remote and log crash the same way. Repro that fails today:
-//   const w = world(); writeTabs(w, "data.json", "null");
-//   const r = run(w, "status");   // crashes with a TypeError stack
-//   assert.doesNotMatch(r.stderr, /(^|\n)\s+at\s/);
-//
-// BUG: a data.json whose agents is not an array of objects crashes the same
-// readers: agents: "nope" dies on `(d.agents || []).filter/.map` (string has
-// no filter), and agents: [null, ...] dies on `a.name`/`a.id` of a null entry.
-// judgeAll() itself guards both cases — the panel-facing readers don't.
-// Repro that fails today:
-//   const w = world(); writeData(w);
-//   writeTabs(w, "data.json", JSON.stringify({ generatedAt: Date.now(), agents: "nope" }));
-//   const r = run(w, "status");   // crashes: .filter is not a function
-//   assert.doesNotMatch(r.stderr, /(^|\n)\s+at\s/);
+// The crash cases this file used to document as BUG notes are regression
+// variants above: "junk job entries" (null in jobs[]), "a running job with no
+// dir", "a string goal" (needs-owner included in the full battery) and the
+// data.json wrong-shape variants (status/agents/pace/summary/remote/log/spare
+// all run against them).
