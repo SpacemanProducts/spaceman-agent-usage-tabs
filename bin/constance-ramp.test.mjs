@@ -2,9 +2,26 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { copyLimit, roomForCopy, readMachine, PUBLISHED_MAX } from "./constance-ramp.mjs";
+import { copyLimit, copiesFor, roomForCopy, readMachine, PUBLISHED_MAX, CAPS } from "./constance-ramp.mjs";
 
-// The limit: Devin's published 10 by default, lowered (never raised) by the setting.
+// The capability table: per-agent published copy counts.
+assert.deepEqual(CAPS, { devin: { copies: 10 }, kilo: { copies: 2 } });
+
+// copiesFor: listed agents get their count; anything else gets 1.
+assert.equal(copiesFor("devin"), 10);
+assert.equal(copiesFor("kilo"), 2);
+assert.equal(copiesFor("grok"), 1, "unlisted agent is single-copy");
+assert.equal(copiesFor(null), 1, "null agent");
+assert.equal(copiesFor(undefined), 1, "undefined agent");
+assert.equal(copiesFor({}), 1, "object agent");
+assert.equal(copiesFor(42), 1, "numeric agent");
+
+// PUBLISHED_MAX stays derived from CAPS with the same keys and values.
+assert.deepEqual(PUBLISHED_MAX, { devin: 10, kilo: 2 });
+assert.deepEqual(Object.keys(PUBLISHED_MAX).sort(), Object.keys(CAPS).sort());
+for (const [id, cap] of Object.entries(CAPS)) assert.equal(PUBLISHED_MAX[id], copiesFor(id));
+
+// The limit: a listed agent's published count by default, lowered (never raised) by the setting.
 assert.equal(PUBLISHED_MAX.devin, 10);
 assert.equal(copyLimit("devin"), 10);
 assert.equal(copyLimit("devin", {}), 10);

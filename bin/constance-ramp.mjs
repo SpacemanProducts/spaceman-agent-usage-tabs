@@ -6,14 +6,29 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// Published concurrent limits: Devin's is 10, Kilo Code's is 2 (each gets its
-// own worktree copies). Agents not listed stay single-job.
-export const PUBLISHED_MAX = { devin: 10, kilo: 2 };
+// Per-agent capabilities, keyed by agent id. `copies` is the published number
+// of concurrent copies Constance may run for that agent (each gets its own
+// worktree). An agent with no entry gets one job and no worktree copies.
+export const CAPS = {
+  devin: { copies: 10 },
+  kilo: { copies: 2 },
+};
+
+// The published copy count for an agent: its CAPS entry, or 1 when the agent
+// is unlisted or the entry is malformed.
+export function copiesFor(agent) {
+  const n = CAPS[agent]?.copies;
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
+// Derived from CAPS so existing importers keep working: { agent: copies }.
+export const PUBLISHED_MAX = Object.fromEntries(
+  Object.entries(CAPS).map(([id, cap]) => [id, cap.copies ?? 1]),
+);
 
 // The owner can lower it (settings.json `constanceMaxCopies`, 1..the published max).
 export function copyLimit(id, settings = {}) {
-  const top = PUBLISHED_MAX[id];
-  if (!top) return 1;
+  const top = copiesFor(id);
   const want = Math.floor(Number(settings?.constanceMaxCopies));
   return Number.isFinite(want) && want >= 1 ? Math.min(top, want) : top;
 }
