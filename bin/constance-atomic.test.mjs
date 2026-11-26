@@ -17,9 +17,11 @@ const SRC = fs.readFileSync(CLI, "utf8");
 
 let root = "";
 for (const base of ["/var/tmp", path.join(os.homedir(), ".cache")]) {
+  if (!path.isAbsolute(base)) continue;
   try { fs.mkdirSync(base, { recursive: true }); root = fs.mkdtempSync(path.join(base, "constance-atomic-")); break; } catch {}
 }
 if (!root) root = fs.mkdtempSync(path.join(os.tmpdir(), "constance-atomic-"));
+assert.ok(path.isAbsolute(root), "scratch root must be absolute");
 const state = path.join(root, "state"), fakeHome = path.join(root, "home"), proc = path.join(root, "proc");
 const tabs = path.join(state, "omarchy/agent-usage-tabs"), cdir = path.join(tabs, "constance");
 fs.mkdirSync(cdir, { recursive: true }); fs.mkdirSync(fakeHome, { recursive: true }); fs.mkdirSync(proc);
@@ -28,6 +30,7 @@ fs.writeFileSync(path.join(proc, "meminfo"), "MemTotal:       33554432 kB\nMemFr
 
 // A fake busctl so `watch` has a bus to listen to; a fake bin dir goes first on PATH.
 const fakeBin = path.join(root, "bin"); fs.mkdirSync(fakeBin);
+assert.ok(path.isAbsolute(fakeBin), "the fake bin dir on PATH must be absolute");
 fs.writeFileSync(path.join(fakeBin, "busctl"), "#!/bin/bash\nsleep 30\n", { mode: 0o755 });
 
 const env = { ...process.env, HOME: fakeHome, XDG_STATE_HOME: state, XDG_DATA_HOME: path.join(fakeHome, ".local", "share"),
