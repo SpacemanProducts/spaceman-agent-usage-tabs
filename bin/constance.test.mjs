@@ -799,7 +799,7 @@ echo "Report: done."
   assert.ok(await until(() => status().jobs.some((j) => j.status === "running" && j.title === "building q1")), "the tagged job runs");
   {
     const b = status().board;
-    assert.match(b.now, /^Grok is on building q1\. 2 goals queued\. · Devin /, b.now);
+    assert.match(b.now, /^Grok is on building q1\. 2 goals queued\. · Workers /, b.now);
     const card = b.cards.find((c) => c.title === "building q1");
     assert.equal(card.status, "running"); assert.deepEqual(card.files, ["q1.txt"]); assert.deepEqual(card.items, [1]);
     assert.equal(b.checklist.line, "0 of 1 done");
