@@ -244,6 +244,9 @@ keeps the developer in flow:
   Since 1.56.1 every ready-queue task carries the goal it was queued in (`goal`); only that goal hands it out,
   shows or counts it. Pending tasks of other goals are expired (`expireTasks`) and their refills.json entries
   dropped, so nothing queued in one goal leaks into the next (wrong item numbers, unplanned review steps).
+  Since 1.57.0 an idle panel folds a finished goal into one "Last goal" line (`constance-last-goal.js`) with the
+  goal box first; Show report unfolds it with the full report from `C report` (`report-<id>.txt`, not the clipped
+  4000 chars). The order swap is one Item placing Brain/Milk and the goal box (`constanceSetup`), no copies.
 
   Since 1.50.2 (security review, 2026-11-25): workers can't write ANY git data or `.constance/`
   (read-only binds; `protectedPaths` in `bin/constance-sandbox.mjs`) and are told not to commit;

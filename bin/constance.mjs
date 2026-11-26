@@ -80,6 +80,7 @@ import { briefFor } from "./constance-brief.mjs";
 import { progressLine, tick as progressTick } from "./constance-progress.mjs";
 import { resumePlan, logAsk } from "./constance-resume.mjs";
 import { projectDirProblem } from "./constance-projectdir.mjs";
+import { goalReport } from "./constance-report.mjs";
 import { memoryOf, addDecision, addProblem, solveProblem, addNext, beginStep, endStep, openStep, renderHandoff, handoffFile, writeHandoff, insidePlugins } from "./constance-handoff.mjs";
 import { nextStep, stepPrompt, resumedFrom, progressMark, MAX_NUDGES } from "./constance-steps.mjs";
 import { routeModel, logRoute } from "./constance-route.mjs";
@@ -1772,6 +1773,13 @@ function checkCmd() {
 }
 
 // `job ID`: one job in full for the panel's card.
+// `C report`: the current (or last) goal's full report, for the panel's Show report.
+function reportCmd() {
+  const g = store.read().goal;
+  if (!g) fail("No goal yet.");
+  out({ id: g.id, status: g.status, report: goalReport(store.dir, g) });
+}
+
 function jobCmd() {
   const id = Number(process.argv[3]);
   const s = store.read(), j = s.jobs.find((x) => x.id === id);
@@ -2384,6 +2392,7 @@ if (process.argv[1] === SELF) {
   else if (cmd === "goals") goalsCmd();
   else if (cmd === "check") checkCmd();
   else if (cmd === "job") jobCmd();
+  else if (cmd === "report") reportCmd();
   else if (cmd === "needs-owner") {
     const text = process.argv.slice(3).join(" ").trim();
     if (!text) fail("Usage: needs-owner TEXT");
@@ -2402,5 +2411,5 @@ if (process.argv[1] === SELF) {
   else if (cmd === "split") splitCmd();
   else if (cmd === "spec") specCmd();
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|summary|watch|selfmerge|route|handoff|batchreview|split|spec|takeover|stop|recover");
+  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|summary|watch|selfmerge|route|handoff|batchreview|split|spec|takeover|report|stop|recover");
 }

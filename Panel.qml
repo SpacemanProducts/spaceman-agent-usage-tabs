@@ -10,6 +10,7 @@ import "chip-meters.js" as ChipMeters
 import "tab-order.js" as TabOrder
 import "fixes.js" as Fixes
 import "usage-colors.js" as UsageColors
+import "constance-last-goal.js" as LastGoal
 
 // Cook Meter (plugin id spaceman.agent-usage-tabs). Display only: bin/collect.mjs writes data.json, this file
 // watches it. Written from scratch; shares no code or state with other plugins.
@@ -953,11 +954,32 @@ Panel {
     return m.charAt(0).toUpperCase() + m.slice(1)
   }
   readonly property bool constanceActive: !!constance.goal && (constance.goal.status === "running" || constance.goal.status === "paused")
+  // A goal that ended folds into one "Last goal" line, so an idle panel opens with the
+  // new-goal box up front; the line's Show report chip unfolds the full goal, its report,
+  // checklist and jobs. Folded again every time her panel opens.
+  readonly property bool constanceFinished: LastGoal.finished(constance.goal)
+  property bool constanceLastOpen: false
+  // The full report, fetched on Show report (`C report`): the goal record keeps only
+  // its last 4000 characters. Shown only for the goal it was fetched for.
+  property string constanceLastReport: ""
+  property string constanceLastReportId: ""
+  function toggleLastGoal() {
+    constanceLastOpen = !constanceLastOpen
+    if (constanceLastOpen && !constanceLastReader.running) constanceLastReader.running = true
+  }
+  Process {
+    id: constanceLastReader
+    command: ["node", root.pluginDir + "/bin/constance.mjs", "report"]
+    stdout: StdioCollector {
+      onStreamFinished: { try { var d = JSON.parse(String(text || "")); if (d && d.id) { root.constanceLastReport = String(d.report || ""); root.constanceLastReportId = String(d.id) } } catch (e) {} }
+    }
+  }
   function toggleConstance() {
     constanceOpen = !constanceOpen
     if (constanceOpen) {
       squadOpen = false; addOpen = false; settingsOpen = false; agentHereOpen = false; welcomeOpen = false; weeklyOpen = false
       constanceError = ""
+      constanceLastOpen = false
       if (!repoLister.running) repoLister.running = true
       if (!zenityCheck.running) zenityCheck.running = true
       refreshConstance()
@@ -2734,6 +2756,7 @@ Panel {
             // her Session % used, and her leverage (free-worker tokens per 1% of session).
             Row {
               id: constanceHead
+              visible: root.constanceActive
               width: parent.width
               spacing: Style.space(8)
               readonly property real tileW: (width - spacing * 3) / 4
@@ -2785,306 +2808,324 @@ Panel {
               }
             }
 
-            // Brain: which agent's model she thinks with. The pick saves constanceBrain;
-            // the caption under the chips says why the wanted brain isn't running, or what
-            // it runs on. Sandbox and guardrails stay either way.
-            Column {
+            // Brain + Milk Opus (her tuning) and the goal box. While a goal is on, tuning
+            // comes first; when she is idle the goal box moves up front so an idle panel opens
+            // ready for the next goal. One Item places the two (no copies, ids unchanged).
+            Item {
+              id: constanceSetup
               width: parent.width
-              spacing: Style.space(4)
-              Flow {
+              readonly property real gap: Style.space(14)
+              readonly property bool goalFirst: !root.constanceActive
+              readonly property real goalH: constanceGoalBox.visible ? constanceGoalBox.height : 0
+              height: constanceTune.height + (goalH > 0 ? goalH + gap : 0)
+              Column {
+                id: constanceTune
                 width: parent.width
-                spacing: Style.space(6)
-                Text {
-                  textFormat: Text.PlainText
-                  text: "Brain"
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
-                  height: Style.font.bodySmall * 1.3
-                  verticalAlignment: Text.AlignVCenter
-                }
-                MiniChip {
-                  label: "Claude Code"
-                  tip: "She thinks with Claude Code (the claude CLI login)"
-                  on: root.constanceBrain === "claude"
-                  onClicked: root.writeSetting(["constanceBrain", "claude"])
-                }
-                MiniChip {
-                  label: "Antigravity"
-                  tip: "She thinks with Antigravity (the agy CLI login)"
-                  on: root.constanceBrain === "antigravity"
-                  onClicked: root.writeSetting(["constanceBrain", "antigravity"])
-                }
-              }
-              Text {
-                visible: root.constanceBrainCaption !== ""
+                spacing: Style.space(14)
+                y: constanceSetup.goalFirst && constanceSetup.goalH > 0 ? constanceSetup.goalH + constanceSetup.gap : 0
+              // Brain: which agent's model she thinks with. The pick saves constanceBrain;
+              // the caption under the chips says why the wanted brain isn't running, or what
+              // it runs on. Sandbox and guardrails stay either way.
+              Column {
                 width: parent.width
-                textFormat: Text.PlainText
-                wrapMode: Text.WordWrap
-                text: root.constanceBrainCaption
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-            }
-
-            // Milk Opus: how much of the work she keeps for herself on the paid plan versus
-            // hands to the free agents. Moving it saves constanceMilk; sandbox and guardrails
-            // stay on at every setting.
-            Column {
-              width: parent.width
-              spacing: Style.space(4)
-              Item {
-                width: parent.width
-                height: Math.max(milkTitle.implicitHeight, milkValue.implicitHeight)
-                Text {
-                  id: milkTitle
-                  anchors.left: parent.left
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: root.constanceMilkLabel
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
-                }
-                Text {
-                  id: milkValue
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: String(root.constanceMilk)
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-              }
-              Item {
-                id: milkSlide
-                width: parent.width
-                height: Style.space(16)
-                readonly property real handleW: Style.space(14)
-                readonly property real pad: handleW / 2 + Style.space(2)
-                // The rail is inset by half a handle so the knob can reach both ends.
-                Rectangle {
-                  id: milkRail
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.leftMargin: milkSlide.pad
-                  anchors.rightMargin: milkSlide.pad
-                  anchors.verticalCenter: parent.verticalCenter
-                  height: Style.space(6)
-                  radius: height / 2
-                  color: root.track
-                  Rectangle {
-                    width: parent.width * root.constanceMilk / 100
-                    height: parent.height
-                    radius: height / 2
-                    color: Color.accent
-                  }
-                }
-                Rectangle {
-                  id: milkHandle
-                  width: milkSlide.handleW
-                  height: width
-                  radius: width / 2
-                  anchors.verticalCenter: milkRail.verticalCenter
-                  x: milkRail.x + milkRail.width * (milkArea.pending >= 0 ? milkArea.pending : root.constanceMilk) / 100 - width / 2
-                  color: root.foreground
-                  border.width: 1
-                  border.color: root.soft(root.foreground, 0.4)
-                }
-                MouseArea {
-                  id: milkArea
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  preventStealing: true
-                  // Dragging only moves the knob; the setting is saved once, on release.
-                  // The knob snaps to the five steps (0/25/50/75/100).
-                  property int pending: -1
-                  function setFromX(x) {
-                    var f = Math.max(0, Math.min(1, (x - milkRail.x) / milkRail.width))
-                    pending = Math.round(f * 4) * 25
-                  }
-                  onPressed: function(m) { setFromX(m.x) }
-                  onPositionChanged: function(m) { if (pressed) setFromX(m.x) }
-                  onReleased: {
-                    if (pending >= 0 && pending !== root.constanceMilk) root.writeSetting(["constanceMilk", String(pending)])
-                    pending = -1
-                  }
-                  onCanceled: pending = -1
-                }
-                PanelToolTip { visible: milkArea.containsMouse; text: root.constanceMilkLabel + " " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
-              }
-              // The step the knob sits on: name plus its one-line description. While
-              // dragging it follows milkArea.pending; otherwise the saved value.
-              Text {
-                width: parent.width
-                textFormat: Text.PlainText
-                wrapMode: Text.WordWrap
-                text: root.constanceMilkStepText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              Item {
-                width: parent.width
-                height: milkLess.implicitHeight
-                Text {
-                  id: milkLess
-                  anchors.left: parent.left
-                  textFormat: Text.PlainText
-                  text: "less Opus"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-                Text {
-                  anchors.right: parent.right
-                  textFormat: Text.PlainText
-                  text: "more quality · " + root.constanceMilkBand
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-              }
-              Text {
-                textFormat: Text.PlainText
-                text: "Sandbox and guardrails always on."
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-            }
-
-            Column {
-              visible: !root.constanceActive || root.constanceAddingGoal || root.constanceEditId !== ""
-              width: parent.width
-              spacing: Style.space(10)
-              PanelSectionHeader { width: parent.width; text: root.constanceEditId !== "" ? "EDIT GOAL" : (root.constanceActive ? "ADD A GOAL" : "GOAL") }
-              Rectangle {
-                id: goalBox
-                width: parent.width
-                readonly property real vPad: Style.space(9)
-                // The real line height (measured), so twelve lines fit exactly before it scrolls.
-                readonly property real lineH: goalArea.contentHeight / Math.max(1, goalArea.lineCount)
-                // About three lines tall, growing with the text up to about twelve lines; past that it scrolls
-                // inside the box. There is no line or length limit: the whole goal is kept and sent.
-                height: Math.max(lineH * 3, Math.min(lineH * 12, goalArea.contentHeight)) + vPad * 2
-                radius: Style.cornerRadius
-                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, goalArea.activeFocus ? 0.07 : 0.045)
-                border.width: 1
-                border.color: goalArea.activeFocus ? Color.accent : root.soft(root.foreground, 0.3)
-                clip: true
-                Flickable {
-                  id: goalFlick
-                  anchors.fill: parent
-                  anchors.margins: goalBox.vPad
-                  clip: true
-                  contentWidth: width
-                  boundsBehavior: Flickable.StopAtBounds
-                  ScrollBar.vertical: ScrollBar { policy: goalFlick.contentHeight > goalFlick.height + 1 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
-                  // Attached so the view follows the cursor while typing or after a paste.
-                  TextArea.flickable: TextArea {
-                    id: goalArea
-                    padding: 0
-                    rightPadding: goalFlick.contentHeight > goalFlick.height + 1 ? Style.space(10) : 0
-                    background: null
-                    wrapMode: TextEdit.Wrap
+                spacing: Style.space(4)
+                Flow {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  Text {
+                    textFormat: Text.PlainText
+                    text: "Brain"
                     color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
-                    placeholderText: "Tell her once, in plain words: e.g. add a dark mode switch"
-                    placeholderTextColor: root.dim
-                    activeFocusOnPress: true
-                    onActiveFocusChanged: root.constanceTyping = activeFocus
-                    Keys.onPressed: function(event) { if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) { event.accepted = true; goalArea.paste() } }
-                    Keys.onEscapePressed: { goalArea.focus = false; keyCatcher.forceActiveFocus() }
-                    // Enter makes a new line; Ctrl+Enter hands it to her (the button always works).
-                    Keys.onReturnPressed: function(event) { if (event.modifiers & Qt.ControlModifier) { event.accepted = true; root.submitConstanceGoal() } }
-                  }
-                }
-                TapHandler { acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton; onPressedChanged: if (pressed) goalArea.forceActiveFocus() }
-              }
-              FolderPicker { width: parent.width; plainOthers: true }
-              Row {
-                width: parent.width
-                spacing: Style.space(10)
-                Rectangle {
-                  id: goTile
-                  readonly property bool ready: goalArea.text.trim() !== "" && !constanceStarter.running && !constanceGoalsRunner.running
-                  width: parent.width - practiceToggle.width - parent.spacing
-                  height: goLabel.implicitHeight + Style.space(20)
-                  radius: Style.cornerRadius
-                  opacity: ready ? 1 : 0.4
-                  color: goArea.containsMouse && ready ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                  border.width: 1
-                  border.color: root.soft(Color.accent, ready ? 0.9 : 0.4)
-                  Text {
-                    id: goLabel
-                    anchors.centerIn: parent
-                    textFormat: Text.PlainText
-                    text: constanceStarter.running ? "Starting..." : (root.constanceEditId !== "" ? "Save changes" : (root.constanceActive ? "Add to queue" : "Start"))
-                    color: Color.accent
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
                     font.bold: true
+                    height: Style.font.bodySmall * 1.3
+                    verticalAlignment: Text.AlignVCenter
                   }
-                  MouseArea { id: goArea; anchors.fill: parent; enabled: goTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.submitConstanceGoal() }
-                  PanelToolTip { visible: goArea.containsMouse; text: root.constanceActive || root.constanceEditId !== "" ? "Queued goals start by themselves, in order, when the one before ends well. Ctrl+Enter works too." : "She plans it, hands pieces to free agents under their limits, reviews everything and reports here. Ctrl+Enter works too."; fontFamily: root.fontFamily }
+                  MiniChip {
+                    label: "Claude Code"
+                    tip: "She thinks with Claude Code (the claude CLI login)"
+                    on: root.constanceBrain === "claude"
+                    onClicked: root.writeSetting(["constanceBrain", "claude"])
+                  }
+                  MiniChip {
+                    label: "Antigravity"
+                    tip: "She thinks with Antigravity (the agy CLI login)"
+                    on: root.constanceBrain === "antigravity"
+                    onClicked: root.writeSetting(["constanceBrain", "antigravity"])
+                  }
                 }
+                Text {
+                  visible: root.constanceBrainCaption !== ""
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  text: root.constanceBrainCaption
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              // Milk Opus: how much of the work she keeps for herself on the paid plan versus
+              // hands to the free agents. Moving it saves constanceMilk; sandbox and guardrails
+              // stay on at every setting.
+              Column {
+                width: parent.width
+                spacing: Style.space(4)
                 Item {
-                  id: practiceToggle
-                  width: pracText.implicitWidth + Style.space(10) + Style.space(38)
-                  height: Math.max(goTile.height, Style.space(24))
+                  width: parent.width
+                  height: Math.max(milkTitle.implicitHeight, milkValue.implicitHeight)
                   Text {
-                    id: pracText
+                    id: milkTitle
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
                     textFormat: Text.PlainText
-                    text: "Practice"
-                    color: root.dim
+                    text: root.constanceMilkLabel
+                    color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
+                    font.bold: true
                   }
-                  Rectangle {
+                  Text {
+                    id: milkValue
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(38)
-                    height: Style.space(20)
+                    textFormat: Text.PlainText
+                    text: String(root.constanceMilk)
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+                Item {
+                  id: milkSlide
+                  width: parent.width
+                  height: Style.space(16)
+                  readonly property real handleW: Style.space(14)
+                  readonly property real pad: handleW / 2 + Style.space(2)
+                  // The rail is inset by half a handle so the knob can reach both ends.
+                  Rectangle {
+                    id: milkRail
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.leftMargin: milkSlide.pad
+                    anchors.rightMargin: milkSlide.pad
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: Style.space(6)
                     radius: height / 2
-                    color: root.constancePractice ? root.green : root.track
-                    border.width: 1
-                    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
+                    color: root.track
                     Rectangle {
-                      width: parent.height - Style.space(6)
-                      height: width
-                      radius: width / 2
-                      anchors.verticalCenter: parent.verticalCenter
-                      x: root.constancePractice ? parent.width - width - Style.space(3) : Style.space(3)
-                      color: root.foreground
+                      width: parent.width * root.constanceMilk / 100
+                      height: parent.height
+                      radius: height / 2
+                      color: Color.accent
                     }
                   }
+                  Rectangle {
+                    id: milkHandle
+                    width: milkSlide.handleW
+                    height: width
+                    radius: width / 2
+                    anchors.verticalCenter: milkRail.verticalCenter
+                    x: milkRail.x + milkRail.width * (milkArea.pending >= 0 ? milkArea.pending : root.constanceMilk) / 100 - width / 2
+                    color: root.foreground
+                    border.width: 1
+                    border.color: root.soft(root.foreground, 0.4)
+                  }
                   MouseArea {
-                    id: pracArea
+                    id: milkArea
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.writeSetting(["constancePractice", String(!root.constancePractice)])
+                    preventStealing: true
+                    // Dragging only moves the knob; the setting is saved once, on release.
+                    // The knob snaps to the five steps (0/25/50/75/100).
+                    property int pending: -1
+                    function setFromX(x) {
+                      var f = Math.max(0, Math.min(1, (x - milkRail.x) / milkRail.width))
+                      pending = Math.round(f * 4) * 25
+                    }
+                    onPressed: function(m) { setFromX(m.x) }
+                    onPositionChanged: function(m) { if (pressed) setFromX(m.x) }
+                    onReleased: {
+                      if (pending >= 0 && pending !== root.constanceMilk) root.writeSetting(["constanceMilk", String(pending)])
+                      pending = -1
+                    }
+                    onCanceled: pending = -1
                   }
-                  PanelToolTip { visible: pracArea.containsMouse; text: "Dry run, on for now: she plans and writes every handoff prompt to the log, but launches nothing and changes no files"; fontFamily: root.fontFamily }
+                  PanelToolTip { visible: milkArea.containsMouse; text: root.constanceMilkLabel + " " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
+                }
+                // The step the knob sits on: name plus its one-line description. While
+                // dragging it follows milkArea.pending; otherwise the saved value.
+                Text {
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  text: root.constanceMilkStepText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Item {
+                  width: parent.width
+                  height: milkLess.implicitHeight
+                  Text {
+                    id: milkLess
+                    anchors.left: parent.left
+                    textFormat: Text.PlainText
+                    text: "less Opus"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    anchors.right: parent.right
+                    textFormat: Text.PlainText
+                    text: "more quality · " + root.constanceMilkBand
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Sandbox and guardrails always on."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
                 }
               }
-              Text {
-                visible: root.constanceAddingGoal || root.constanceEditId !== ""
-                textFormat: Text.PlainText
-                text: "Cancel"
-                color: Color.accent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.cancelGoalEdit() }
+              }
+              Column {
+                id: constanceGoalBox
+                visible: !root.constanceActive || root.constanceAddingGoal || root.constanceEditId !== ""
+                width: parent.width
+                y: constanceSetup.goalFirst ? 0 : constanceTune.height + constanceSetup.gap
+                spacing: Style.space(10)
+                PanelSectionHeader { width: parent.width; text: root.constanceEditId !== "" ? "EDIT GOAL" : (root.constanceActive ? "ADD A GOAL" : "GOAL") }
+                Rectangle {
+                  id: goalBox
+                  width: parent.width
+                  readonly property real vPad: Style.space(9)
+                  // The real line height (measured), so twelve lines fit exactly before it scrolls.
+                  readonly property real lineH: goalArea.contentHeight / Math.max(1, goalArea.lineCount)
+                  // About three lines tall, growing with the text up to about twelve lines; past that it scrolls
+                  // inside the box. There is no line or length limit: the whole goal is kept and sent.
+                  height: Math.max(lineH * 3, Math.min(lineH * 12, goalArea.contentHeight)) + vPad * 2
+                  radius: Style.cornerRadius
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, goalArea.activeFocus ? 0.07 : 0.045)
+                  border.width: 1
+                  border.color: goalArea.activeFocus ? Color.accent : root.soft(root.foreground, 0.3)
+                  clip: true
+                  Flickable {
+                    id: goalFlick
+                    anchors.fill: parent
+                    anchors.margins: goalBox.vPad
+                    clip: true
+                    contentWidth: width
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar { policy: goalFlick.contentHeight > goalFlick.height + 1 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
+                    // Attached so the view follows the cursor while typing or after a paste.
+                    TextArea.flickable: TextArea {
+                      id: goalArea
+                      padding: 0
+                      rightPadding: goalFlick.contentHeight > goalFlick.height + 1 ? Style.space(10) : 0
+                      background: null
+                      wrapMode: TextEdit.Wrap
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      placeholderText: "Tell her once, in plain words: e.g. add a dark mode switch"
+                      placeholderTextColor: root.dim
+                      activeFocusOnPress: true
+                      onActiveFocusChanged: root.constanceTyping = activeFocus
+                      Keys.onPressed: function(event) { if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) { event.accepted = true; goalArea.paste() } }
+                      Keys.onEscapePressed: { goalArea.focus = false; keyCatcher.forceActiveFocus() }
+                      // Enter makes a new line; Ctrl+Enter hands it to her (the button always works).
+                      Keys.onReturnPressed: function(event) { if (event.modifiers & Qt.ControlModifier) { event.accepted = true; root.submitConstanceGoal() } }
+                    }
+                  }
+                  TapHandler { acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton; onPressedChanged: if (pressed) goalArea.forceActiveFocus() }
+                }
+                FolderPicker { width: parent.width; plainOthers: true }
+                Row {
+                  width: parent.width
+                  spacing: Style.space(10)
+                  Rectangle {
+                    id: goTile
+                    readonly property bool ready: goalArea.text.trim() !== "" && !constanceStarter.running && !constanceGoalsRunner.running
+                    width: parent.width - practiceToggle.width - parent.spacing
+                    height: goLabel.implicitHeight + Style.space(20)
+                    radius: Style.cornerRadius
+                    opacity: ready ? 1 : 0.4
+                    color: goArea.containsMouse && ready ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                    border.width: 1
+                    border.color: root.soft(Color.accent, ready ? 0.9 : 0.4)
+                    Text {
+                      id: goLabel
+                      anchors.centerIn: parent
+                      textFormat: Text.PlainText
+                      text: constanceStarter.running ? "Starting..." : (root.constanceEditId !== "" ? "Save changes" : (root.constanceActive ? "Add to queue" : "Start"))
+                      color: Color.accent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                    }
+                    MouseArea { id: goArea; anchors.fill: parent; enabled: goTile.ready; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.submitConstanceGoal() }
+                    PanelToolTip { visible: goArea.containsMouse; text: root.constanceActive || root.constanceEditId !== "" ? "Queued goals start by themselves, in order, when the one before ends well. Ctrl+Enter works too." : "She plans it, hands pieces to free agents under their limits, reviews everything and reports here. Ctrl+Enter works too."; fontFamily: root.fontFamily }
+                  }
+                  Item {
+                    id: practiceToggle
+                    width: pracText.implicitWidth + Style.space(10) + Style.space(38)
+                    height: Math.max(goTile.height, Style.space(24))
+                    Text {
+                      id: pracText
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      text: "Practice"
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Rectangle {
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(38)
+                      height: Style.space(20)
+                      radius: height / 2
+                      color: root.constancePractice ? root.green : root.track
+                      border.width: 1
+                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
+                      Rectangle {
+                        width: parent.height - Style.space(6)
+                        height: width
+                        radius: width / 2
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: root.constancePractice ? parent.width - width - Style.space(3) : Style.space(3)
+                        color: root.foreground
+                      }
+                    }
+                    MouseArea {
+                      id: pracArea
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.writeSetting(["constancePractice", String(!root.constancePractice)])
+                    }
+                    PanelToolTip { visible: pracArea.containsMouse; text: "Dry run, on for now: she plans and writes every handoff prompt to the log, but launches nothing and changes no files"; fontFamily: root.fontFamily }
+                  }
+                }
+                Text {
+                  visible: root.constanceAddingGoal || root.constanceEditId !== ""
+                  textFormat: Text.PlainText
+                  text: "Cancel"
+                  color: Color.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.cancelGoalEdit() }
+                }
               }
             }
             Text {
@@ -3098,9 +3139,50 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
+            // Last goal: a finished goal folded into one line (dot, status · checklist · when,
+            // its first line). Show report unfolds everything below, report included.
+            Item {
+              id: lastGoalRow
+              visible: root.constanceFinished
+              width: parent.width
+              height: Math.max(lastGoalText.implicitHeight, lastGoalChip.height)
+              readonly property string tone: LastGoal.tone(root.constance.goal)
+              readonly property color dot: tone === "green" ? root.green : tone === "red" ? root.red : root.amber
+              Rectangle {
+                id: lastGoalDot
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(8); height: width; radius: width / 2
+                color: lastGoalRow.dot
+              }
+              Text {
+                id: lastGoalText
+                anchors.left: lastGoalDot.right
+                anchors.leftMargin: Style.space(8)
+                anchors.right: lastGoalChip.left
+                anchors.rightMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                maximumLineCount: 1
+                text: "Last goal · " + LastGoal.summary(root.constance.goal, root.constanceChecklistDone, root.constanceChecklistTotal, root.constanceNow) + " — " + LastGoal.title(root.constance.goal)
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              MiniChip {
+                id: lastGoalChip
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                label: root.constanceLastOpen ? "Hide" : "Show report"
+                tip: root.constanceLastOpen ? "Fold the last goal back into one line" : "The full goal, her report, the checklist and the jobs"
+                onClicked: root.toggleLastGoal()
+              }
+            }
+
             // The current (or last) goal: what she is on, her pace, and Stop.
             Column {
-              visible: !!root.constance.goal
+              visible: !!root.constance.goal && (!root.constanceFinished || root.constanceLastOpen)
               width: parent.width
               spacing: Style.space(6)
               Item {
@@ -3182,13 +3264,46 @@ Panel {
               }
             }
 
+            // The finished goal's full report (her own words), selectable, with Copy.
+            Item {
+              visible: root.constanceFinished && root.constanceLastOpen && lastReport.text !== ""
+              width: parent.width
+              height: visible ? lastReport.contentHeight + Style.space(4) : 0
+              TextEdit {
+                id: lastReport
+                anchors.left: parent.left
+                anchors.right: lastReportCopy.left
+                anchors.rightMargin: Style.space(8)
+                anchors.top: parent.top
+                readOnly: true
+                selectByMouse: true
+                textFormat: TextEdit.PlainText
+                wrapMode: TextEdit.Wrap
+                text: root.constance.goal && root.constanceLastReportId === String(root.constance.goal.id) && root.constanceLastReport !== "" ? root.constanceLastReport : LastGoal.report(root.constance.goal)
+                color: root.foreground
+                selectionColor: root.soft(Color.accent, 0.35)
+                selectedTextColor: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                onActiveFocusChanged: root.constanceTyping = activeFocus
+                Keys.onEscapePressed: { lastReport.deselect(); lastReport.focus = false; keyCatcher.forceActiveFocus() }
+              }
+              CopyChip {
+                id: lastReportCopy
+                anchors.right: parent.right
+                anchors.top: parent.top
+                tip: "Copy her report"
+                onCopy: root.copyText(lastReport.text)
+              }
+            }
+
             // Now: one plain sentence of what is happening ("Devin 2 is on fixing the guard; 2 jobs waiting for review.").
             Text {
               visible: text !== ""
               width: parent.width
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: root.constanceBoard.now || ""
+              text: root.constanceFinished && !root.constanceLastOpen && !(root.constance.goal && root.constance.goal.needsOwner) ? "" : (root.constanceBoard.now || "")
               color: root.constance.goal && root.constance.goal.needsOwner && !root.constanceActive ? root.amber : root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -3201,7 +3316,7 @@ Panel {
               width: parent.width
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: (root.constance.progress && root.constance.progress.line) ? String(root.constance.progress.line) : ""
+              text: root.constanceFinished && !root.constanceLastOpen ? "" : ((root.constance.progress && root.constance.progress.line) ? String(root.constance.progress.line) : "")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -3210,6 +3325,7 @@ Panel {
             // The big leverage tile: free-worker tokens per 1% of her session,
             // colored against the 5M target; "—" until the meter can measure.
             Rectangle {
+              visible: root.constanceActive || root.constanceLastOpen
               width: parent.width
               height: levNum.implicitHeight + levCap.implicitHeight + Style.space(14)
               radius: Style.cornerRadius
@@ -3247,7 +3363,7 @@ Panel {
 
             // The goal checklist: its items, ticked as their jobs merge, with a progress bar.
             Column {
-              visible: root.constanceBoard.checklist && root.constanceBoard.checklist.total > 0
+              visible: root.constanceBoard.checklist && root.constanceBoard.checklist.total > 0 && (!root.constanceFinished || root.constanceLastOpen)
               width: parent.width
               spacing: Style.space(6)
               Item {
@@ -3437,7 +3553,7 @@ Panel {
             // The job board: one compact card per job (and per task she queued for this project). Click a card
             // for its full prompt and report.
             Column {
-              visible: (root.constanceBoard.cards || []).length > 0
+              visible: (root.constanceBoard.cards || []).length > 0 && (!root.constanceFinished || root.constanceLastOpen)
               width: parent.width
               spacing: Style.space(6)
               PanelSectionHeader { width: parent.width; text: "JOBS" }
