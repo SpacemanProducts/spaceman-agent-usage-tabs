@@ -240,7 +240,7 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   assert.throws(() => args({ agent: "nobody", dir: proj, env: envFor(home) }), /no sandbox profile/);
   assert.throws(() => args({ agent: "grok", dir: home, tmp: jobtmp, env: envFor(home) }), /home folder/, "home itself is never a project");
   assert.throws(() => args({ agent: "grok", dir: tmp, tmp: jobtmp, env: envFor(home) }), /home folder/, "a folder above home is never a project");
-  assert.throws(() => args({ agent: "grok", dir: path.join(tmp, "no-such-dir"), tmp: jobtmp, env: envFor(home) }), /ENOENT/, "a missing project dir throws");
+  assert.throws(() => args({ agent: "grok", dir: path.join(tmp, "no-such-dir"), tmp: jobtmp, env: envFor(home) }), /does not exist/, "a missing project dir is refused");
 }
 
 // ============================================================ 7. bugs found (now fixed)
@@ -508,7 +508,7 @@ if (!bwrapWorks()) {
   // Error paths that never reach argv building.
   assert.throws(() => sandboxLaunch(["x"], { agent: "nobody", dir: projL, tmp: jobtmp, env: dirty }), /no sandbox profile/);
   assert.throws(() => sandboxLaunch(["x"], null), TypeError, "null opts throw");
-  assert.throws(() => sandboxLaunch(["x"], { agent: "grok", dir: path.join(tmp, "missing-dir"), tmp: jobtmp, env: dirty }), /ENOENT/);
+  assert.throws(() => sandboxLaunch(["x"], { agent: "grok", dir: path.join(tmp, "missing-dir"), tmp: jobtmp, env: dirty }), /does not exist/, "a missing project dir is refused");
 
   // BUG: `tmp` is never validated — omitting it puts `undefined` into the
   // bwrap argv (a.push("--bind", tmp, "/tmp")). Commented out: it would assert

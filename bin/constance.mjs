@@ -79,6 +79,9 @@ import { writeRemoteStatus } from "./constance-remote.mjs";
 import { briefFor } from "./constance-brief.mjs";
 import { progressLine, tick as progressTick } from "./constance-progress.mjs";
 import { resumePlan, logAsk } from "./constance-resume.mjs";
+import { projectDirProblem } from "./constance-projectdir.mjs";
+import { memoryOf, addDecision, addProblem, solveProblem, addNext, beginStep, endStep, openStep, renderHandoff, handoffFile, writeHandoff, insidePlugins } from "./constance-handoff.mjs";
+import { nextStep, stepPrompt, resumedFrom, progressMark, MAX_NUDGES } from "./constance-steps.mjs";
 import { routeModel, logRoute } from "./constance-route.mjs";
 import { pickBrain, topModel, brainLimits, brainCommand, brainWall, milkLabel } from "./constance-brain.mjs";
 import { buildSummary } from "./constance-summary.mjs";
@@ -936,6 +939,13 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
 // when it can't launch.
 function launchJob(job, accountLabel = job.account?.label || "") {
   const agent = job.agent, dir = job.dir, files = job.files || [];
+  // No project folder, no launch: checked before a worktree or anything else.
+  const noDir = projectDirProblem(dir, ENV);
+  if (noDir) {
+    store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); if (j) { j.status = "stopped"; j.summary = `(not launched: ${noDir})`; } });
+    store.log({ kind: "note", job: job.id, agent, worker: job.worker, text: `Job ${job.id} not launched: ${noDir}` });
+    throw new Error(`refusing to launch a worker: ${noDir}`);
+  }
   // A copy job gets its worktree before anything else: no worktree, no launch.
   if (job.worktree) {
     try { createWorktree(dir, job.id); }
@@ -969,7 +979,16 @@ function launchJob(job, accountLabel = job.account?.label || "") {
     const doneDir = job.doneInTmp || !job.worktree ? tmp : rd;
     fs.mkdirSync(path.join(doneDir, ".constance"), { recursive: true });
     try { fs.rmSync(doneFile(doneDir, job.id)); } catch {}
-    box = sandboxLaunch(launchCommand(agent, job.prompt), { agent, dir: rd, tmp, env: { ...ENV, ...acctEnv }, extraRw: Object.values(acctEnv), keyringAgents: keyringAgents() });
+    // A project-folder job sees the project's .constance/ (her handoff.md,
+    // backlog and rules) read-only: only the controller writes there. A copy's
+    // .constance/ is its own worktree's, where its done file goes.
+    const readOnly = [];
+    if (!job.worktree) {
+      const cdir = path.join(rd, ".constance");
+      if (!fs.existsSync(cdir) && !insidePlugins(rd, ENV)) { try { fs.mkdirSync(cdir, { recursive: true }); excludeDoneFiles(rd); } catch {} }
+      readOnly.push(cdir);
+    }
+    box = sandboxLaunch(launchCommand(agent, job.prompt), { agent, dir: rd, tmp, env: { ...ENV, ...acctEnv }, extraRw: Object.values(acctEnv), keyringAgents: keyringAgents(), readOnly });
   } catch (e) {
     fs.closeSync(fd);
     store.update((s) => { const j = s.jobs.find((x) => x.id === job.id); j.status = "stopped"; j.summary = `(not launched: ${e.message})`; });
@@ -1099,6 +1118,33 @@ function queueCmd() {
 const busyJobs = (s) => s.jobs.filter((j) => j.status === "running" || inHand(j))
   .map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, ...(j.selfMerging ? { selfMerging: true } : {}) }));
 
+// What she needs to review one finished job: its report, changed files, guard
+// result, earlier jobs in this goal that touched the same files, and its log's
+// tail. `wait` returns it; a review step gets one per job in its prompt.
+function reviewPacket(next, s) {
+  const files = changedFiles(next.dir, next.commit);
+  // Earlier finished, merged or accepted jobs in this goal that changed the same files: check against them first.
+  const earlier = s.jobs.filter((j) => j.id !== next.id && j.goal === next.goal && ["finished", "merged", "accepted"].includes(j.status) && (j.finishedAt || 0) <= (next.finishedAt || 0))
+    .map((j) => ({ id: j.id, agent: j.agent, commit: j.commit, shared: overlaps(changedFiles(j.dir, j.commit), files) })).filter((x) => x.shared.length);
+  let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
+  return { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: reviewText(next.agent, next.summary), commit: next.commit, changedFiles: files,
+    ...(next.status === "merged" ? { selfMerged: true } : {}),
+    guardViolation: next.guardViolation || null,
+    checkAgainst: earlier, logTail: reviewText(next.agent, tail) };
+}
+
+// The driver's view of a goal's open work, for nextStep(): jobs ready for her
+// review (finished or self-merged, not still being checked), and jobs still in
+// flight (running, held, waiting, or finished but settling/self-merging).
+function stepView(s) {
+  const g = s.goal;
+  const mine = s.jobs.filter((j) => !j.goal || j.goal === g?.id);
+  const reviewable = [...reviewQueue(mine).filter((j) => !inHand(j)), ...mine.filter((j) => j.status === "merged" && !inHand(j))];
+  const inFlight = mine.filter((j) => ["running", "held", "waiting"].includes(j.status) || (["finished", "merged"].includes(j.status) && inHand(j)));
+  const items = checklist(g, asAccepted(s.jobs)).items;
+  return { reviewable, inFlight, items, openItems: items.filter((i) => i.state !== "done"), mark: progressMark({ jobs: mine, items }) };
+}
+
 async function waitJob() {
   const until = Date.now() + Math.min(560, Number(arg("--timeout", "100")) || 100) * 1000;
   for (;;) {
@@ -1110,14 +1156,7 @@ async function waitJob() {
     const next = [...reviewQueue(s.jobs).filter((j) => !inHand(j)), ...s.jobs.filter((j) => j.status === "merged" && !inHand(j))]
       .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0) || a.id - b.id)[0];
     if (next) {
-      const files = changedFiles(next.dir, next.commit);
-      // Earlier finished, merged or accepted jobs in this goal that changed the same files: check against them first.
-      const earlier = s.jobs.filter((j) => j.id !== next.id && j.goal === next.goal && ["finished", "merged", "accepted"].includes(j.status) && (j.finishedAt || 0) <= (next.finishedAt || 0))
-        .map((j) => ({ id: j.id, agent: j.agent, commit: j.commit, shared: overlaps(changedFiles(j.dir, j.commit), files) })).filter((x) => x.shared.length);
-      let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
-      return out({ review: { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: reviewText(next.agent, next.summary), commit: next.commit, changedFiles: files,
-        guardViolation: next.guardViolation || null,
-        checkAgainst: earlier, logTail: reviewText(next.agent, tail), queue: queueView(next.dir, store.dir) }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
+      return out({ review: { ...reviewPacket(next, s), queue: queueView(next.dir, store.dir) }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     const held = s.jobs.filter((j) => j.status === "held").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, heldReason: j.heldReason || "" }));
@@ -1350,6 +1389,59 @@ function specCmd() {
   } catch (e) { fail(e.message); }
 }
 
+// ---------------------------------------------------------------- the handoff file
+// <project>/.constance/handoff.md is rendered from the goal (its `handoff`
+// memory in jobs.json) and the job list, and only ever written here. A file that
+// changed since the last write was edited by someone else: it is rewritten from
+// her records and the owner is told once per goal.
+const agentName = () => {
+  const names = Object.fromEntries((readData().agents || []).filter((a) => a.name).map((a) => [a.id, a.name]));
+  return (id) => names[id] || (id ? id[0].toUpperCase() + id.slice(1) : id);
+};
+function renderHandoffNow() {
+  const s = store.read(), g = s.goal;
+  if (!g || !g.dir) return null;
+  const { file, inProject } = handoffFile(g.dir, store.dir, ENV);
+  const mem = memoryOf(g);
+  const live = openStep(mem) && alive(g.brainPid, brainCli(g.brainId)) ? openStep(mem).n : 0;
+  const text = renderHandoff({ goal: g, jobs: s.jobs, items: checklist(g, asAccepted(s.jobs)).items, name: agentName(), practice: practiceMode(), liveStep: live });
+  let prev = ""; try { prev = fs.readFileSync(file, "utf8"); } catch {}
+  if (prev === text) return { file, text, inProject };
+  if (inProject) { try { fs.mkdirSync(path.dirname(file), { recursive: true }); excludeDoneFiles(g.dir); } catch {} }
+  const w = writeHandoff(file, text, mem.sha);
+  store.update((x) => { if (x.goal && x.goal.id === g.id) { x.goal.handoff = { ...memoryOf(x.goal), sha: w.sha }; if (w.tampered) x.goal.handoffTampered = (x.goal.handoffTampered || 0) + 1; } });
+  if (w.tampered && !g.handoffTampered) store.log({ kind: "note", text: `${file} was changed outside the controller; it was rewritten from her records (nothing in it is lost).` });
+  return { file, text, inProject };
+}
+// Change the goal's handoff memory under the store's lock, then re-render the file.
+function withMemory(fn) {
+  const r = store.update((s) => {
+    if (!s.goal || !["running", "paused"].includes(s.goal.status)) return { none: true };
+    const mem = memoryOf(s.goal);
+    const out = fn(mem);
+    s.goal.handoff = mem;
+    return { out };
+  });
+  if (r.none) fail("No goal is running, so there is no handoff to change.");
+  try { renderHandoffNow(); } catch {}
+  return r.out;
+}
+function handoffCmd() {
+  const sub = process.argv[3] || "";
+  const text = () => process.argv.slice(4).join(" ").trim();
+  try {
+    if (sub === "decide") { withMemory((m) => addDecision(m, text())); return out("decision recorded"); }
+    if (sub === "problem") { const n = withMemory((m) => addProblem(m, text())); return out(`problem P${n} recorded`); }
+    if (sub === "solved") { const n = Number(String(process.argv[4] || "").replace(/^P/i, "")); withMemory((m) => solveProblem(m, n, arg("--note"))); return out(`problem P${n} solved`); }
+    if (sub === "next") { withMemory((m) => addNext(m, text())); return out("note for the next session recorded"); }
+  } catch (e) { fail(e.message); }
+  if (sub === "--all") return out(memoryOf(store.read().goal));
+  if (sub) fail("Usage: handoff [decide TEXT|problem TEXT|solved N [--note TEXT]|next TEXT|--all]");
+  const r = renderHandoffNow();
+  if (!r) fail("No goal, so there is no handoff file.");
+  process.stdout.write(`${r.file}\n\n${r.text}`);
+}
+
 // ---------------------------------------------------------------- the goal and the driver
 const ROLE = (dir) => `You are Constance, the quarterback of the owner's coding agents. You run on the owner's one paid plan (Claude). You plan, delegate, review and still play yourself when the work is hard or risky. You have full authority: never stop to ask permission.
 
@@ -1359,19 +1451,20 @@ Your toolbox is \`node ${SELF} <command>\` (call it C below). Work only in ${dir
 - The goal's checklist: \`C status\` shows the goal split into numbered items (board.checklist), which the owner watches tick. Tag every handoff with the item it is for, \`--item N\` (or \`--item 1,3\`), and give it \`--title "fixing the guard"\`: a few plain words, starting with a verb in -ing form, shown to the owner as "Devin 2 is fixing the guard". An item ticks when one of its jobs is merged and none is still open. When you finish an item yourself, \`C check N --note "..."\`.
 - \`C needs-owner "one plain sentence"\` is only for what truly needs the owner: a decision only they can make, a merge conflict, or a failure that two tries could not fix — never an ordinary failure you can retry or delegate again. Run it before your report; the owner's next queued goal then waits for them instead of starting.
 - \`C delegate --agent ID --files a,b --item N --title "..." --task "..."\`: hand off one small, clear task — the smaller and more self-contained, the better; give weaker agents smaller pieces. List every file it may edit; two editing jobs may never share files, and you must not edit a running job's files yourself. For read-only work (investigating a cause, summarizing a file) omit \`--files\`. The tool adds the folder check, git rules, tests/build and done file to the prompt, so the task text itself only needs to say what to do.
-- Devin may run as several copies at once (up to ${limitOf("devin")}): each editing job gets its own worktree and branch, shows up as Devin 1..${limitOf("devin")}, and merges into the project only after you accept it. Give copies tasks whose files never overlap; if a merge ever conflicts the job is marked and left for the owner — report it, don't force it. Copies ramp up as the machine allows: a delegate may come back "held" — its files are reserved and it starts by itself when the load and free memory allow, so never delegate it again; just keep going and \`wait\`.
+- Devin may run as several copies at once (up to ${limitOf("devin")}): each editing job gets its own worktree and branch, shows up as Devin 1..${limitOf("devin")}, and merges into the project only after you accept it. Give copies tasks whose files never overlap; if a merge ever conflicts the job is marked and left for the owner — report it, don't force it. Copies ramp up as the machine allows: a delegate may come back "held" — its files are reserved and it starts by itself when the load and free memory allow, so never delegate it again; just keep going.
 - Second-try rule: when a job comes back wrong, a redo goes out with \`--again ID\` (the job it redoes). Work sent back twice is never resent as it was: split it into smaller jobs with fewer files each, or do it yourself. \`delegate\` refuses a third try with the same files.
 - Use it or lose it: \`C spare\` shows which agents have room they would lose at a reset that is close, and which items of this project's backlog (\`C backlog\`; \`C backlog add --kind review|bug|design|task|test|docs --text "..."\`) could use it. Spend leftover room only on backlog items, never on made-up work just to burn it. Your own leftover Opus goes to reviews, tangled bugs and design. When you hand a backlog item out, \`C backlog take N --job ID\`; when it is finished, \`C backlog done N\`.
 - When a bug's cause is unknown, the first handoff changes nothing: tell the agent to find the cause, report it in a few lines and stop. Send the fix as a second handoff once you know the cause.
 - When a large file needs reading, hand that to a free agent to summarize instead of reading it all yourself.
 - Some work stays with you, never delegated: live database changes, bugs tangled across many parts of the code, and anything involving secrets or credentials.
-- \`C wait --timeout 540\` (give your Bash tool a 600000 ms timeout for it; long waits save your limits): blocks until a job finishes and gives you the next one to review, oldest finish first. The agent runs the tests and build itself and reports in plain text what changed, the results and the files. Check the report against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare with any earlier job it lists under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then \`C review ID accept|send-back --note "..."\`.
+- Reviews come to you as review steps: the controller waits for the jobs (never run \`C wait\` yourself) and starts a fresh session with a batch of finished jobs, each with its report, changed files, guard result and log tail. The agent runs the tests and build itself and reports in plain text what changed, the results and the files. Check the report against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare with any earlier job it lists under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then \`C review ID accept|send-back --note "..."\`.
+- The handoff file (.constance/handoff.md, given to you in full at the start of every step) is your whole memory between sessions: goal, checklist, job board, decisions, open problems and notes for the next session. Only the controller writes it; never edit it yourself. Record with \`C handoff decide "..."\` (a decision and its reason), \`C handoff problem "..."\` (something unresolved; \`C handoff solved N --note "..."\` once fixed) and \`C handoff next "..."\` (what the next session must know). One line each; the next session knows nothing else.
 - \`C status\` shows \`practice: true\` during a dry run (the panel's Practice switch, on by default for now): plan and delegate exactly as usual — the tool logs each handoff's agent, reason and full prompt instead of launching it — but don't edit files yourself, and say in your report that it was a practice run.
 - \`C note "..."\`: a short line in the owner's log for anything he should know.
 - \`C queue --task "..." [--files a,b] [--agent ID]\`: while planning, keep a short queue of ready tasks for this project so free agents never sit idle. When you accept a job, the next queued task is handed to the same agent automatically. \`C queue\` lists what is pending, \`C queue rm ID\` drops one.
 - \`C signals\`: recent "agent finished" notifications heard from the desktop. One matched to your job means check it; one for an agent with no job is the owner's own run — noted, never touched.
 - \`C lesson "..."\`: add one short lesson to your lessons file — something you learned the hard way this goal (a skipped check, a surprise an agent caused, a rule that saved time). It is advice for your future goals, never a rule that overrides the ones above. Read your lessons before each goal; they are already in your first message.
-- Never end your turn or write a final report while checklist items are still todo or jobs are open: delegate again or run \`wait\`. Stop only when the goal is done, you are out of room (pace pauses you), or something truly needs the owner.
+- You work in steps, each a fresh session: a planning step (delegate everything that can start now, queue the rest) or a review batch (review the jobs it lists, delegate follow-ups). Do the step, record what the next session needs with \`C handoff\`, and end your turn; the controller waits for the jobs and starts the next step. Never write the final report while checklist items are still todo or jobs are open.
 Before you edit anything, run \`git status\`; commit only your own changes, never push or deploy. When the goal is done and every job is reviewed, finish with a short plain report for the owner: what was done, by whom, the commits, anything left open.`;
 
 // The project folder for a goal: --dir, or a "+ New project" name made in ~/Projects. Throws with a
@@ -1781,7 +1874,7 @@ function heartbeat() {
 }
 
 async function drive() {
-  let pausedLogged = false, failures = 0, nudge = null;
+  let pausedLogged = false, failures = 0;
   for (;;) {
     const g = store.read().goal;
     if (!g || !["running", "paused"].includes(g.status)) return;
@@ -1830,9 +1923,42 @@ async function drive() {
         await sleep(5000);
       }
       const st = store.read().goal;
+      // The adopted run's step is closed (its exit code is unknown; the board says what it did).
+      // A killed one stays open, so the next session is told it was cut off.
+      if (st && !killed) store.update((x) => { if (x.goal) { const m = memoryOf(x.goal); if (openStep(m)) { endStep(m, { outcome: "ok" }); openStep(m); } x.goal.handoff = m; } });
       if (!st || st.status !== "running" || killed) continue;
     }
-    // The brain is picked fresh at every start: the owner can flip
+    // What next (constance-steps.mjs): a fresh brain session for a planning step
+    // or a review batch, or — while the workers work — no brain at all: the
+    // driver sweeps (what \`C wait\` used to do inside her session) and keeps the
+    // board and the handoff file current.
+    try { sweep(); releaseHeld(); } catch {}
+    let st = store.read();
+    let step = decideStep(st);
+    if (step.action === "wait") {
+      for (;;) {
+        const cur = store.read().goal;
+        if (!cur || cur.status === "stopped") return;
+        if (cur.status !== "running" || paceNow(readData()).mode === "stop") break;
+        try { sweep(); releaseHeld(); fillSlots(); heartbeat(); renderHandoffNow(); } catch {}
+        st = store.read();
+        step = decideStep(st);
+        if (step.action !== "wait") break;
+        await sleep(WAIT_TICK_MS);
+      }
+      continue;
+    }
+    if (step.action === "done") {
+      if (step.why === "no progress after the nudges") store.log({ kind: "note", text: `The last ${MAX_NUDGES + 1} steps moved nothing (${openWork(st) || "nothing open"}); ending the goal.` });
+      const report = (() => { try { return fs.readFileSync(path.join(store.dir, `report-${g.id}.txt`), "utf8").trim(); } catch { return ""; } })();
+      store.update((s) => { s.goal.status = "done"; s.goal.finishedAt = Date.now(); s.goal.report = report.slice(-4000); });
+      logStepTotals();
+      store.log({ kind: "report", text: report.slice(-4000) || "(no report)" });
+      try { renderHandoffNow(); } catch {}
+      if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
+      return;
+    }
+    // The brain is picked fresh at every step: the owner can flip
     // settings.constanceBrain between runs. Wanted-but-not-allowed is told to
     // the owner once per goal, then she quietly stays on Claude Code.
     const b = brainNow();
@@ -1841,77 +1967,63 @@ async function drive() {
       store.log({ kind: "note", text: b.why });
     }
     const model = brainModel(dNow, b);
-    // Fresh lessons and this project's own rules go into the first message of
-    // every goal (advice only — her core rules above never change). agy has no
-    // resume, so an already-started goal always gets the full first prompt plus
-    // the interrupted note (a nudge's own text rides along when there is one);
-    // a brain switch back to Claude can't --resume the other CLI's session, so
-    // it starts a fresh one the same way. A Claude nudge resume carries its own
-    // short message instead of the generic one.
-    const firstPrompt = `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + "\n" + milkPrompt(readMilk(readSettings())) + rulesBlock(readProjectRules(g.dir));
-    const interrupted = "You were interrupted (a restart, a pause for your limits, or an error). Run `C status` and `C jobs` to see where things stand, then carry on with the goal.";
-    let session = g.session, resumeRun = !!g.started, prompt;
-    if (b.id === "antigravity") {
-      prompt = g.started ? `${firstPrompt}\n\n${interrupted}${nudge ? `\n\n${nudge}` : ""}` : firstPrompt;
-      resumeRun = false;
-    } else if (g.brainId && g.brainId !== b.id) {
-      session = randomUUID();
-      prompt = `${firstPrompt}\n\n${interrupted}`;
-      resumeRun = false;
-    } else if (g.started) {
-      prompt = nudge || "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal.";
-    } else {
-      prompt = firstPrompt;
+    const kind = step.action;
+    // A step that didn't end cleanly (a crash, a restart, a limit pause, a
+    // failed run) is closed and the fresh session is told so; everything it did
+    // is already on the board, so the handoff file is all it needs.
+    const prevStep = memoryOf(st.goal).steps.at(-1);
+    const resumed = resumedFrom(prevStep);
+    if (prevStep && !prevStep.endedAt) store.update((x) => { if (x.goal) { const m = memoryOf(x.goal); endStep(m, { outcome: "interrupted (a restart or a crash)" }); x.goal.handoff = m; } });
+    let nudgeText = "";
+    if (step.nudge) {
+      const n = (st.goal.nudges || 0) + 1;
+      store.update((x) => { if (x.goal) x.goal.nudges = n; });
+      nudgeText = `The goal is not finished: ${openWork(st) || "work is still open"}. The last session ended without moving it. Keep going: delegate or review, don't ask.`;
+      store.log({ kind: "note", text: `${brainName(b)} ended a step but the goal is unfinished (${openWork(st)}); a fresh session picks it up, nudge ${n} of ${MAX_NUDGES}.` });
     }
-    nudge = null;
-    const { cmd, args } = brainCommand({ brain: b.id, model, role: ROLE(g.dir), prompt, session, resume: resumeRun });
+    st = store.read();
+    const batch = kind === "review" ? step.jobs.map((id) => st.jobs.find((j) => j.id === id)).filter(Boolean).map((j) => reviewPacket(j, st)) : [];
+    const ho = renderHandoffNow() || { text: "", file: "" };
+    const firstPlan = kind === "plan" && !memoryOf(st.goal).steps.length;
+    // Fresh lessons and this project's own rules ride along on every step (advice only — her core rules never change).
+    const prompt = stepPrompt({ kind, dir: g.dir, handoff: ho.text, handoffPath: ho.file, lessons: lessonsBlock(readLessons(store.dir)), milk: milkPrompt(readMilk(readSettings())), rules: rulesBlock(readProjectRules(g.dir)), batch, resumed, nudge: nudgeText, ownerGoal: firstPlan ? g.text : "" });
+    const session = randomUUID();
+    const mark = stepView(st).mark;
+    store.update((x) => { if (x.goal) { const m = memoryOf(x.goal); beginStep(m, { kind, session, model, jobs: step.jobs || [], promptChars: prompt.length, resumed, mark }); x.goal.handoff = m; } });
+    const { cmd, args } = brainCommand({ brain: b.id, model, role: ROLE(g.dir), prompt, session, resume: false });
     const reportPath = path.join(store.dir, `report-${g.id}.txt`);
     const fd = fs.openSync(reportPath, "w");
     const brain = spawn(cmd, args, { cwd: g.dir, env: ENV, detached: true, stdio: ["ignore", fd, fd] });
-    store.update((s) => { s.goal.started = true; s.goal.brainPid = brain.pid; s.goal.brainId = b.id; s.goal.brainModel = model; if (session !== s.goal.session) s.goal.session = session; });
-    // Every start for planning leaves a route line: the step, the model she
-    // actually runs on, and the router's reason (constance-route.mjs).
+    store.update((s) => { s.goal.started = true; s.goal.brainPid = brain.pid; s.goal.brainId = b.id; s.goal.brainModel = model; s.goal.session = session; });
+    store.log({ kind: "step", step: kind, model, text: `Step ${memoryOf(store.read().goal).steps.at(-1)?.n}: ${kind === "review" ? `review of job${batch.length === 1 ? "" : "s"} ${batch.map((j) => j.id).join(", ")}` : "planning"} in a fresh session (${prompt.length} prompt chars)${resumed ? `, after ${resumed}` : ""}.` });
+    // Every step leaves a route line: the step, the model she actually runs on,
+    // and why (constance-route.mjs routes planning; a review batch runs on her brain model).
     try {
-      store.log({ kind: "route", step: "plan", model, text: routeModel("plan", { milk: readMilk(readSettings()) }).why });
-      logRoute(path.join(store.dir, "routes.jsonl"), { step: "plan", model, job: g.id });
+      store.log({ kind: "route", step: kind, model, text: kind === "plan" ? routeModel("plan", { milk: readMilk(readSettings()) }).why : "a review batch runs on her own brain model" });
+      logRoute(path.join(store.dir, "routes.jsonl"), { step: kind, model, job: g.id });
     } catch {}
     let pausedByUs = false;
     const watch = setInterval(() => {
-      const st = store.read().goal;
-      if (!st || st.status === "stopped") { killGroup(brain.pid); return; }
+      const cur = store.read().goal;
+      if (!cur || cur.status === "stopped") { killGroup(brain.pid); return; }
       try { releaseHeld(); fillSlots(); heartbeat(); } catch {}
       if (paceNow(readData()).mode === "stop") { pausedByUs = true; killGroup(brain.pid); }
     }, 30e3);
     const code = await new Promise((r) => brain.on("exit", (c) => r(c)));
     clearInterval(watch);
-    const now = store.read().goal;
-    if (!now || now.status === "stopped") return;
-    if (pausedByUs) continue;
     const report = (() => { try { return fs.readFileSync(reportPath, "utf8").trim(); } catch { return ""; } })();
-    if (code === 0) {
-      const s = store.read();
-      // A clean exit is not a finished goal: open checklist items or unreviewed
-      // jobs mean she stopped early. Resume her session with a nudge — at most
-      // 3 per goal — unless practice mode or an owner flag ends it normally.
-      const open = s.goal && ["running", "paused"].includes(s.goal.status) && !practiceMode() && !s.goal.needsOwner ? openWork(s) : "";
-      if (open && (s.goal.nudges || 0) < 3) {
-        const n = (s.goal.nudges || 0) + 1;
-        store.update((x) => { if (x.goal) x.goal.nudges = n; });
-        nudge = `The goal is not finished: ${open}. Keep going: delegate or wait, don't ask.`;
-        store.log({ kind: "note", text: `${brainName(b)} exited cleanly but the goal is unfinished (${open}); resumed her, nudge ${n} of 3.` });
-        continue;
-      }
-      store.update((s) => { s.goal.status = "done"; s.goal.finishedAt = Date.now(); s.goal.report = report.slice(-4000); });
-      store.log({ kind: "report", text: report.slice(-4000) || "(no report)" });
-      if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
-      return;
-    }
+    const close = (outcome) => store.update((x) => { if (x.goal) { const m = memoryOf(x.goal); endStep(m, { outcome, code: code ?? -1, outChars: report.length }); x.goal.handoff = m; } });
+    const now = store.read().goal;
+    if (!now || now.status === "stopped") { close("stopped by the owner"); try { renderHandoffNow(); } catch {} return; }
+    if (pausedByUs) { close("paused for her limits"); continue; }
+    if (code === 0) { close("ok"); failures = 0; try { renderHandoffNow(); } catch {} continue; }
     // Her brain said it hit its limit (Claude's "You've hit your 5-hour limit · resets 5:50pm
     // (America/New_York)", or agy's quota text): a pause until the time it stated, never a
     // failure. pace() reads wall.json and stops her until then.
     const wall = brainWall(b.id, report, Date.now(), brainOf(freshData()).limits);
     if (wall && (code !== 0 || report.length < 400)) {
       writeWall(store.dir, wall);
+      close("her limit wall");
       // The pause reason must name the wall even when its stated reset already
       // passed (the readings then show "on pace"): resumePlan only follows
       // wall.json for a pause whose reason starts "<Brain> said it hit its limit".
@@ -1921,21 +2033,24 @@ async function drive() {
       pausedLogged = true;
       continue;
     }
-    // Opus (or whatever she is on) isn't allowed on this Claude plan: drop to the best model that is
-    // and restart the goal fresh — a rejected run leaves no session, so --resume can't be used. This
-    // doesn't count as a failure.
+    // Opus (or whatever she is on) isn't allowed on this Claude plan: drop to the
+    // best model that is and run the step again on it. Not a failure.
     const cur = store.read().goal;
     const next = cur && cur.status === "running" && b.id === "claude" ? nextModel(cur.model || "opus", report) : null;
     if (next) {
-      store.update((s) => { if (s.goal) { s.goal.model = next; s.goal.session = randomUUID(); s.goal.started = false; } });
-      store.log({ kind: "model", text: `${modelName(cur.model || "opus")} isn't allowed on this Claude plan; Constance switched to ${modelName(next)} and started the goal over.` });
+      close(`a model switch to ${modelName(next)}`);
+      store.update((s) => { if (s.goal) s.goal.model = next; });
+      store.log({ kind: "model", text: `${modelName(cur.model || "opus")} isn't allowed on this Claude plan; Constance switched to ${modelName(next)} and started the step over.` });
       continue;
     }
+    close(`a failed run (exit ${code})`);
     if (++failures >= 3) {
       const last = report.split("\n").map((l) => l.trim()).filter(Boolean).at(-1) || "";
       const reason = `${brainName(b)} exited with code ${code} three times: ${last ? last.slice(0, 200) : "no output"}`;
       store.update((s) => { s.goal.status = "failed"; s.goal.finishedAt = Date.now(); s.goal.failReason = reason; });
+      logStepTotals();
       store.log({ kind: "failed", text: reason });
+      try { renderHandoffNow(); } catch {}
       // A failed goal is a note, not a stop: afterGoal() starts the next queued goal.
       if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
@@ -1943,6 +2058,34 @@ async function drive() {
     store.log({ kind: "note", text: `${brainName(b)} exited with code ${code}; retrying in a minute.` });
     await sleep(60e3);
   }
+}
+
+// How often the driver sweeps while workers work and no brain runs (tests shorten it).
+const WAIT_TICK_MS = Number(ENV.CONSTANCE_WAIT_TICK_MS) || 5000;
+
+// The step decision for the goal as it stands (constance-steps.mjs).
+function decideStep(s) {
+  const v = stepView(s);
+  const mem = memoryOf(s.goal);
+  const ended = mem.steps.filter((x) => x.endedAt);
+  const last = mem.steps.at(-1);
+  return nextStep({ openItems: v.openItems, inFlight: v.inFlight, reviewable: v.reviewable, practice: practiceMode(), needsOwner: !!s.goal.needsOwner,
+    stepsDone: ended.filter((x) => x.outcome === "ok").length, nudges: s.goal.nudges || 0,
+    lastMark: last && last.endedAt && last.outcome === "ok" && last.mark !== undefined ? last.mark : null, mark: v.mark,
+    lastUnclean: !!last && (!last.endedAt || last.outcome !== "ok"),
+    ...(ENV.CONSTANCE_REVIEW_WAIT_MS ? { waitMs: Number(ENV.CONSTANCE_REVIEW_WAIT_MS) } : {}) });
+}
+
+// One log line per goal with what her brain sessions cost in prompt size: the
+// numbers to compare against the old one-long-session goals.
+function logStepTotals() {
+  const g = store.read().goal;
+  const steps = memoryOf(g).steps;
+  if (!steps.length) return;
+  const chars = steps.reduce((a, x) => a + (x.promptChars || 0), 0), top = Math.max(...steps.map((x) => x.promptChars || 0));
+  const plan = steps.filter((x) => x.kind === "plan").length, rev = steps.filter((x) => x.kind === "review").length;
+  store.log({ kind: "steps", sessions: steps.length, plan, review: rev, promptChars: chars, maxPromptChars: top,
+    text: `This goal ran ${steps.length} fresh brain session${steps.length === 1 ? "" : "s"} (${plan} planning, ${rev} review); prompts ${chars} chars in all, the largest ${top}.` });
 }
 
 function stopAll() {
@@ -1967,6 +2110,7 @@ function stopAll() {
   if (g && alive(g.driverPid, "constance.mjs")) killGroup(g.driverPid);
   if (isWatcher(watcherPid())) killGroup(watcherPid());
   store.log({ kind: "stopped", text: "Stop pressed: Constance and every job halted." });
+  try { renderHandoffNow(); } catch {}   // the project keeps a true handoff for the next goal
   try { recordHistory(false); } catch {}   // halted workers' counts were kept above
   out("Stopped.");
 }
@@ -2229,9 +2373,10 @@ if (process.argv[1] === SELF) {
     if (!step) fail("Usage: route STEP");
     out(routeModel(step, { milk: readMilk(readSettings()) }));
   }
+  else if (cmd === "handoff") handoffCmd();
   else if (cmd === "batchreview") batchReviewCmd();
   else if (cmd === "split") splitCmd();
   else if (cmd === "spec") specCmd();
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|summary|watch|selfmerge|route|batchreview|split|spec|takeover|stop|recover");
+  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|summary|watch|selfmerge|route|handoff|batchreview|split|spec|takeover|stop|recover");
 }

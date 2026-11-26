@@ -59,13 +59,15 @@ echo "{\\"summary\\": \\"added \${name%.*}\\", \\"commit\\": \\"$c\\", \\"files\
 // can count her starts without tripping over the multi-line role prompt:
 //   wall-first — the wall goal's first run: delegates the job, then exits 1 with Claude
 //     Code's real limit line and a reset two minutes out (computed at run time, in UTC).
-//   resume    — any --resume run (only the wall goal ever resumes): waits for the job,
-//     accepts it and reports.
+//   resume    — the fresh session after the wall (its prompt says it is picking up
+//     after "her limit wall"; only the wall goal ever resumes): reviews the job,
+//     accepts it and reports. No session is ever --resume'd.
 //   hundred   — the 100% goal's first run: a normal delegate/wait/review/report.
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
 p="\${@: -1}"
-if [[ "$*" == *" --resume "* ]]; then tag="resume"
+if [[ "$*" == *" --resume "* ]]; then tag="old-resume"
+elif [[ "$p" == *"which ended: her limit wall"* ]]; then tag="resume"
 elif [[ "$p" == *wall-pause-goal* ]]; then tag="wall-first"
 elif [[ "$p" == *hundred-goal* ]]; then tag="hundred"
 else tag="other"; fi
