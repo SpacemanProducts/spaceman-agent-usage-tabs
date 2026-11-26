@@ -163,4 +163,148 @@ assert.equal(milkLabel("claude"), "Milk Opus");
 assert.equal(milkLabel("antigravity"), "Milk Antigravity");
 assert.equal(milkLabel("bogus"), "Milk Opus");
 
+// ---- grok, codex, copilot brains ----
+
+// BRAINS entries
+assert.deepEqual(BRAINS.grok, { id: "grok", name: "Grok", cli: "grok" });
+assert.deepEqual(BRAINS.codex, { id: "codex", name: "Codex", cli: "codex" });
+assert.deepEqual(BRAINS.copilot, { id: "copilot", name: "Copilot", cli: "copilot" });
+
+// pickBrain: the new ids are honored only with their opt-ins; failure falls back to claude.
+assert.deepEqual(pickBrain({ constanceBrain: "grok" }), {
+  id: "claude", name: "Claude Code", cli: "claude", wanted: "grok", ok: false,
+  why: 'Grok would run her brain steps outside the sandbox; add "grok" to constanceBrainUnsandboxed in settings to let her brain use it. She stays on Claude Code until then.',
+});
+assert.deepEqual(pickBrain({ constanceBrain: "codex", constanceBrainUnsandboxed: "codex" }).ok, false,
+  "a string setting is not a list");
+assert.deepEqual(pickBrain({ constanceBrain: "codex", constanceBrainUnsandboxed: ["grok"] }).ok, false,
+  "another agent's opt-in does not count");
+assert.deepEqual(pickBrain({ constanceBrain: "codex", constanceBrainUnsandboxed: ["codex"] }), {
+  id: "codex", name: "Codex", cli: "codex", wanted: "codex", ok: true, why: "",
+});
+assert.deepEqual(pickBrain({ constanceBrain: "grok", constanceBrainUnsandboxed: ["grok", "codex"] }), {
+  id: "grok", name: "Grok", cli: "grok", wanted: "grok", ok: true, why: "",
+});
+// copilot needs both the keyring opt-in and the unsandboxed opt-in, keyring first.
+assert.deepEqual(pickBrain({ constanceBrain: "copilot" }).why,
+  'Copilot keeps its login in the desktop keyring; add "copilot" to constanceKeyringAgents in settings to let her brain use it. She stays on Claude Code until then.');
+assert.equal(pickBrain({ constanceBrain: "copilot", constanceKeyringAgents: ["copilot"] }).ok, false,
+  "keyring alone is not enough: the run would still be outside the sandbox");
+assert.equal(pickBrain({ constanceBrain: "copilot", constanceKeyringAgents: ["copilot"], constanceBrainUnsandboxed: ["copilot"] }).ok, true);
+assert.equal(pickBrain({ constanceBrain: "copilot", constanceBrainUnsandboxed: ["copilot"] }).ok, false,
+  "unsandboxed alone is not enough either");
+assert.equal(pickBrain({ constanceBrain: "copilot", constanceKeyringAgents: ["antigravity"], constanceBrainUnsandboxed: ["copilot"] }).ok, false,
+  "antigravity's keyring opt-in does not cover copilot");
+// antigravity still needs only the keyring opt-in — the unsandboxed list is not required of it.
+assert.equal(pickBrain({ constanceBrain: "antigravity", constanceKeyringAgents: ["antigravity"] }).ok, true);
+
+// topModel for the live-list brains: override first, then a flagged default/
+// recommended/top model, else the first usable; unavailable never wins and no
+// model name is hard-coded.
+const grokAgent = {
+  id: "grok",
+  models: [
+    { name: "grok-4.7", id: "grok-4.7", state: "zero" },
+    { name: "grok-4.6", id: "grok-4.6", state: "unavailable" },
+    { name: "grok-4.5", id: "grok-4.5", state: "used", recommended: true },
+  ],
+};
+assert.deepEqual(topModel(grokAgent), { id: "grok-4.5", name: "grok-4.5" }, "flagged recommended wins over list order");
+const codexAgent = {
+  id: "codex",
+  models: [
+    { name: "gpt-5.3-codex", id: "gpt-5.3-codex", state: "used" },
+    { name: "codex-mini", id: "codex-mini", state: "zero", default: true },
+  ],
+};
+assert.deepEqual(topModel(codexAgent), { id: "codex-mini", name: "codex-mini" }, "flagged default wins");
+const copilotAgent = {
+  id: "copilot",
+  models: [
+    { name: "claude-sonnet-4.5", id: "claude-sonnet-4.5", state: "zero" },
+    { name: "gpt-5", id: "gpt-5", state: "zero", top: true },
+  ],
+};
+assert.deepEqual(topModel(copilotAgent), { id: "gpt-5", name: "gpt-5" }, "flagged top wins");
+const plainList = { id: "grok", models: [
+  { name: "first-model", id: "first-model", state: "zero" },
+  { name: "second-model", id: "second-model", state: "used" },
+] };
+assert.deepEqual(topModel(plainList), { id: "first-model", name: "first-model" }, "no flags -> first listed usable");
+assert.deepEqual(topModel(plainList, { constanceBrainModel: "second-model" }), { id: "second-model", name: "second-model" },
+  "owner override beats the flag and the order");
+assert.deepEqual(topModel({ id: "grok", models: [{ name: "Gone", id: "gone", state: "unavailable", recommended: true }] }), null,
+  "a flagged but unavailable model is still unusable");
+// An agent id outside the live-list set keeps the rank-then-first behavior.
+assert.deepEqual(topModel({ id: "antigravity", models: [{ name: "Mystery 9", id: "m9", state: "zero", default: true }] }),
+  { id: "m9", name: "Mystery 9" }, "antigravity ignores flag fields, falls to first usable");
+
+// brainLimits: the new brains pass their own agent entry through like claude.
+const liveData = { agents: [
+  { id: "grok", limits: [{ title: "Session", percent: 0.3 }], unsure: false },
+  { id: "codex", limits: [{ title: "Weekly", percent: 0.6 }], unsure: false },
+] };
+assert.equal(brainLimits(liveData, "grok"), liveData.agents[0]);
+assert.equal(brainLimits(liveData, BRAINS.codex), liveData.agents[1]);
+assert.deepEqual(brainLimits(liveData, "copilot"), { id: "copilot", limits: [], unsure: true });
+assert.deepEqual(brainLimits({}, "grok"), { id: "grok", limits: [], unsure: true });
+
+// brainCommand: one shape per brain, role folded into the prompt.
+const gx = brainCommand({ brain: "grok", model: "grok-4.7", role: "ROLE", prompt: "do it", session: "s1", resume: true });
+assert.deepEqual(gx, {
+  cmd: "grok",
+  args: ["--permission-mode", "bypassPermissions", "--output-format", "json", "-m", "grok-4.7", "-r", "s1", "-p", "ROLE\n\ndo it"],
+});
+const gxFresh = brainCommand({ brain: BRAINS.grok, role: "R", prompt: "P" });
+assert.deepEqual(gxFresh.args, ["--permission-mode", "bypassPermissions", "--output-format", "json", "-p", "R\n\nP"],
+  "grok omits -m and -r on a fresh model-less run");
+const cx = brainCommand({ brain: "codex", model: "gpt-5.3-codex", role: "ROLE", prompt: "do it", session: "s2" });
+assert.deepEqual(cx, {
+  cmd: "codex",
+  args: ["exec", "--dangerously-bypass-approvals-and-sandbox", "--json", "-m", "gpt-5.3-codex", "ROLE\n\ndo it"],
+});
+const cxResume = brainCommand({ brain: "codex", role: "R", prompt: "P", session: "s2", resume: true });
+assert.deepEqual(cxResume.args, ["exec", "resume", "s2", "R\n\nP"]);
+const cp = brainCommand({ brain: "copilot", model: "gpt-5", role: "ROLE", prompt: "do it", session: "s3", resume: true });
+assert.deepEqual(cp, {
+  cmd: "copilot",
+  args: ["--allow-all", "--no-ask-user", "-s", "--model", "gpt-5", "-r", "s3", "-p", "ROLE\n\ndo it"],
+});
+const cpFresh = brainCommand({ brain: BRAINS.copilot, role: "R", prompt: "P" });
+assert.deepEqual(cpFresh.args, ["--allow-all", "--no-ask-user", "-s", "-p", "R\n\nP"]);
+
+// brainWall for the new brains: copilot's own limit lines, and a generic
+// limit/quota line for grok and codex — same hot-reset wait logic as agy.
+assert.equal(brainWall("grok", "all done, tests pass", now, []), null);
+assert.equal(brainWall("copilot", "Refactored the parser.", now, []), null);
+const gw = brainWall("grok", "Error: you have reached your usage limit", now, [
+  { title: "Session", percent: 0.9, resetsAt: "2030-06-01T13:00:00Z" },
+]);
+assert.equal(gw.until, Date.parse("2030-06-01T13:00:00Z"), "grok wall takes the hot reset");
+assert.equal(gw.stated, true);
+assert.equal(gw.text, "Error: you have reached your usage limit");
+for (const line of [
+  "You've hit the rate limit for this model.",
+  "You've hit your session rate limit.",
+  "You've reached your weekly rate limit.",
+]) {
+  const w = brainWall("copilot", `some output\n${line}\nmore`, now, []);
+  assert.ok(w && w.until === now + 60 * 60e3, `copilot wall on: ${line}`);
+  assert.equal(w.text, line);
+}
+const cw2 = brainWall("codex", "stream error: quota exceeded", now, [
+  { title: "Weekly", percent: 0.5, resetsAt: "2030-06-02T00:00:00Z" },
+]);
+assert.equal(cw2.until, Date.parse("2030-06-02T00:00:00Z"), "codex wall, no hot window -> earliest future reset");
+assert.equal(cw2.stated, true);
+assert.equal(brainWall("grok", "the limit is a good thing", now, []).text, "the limit is a good thing",
+  "the generic matcher is line-level, like agy's");
+assert.equal(brainWall(BRAINS.grok, "429 too many requests", now, []).until, now + 60 * 60e3);
+
+// milkLabel covers every brain id.
+assert.equal(milkLabel("grok"), "Milk Grok");
+assert.equal(milkLabel("codex"), "Milk Codex");
+assert.equal(milkLabel("copilot"), "Milk Copilot");
+assert.equal(milkLabel("claude"), "Milk Opus");
+
 console.log("constance-brain.test.mjs: all assertions passed");
