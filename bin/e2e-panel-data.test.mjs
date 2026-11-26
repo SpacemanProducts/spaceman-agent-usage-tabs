@@ -71,6 +71,7 @@ fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePra
 // makes it claim that, same trick as constance.test.mjs).
 fs.writeFileSync(path.join(bin, "devin"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$f" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 want=$(grep -o 'if it is not exactly [^ ]*, stop now' <<<"$p" | head -1 | sed 's/^if it is not exactly //; s/, stop now$//')
 here=$(pwd)
 [[ -n "$want" && "$here" == "$want" ]] || { echo "pwd check failed: here=$here want=$want"; exit 1; }
@@ -88,6 +89,7 @@ echo "{\\"summary\\": \\"added \${name%.*}\\", \\"commit\\": \\"$c\\", \\"files\
 // the same go-file so the test can watch a running job.
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$f" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 while [[ ! -e "${root}/reads-ok" ]]; do sleep 0.2; done
 if grep -qi "read-only job" <<<"$p"; then

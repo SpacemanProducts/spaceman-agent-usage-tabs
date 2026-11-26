@@ -68,6 +68,7 @@ gitC("commit", "-qm", "drop the test suite for the e2e clone; trivial test rule"
 // read-only job; the done-file path always comes out of the prompt.
 fs.writeFileSync(path.join(bin, "devin"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$f" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 want=$(grep -o 'if it is not exactly [^ ]*, stop now' <<<"$p" | head -1 | sed 's/^if it is not exactly //; s/, stop now$//')
 here=$(pwd)
 [[ -n "$want" && "$here" == "$want" ]] || { echo "pwd check failed: here=$here want=$want"; exit 1; }
@@ -82,6 +83,7 @@ echo "{\\"summary\\": \\"added \${name%.*}\\", \\"commit\\": \\"$c\\", \\"files\
 `, { mode: 0o755 });
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$f" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 echo '{"summary": "read-only look, changed nothing", "commit": "", "files": []}' > "$f"
 `, { mode: 0o755 });

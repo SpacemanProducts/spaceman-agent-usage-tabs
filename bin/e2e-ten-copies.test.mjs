@@ -57,6 +57,7 @@ git("add", ".constance/rules.md"); git("commit", "-qm", "project rules");
 // copies, not job pacing.
 fs.writeFileSync(path.join(bin, "devin"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$f" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 want=$(grep -o 'if it is not exactly [^ ]*, stop now' <<<"$p" | head -1 | sed 's/^if it is not exactly //; s/, stop now$//')
 here=$(pwd)
 [[ -n "$want" && "$here" == "$want" ]] || { echo "pwd check failed: here=$here want=$want"; exit 1; }

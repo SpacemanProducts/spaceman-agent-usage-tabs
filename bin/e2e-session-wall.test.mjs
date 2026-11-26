@@ -46,6 +46,7 @@ fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePra
 // go-file wait — this test is about Constance's wall, not job pacing.
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$f" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 sleep 1
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-x.txt}
 before=$(git rev-parse HEAD)

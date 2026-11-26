@@ -37,6 +37,7 @@ fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePra
 // "Only edit these files: X." and commits it — except "add g", which also leaves a stray file.
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$f" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 [[ -e "${root}/home/home-marker" ]] && echo "sandboxed=no" || echo "sandboxed=yes"
 grep -q "stray-now" <<<"$p" && echo stray > stray-now.txt
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
@@ -69,6 +70,7 @@ fi
 // (the job then ends as "exited without writing its done file").
 fs.writeFileSync(path.join(bin, "devin"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$f" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 want=$(grep -o 'if it is not exactly [^ ]*, stop now' <<<"$p" | head -1 | sed 's/^if it is not exactly //; s/, stop now$//')
 here=$(pwd)
 [[ -n "$want" && "$here" == "$want" ]] || { echo "pwd check failed: here=$here want=$want"; exit 1; }

@@ -39,6 +39,7 @@ fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePra
 // the rest; "garbage done file" writes unparseable bytes and exits.
 fs.writeFileSync(path.join(bin, "devin"), `#!/bin/bash
 p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$f" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 if grep -q "Last try failed" <<<"$p"; then
   echo '{"summary": "retried ok", "commit": "", "files": ["junk.txt"]}' > "$f"
 elif grep -q "two slow halves" <<<"$p"; then

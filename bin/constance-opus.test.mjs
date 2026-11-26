@@ -71,6 +71,7 @@ if [[ " $* " == *" --append-system-prompt "* ]]; then
 fi
 p="\${@: -1}"
 d=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -1)
+[[ -n "$d" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1)
 ok=yes
 grep -q '^half$' "$name" || ok=no
