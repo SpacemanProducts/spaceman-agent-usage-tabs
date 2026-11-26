@@ -1224,6 +1224,19 @@ Panel {
   }
   // The slider's lead-in: the brain's own milkLabel when status.brain carries one, else text: "Milk Opus".
   readonly property string constanceMilkLabel: (constance.brain && constance.brain.milkLabel) || "Milk Opus"
+  // The weekly pace wire (status.board.week, bin/constance-weekwire.mjs): where the week
+  // stands against the even spread, and the drifted intensity she runs on — the Milk Opus
+  // slider stays the setting it drifts from. Null without a weekly reading; the line hides.
+  readonly property var constanceWeek: constanceBoard.week || null
+  readonly property string constanceWeekText: {
+    var w = root.constanceWeek
+    if (!w) return ""
+    var pct = function (f) { var n = Math.round(Number(f) * 100); return isFinite(n) ? String(n) : "—" }
+    var eff = isFinite(Number(w.effective)) ? String(Math.round(Number(w.effective))) : "—"
+    var s = "Week: " + String(w.pace || "") + " · used " + pct(w.used) + "% vs " + pct(w.expected) + "% expected · intensity " + eff + " (" + String(w.driftText || "") + ")"
+    if (Number(w.lanes) > 1) s += " · " + Number(w.lanes) + " lead lanes"
+    return s
+  }
   // Live clock for running cards' elapsed time (ticks only while her screen is open).
   property real constanceNow: Date.now()
   Timer { interval: 1000; running: root.constanceOpen && root.opened; repeat: true; triggeredOnStart: true; onTriggered: root.constanceNow = Date.now() }
@@ -3140,6 +3153,18 @@ Panel {
                 Text {
                   textFormat: Text.PlainText
                   text: "Sandbox and guardrails always on."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                // The week's pace and the drifted intensity (board.week): one calm line,
+                // hidden when there is no weekly reading.
+                Text {
+                  visible: root.constanceWeek !== null
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  text: root.constanceWeekText
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
