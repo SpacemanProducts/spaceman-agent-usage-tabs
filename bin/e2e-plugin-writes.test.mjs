@@ -53,12 +53,15 @@ fs.mkdirSync(plugins, { recursive: true });
 execFileSync("git", ["clone", "-q", PROJECT, plugin]);
 const gitC = (...a) => execFileSync("git", ["-C", plugin, ...a], { encoding: "utf8" });
 gitC("config", "user.email", "t@t"); gitC("config", "user.name", "t");
-// A self-merge runs every bin/*.test.mjs in the copy's worktree before merging;
-// this clone only needs to be a valid repo (and must not rerun this test), so
-// the suite is dropped here — the worktree is cut from HEAD, so it must be a
-// commit, not just deleted files.
+// A self-merge runs the project's test command sandboxed in the copy's
+// worktree; this clone only needs to be a valid repo (and must not rerun this
+// test), so the suite is dropped and a trivial `test: true` rule stands in —
+// the worktree is cut from HEAD, so both must be committed.
 for (const f of fs.readdirSync(path.join(plugin, "bin")).filter((f) => f.endsWith(".test.mjs"))) fs.rmSync(path.join(plugin, "bin", f));
-gitC("commit", "-qam", "drop the test suite for the e2e clone");
+fs.mkdirSync(path.join(plugin, ".constance"), { recursive: true });
+fs.writeFileSync(path.join(plugin, ".constance", "rules.md"), "test: true\n");
+gitC("add", "-A"); gitC("add", "-f", ".constance/rules.md");
+gitC("commit", "-qm", "drop the test suite for the e2e clone; trivial test rule");
 
 // Fake agents, same shape as bin/constance.test.mjs. Devin does the editing copy
 // job (own worktree, reports its tests passed so it self-merges); Grok takes a
@@ -68,7 +71,7 @@ p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -
 want=$(grep -o 'if it is not exactly [^ ]*, stop now' <<<"$p" | head -1 | sed 's/^if it is not exactly //; s/, stop now$//')
 here=$(pwd)
 [[ -n "$want" && "$here" == "$want" ]] || { echo "pwd check failed: here=$here want=$want"; exit 1; }
-[[ "$f" == "$here/.constance/"* ]] || { echo "done file $f is not in $here"; exit 1; }
+[[ "$f" == "/tmp/.constance/"* ]] || { echo "done file $f is not in the sandbox tmp"; exit 1; }
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-x.txt}
 before=$(git rev-parse HEAD)

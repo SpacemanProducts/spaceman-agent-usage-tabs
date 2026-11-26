@@ -150,11 +150,13 @@ function newRepo(name) {
   clean(repo);
 }
 
-// ============================================================ mergeBranch: failure without MERGE_HEAD still cleans up
+// ============================================================ mergeBranch: failure without MERGE_HEAD is flagged, never reset
 // The race case from constance-selfmerge.deep.test.mjs, made deterministic: a
 // held ref lock makes `git merge` fail at update_ref AFTER the fast-forward
-// already staged the result, so there is no MERGE_HEAD to abort — but the
-// repo must still come out clean because it was clean before the merge.
+// already staged the result, so there is no MERGE_HEAD to abort. mergeBranch
+// never resets, checks out or cleans: it flags the failure and leaves the tree
+// exactly as git left it for the owner (the merge only ever starts on a tree
+// with no tracked changes, so nothing of theirs is mixed in).
 {
   const repo = newRepo("merge-nomergehead");
   const w = createWorktree(repo, 940);
@@ -167,23 +169,25 @@ function newRepo(name) {
   fs.rmSync(lock);
   assert.equal(m.ok, false, "the locked ref makes the merge fail");
   assert.equal(m.conflict, false, "no MERGE_HEAD was written, so it is not a conflict");
+  assert.equal(m.flagged, true, "the failure is flagged for the owner");
   assert.equal(head(repo), before, "HEAD never moved");
-  clean(repo);   // the staged merge result must be gone: index reset, tree restored, strays cleaned
-  assert.equal(fs.existsSync(path.join(repo, "locked.txt")), false, "the staged file did not survive");
+  assert.equal(git(repo, "status", "--porcelain").trim(), "A  locked.txt", "the tree is left as git left it: no reset");
+  git(repo, "reset", "-q", "--hard");   // the test's own cleanup
   dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true });
 }
 
 // ============================================================ mergeBranch: a dirty repo keeps the owner's changes
-// Same failure shape, but the tree was already dirty: the cleanup must not
-// run, so pre-existing uncommitted work is never reset away.
+// The tree is already dirty: mergeBranch refuses before git runs at all, so
+// pre-existing uncommitted work is never merged over or reset away.
 {
   const repo = newRepo("merge-dirtytree");
   const w = createWorktree(repo, 941);
   commitFile(w.worktree, "seed.txt", "copy version\n", "copy edits seed");
   fs.writeFileSync(path.join(repo, "seed.txt"), "owner edit\n");   // unstaged, tracked
   const m = mergeBranch(repo, w.branch);
-  assert.equal(m.ok, false, "git refuses to merge over local changes");
-  assert.equal(m.conflict, false);
+  assert.equal(m.ok, false, "no merge over local changes");
+  assert.equal(m.dirty, true, "refused as a dirty checkout");
+  assert.ok(!m.conflict);
   assert.equal(fs.readFileSync(path.join(repo, "seed.txt"), "utf8"), "owner edit\n", "pre-existing changes are never reset away");
   assert.equal(git(repo, "status", "--porcelain"), " M seed.txt\n", "the owner's edit is still there, unstaged");
   dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true });
@@ -364,8 +368,9 @@ function newRepo(name) {
   dropWorktree(repo, w.worktree, w.branch, { deleteBranch: true });
 }
 
-// A dirty file that the incoming branch also changes: git refuses before the
-// merge starts, so it is NOT a conflict and the owner's edit survives.
+// A dirty file that the incoming branch also changes: mergeBranch refuses
+// the dirty checkout before git runs, so it is NOT a conflict and the owner's
+// edit survives.
 {
   const repo = newRepo("merge-dirtyconflict");
   const w = createWorktree(repo, 932);
@@ -374,7 +379,8 @@ function newRepo(name) {
   fs.writeFileSync(path.join(repo, "hot.txt"), "owner edit\n");   // unstaged local change
   const m = mergeBranch(repo, w.branch);
   assert.equal(m.ok, false);
-  assert.equal(m.conflict, false, "a pre-merge refusal is not a conflict");
+  assert.ok(!m.conflict, "a pre-merge refusal is not a conflict");
+  assert.equal(m.dirty, true);
   assert.equal(fs.readFileSync(path.join(repo, "hot.txt"), "utf8"), "owner edit\n", "the owner's edit is untouched");
   assert.equal(git(repo, "status", "--porcelain"), " M hot.txt\n");
   assert.equal(tryGit(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD"), "", "no merge state left");

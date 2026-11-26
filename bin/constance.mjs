@@ -534,7 +534,9 @@ function runSelfMerge(id) {
       store.log({ kind: "merge", job: j.id, agent: j.agent, worker: j.worker, text: `self-merged ${j.branch}${m.commit ? ` (${String(m.commit).slice(0, 9)})` : ""}; ${did.join("; ")}` });
       return;
     }
-    if (m.failed) {
+    // `failed: true` is the dirty-worktree verdict; a failed suite carries the
+    // list of failed commands in `failed` too, and goes to the normal review.
+    if (m.failed === true) {
       // A copy whose worktree isn't clean can't be rebased or tested as it
       // merges: it failed. "failed" frees its copy slot and its files; the
       // worktree and branch stay for the owner to look at.

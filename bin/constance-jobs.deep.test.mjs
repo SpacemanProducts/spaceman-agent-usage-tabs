@@ -137,9 +137,9 @@ try {
   // worktree:"" with a branch set is treated as a plain folder job.
   assert.match(handoffPrompt({ id: 1, dir: "/p", task: "t", files: ["a"], worktree: "", branch: "b" }), /^Check: this job is for the project folder/);
   // extra is appended after a blank line only when truthy.
-  assert.ok(handoffPrompt({ id: 1, dir: "/p", task: "t" }, "").endsWith("Do not commit that file."), "empty extra adds nothing");
+  assert.ok(handoffPrompt({ id: 1, dir: "/p", task: "t" }, "").endsWith('"files": ["the files you changed"]}.'), "empty extra adds nothing");
   const withExtra = handoffPrompt({ id: 1, dir: "/p", task: "t" }, "GUARDRAILS:\n- be nice");
-  assert.ok(withExtra.endsWith("Do not commit that file.\n\nGUARDRAILS:\n- be nice"), "extra trails the done-file line");
+  assert.ok(withExtra.endsWith('"files": ["the files you changed"]}.\n\nGUARDRAILS:\n- be nice'), "extra trails the done-file line");
   // id is interpolated raw: 0 and strings both work.
   assert.ok(handoffPrompt({ id: 0, dir: "/p", task: "t" }).includes("job 0"));
   assert.ok(handoffPrompt({ id: "abc", dir: "/p", task: "t" }).includes(doneFile("/p", "abc")));

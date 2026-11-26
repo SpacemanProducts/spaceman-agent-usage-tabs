@@ -50,6 +50,11 @@ function makeRepo(it) {
   git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t");
   fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
   git(repo, "add", "a.txt"); git(repo, "commit", "-qm", "init");
+  // The project's real test command: a self-merge runs it sandboxed; without
+  // one there is no self-merge at all.
+  fs.mkdirSync(path.join(repo, ".constance"));
+  fs.writeFileSync(path.join(repo, ".constance", "rules.md"), "test: true\n");
+  git(repo, "add", ".constance/rules.md"); git(repo, "commit", "-qm", "project rules");
   return repo;
 }
 

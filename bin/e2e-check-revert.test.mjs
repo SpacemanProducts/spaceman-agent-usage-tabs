@@ -2,12 +2,14 @@
 // a temp repo and temp state dir, driven only through real
 // `node bin/constance.mjs` processes.
 //
-//   - job 1's done file reports a failing test, so the sweep finishes it but
-//     maybeSelfMerge refuses it (ownTestsPassed is false): it stays "finished"
-//     and waits for review — `wait` hands it out, nothing of it is merged.
-//   - job 2 reports passing tests: the sweep flags it selfMerging and spawns
-//     the detached `selfmerge` process, which merges its branch into the repo
-//     as a --no-ff merge commit and marks the job "merged" (pending review).
+//   - the project's real test command (.constance/rules.md `test:`) fails on
+//     job 1's work, so its self-merge never lands: it stays "finished" and
+//     waits for review — `wait` hands it out, nothing of it is merged. (What a
+//     worker's report says about tests is never a signal.)
+//   - job 2 passes the suite: the sweep commits its work for it (workers can't
+//     commit), flags it selfMerging and spawns the detached `selfmerge`
+//     process, which merges its branch into the repo as a --no-ff merge commit
+//     and marks the job "merged" (pending review).
 //   - `review 2 send-back` then runs git revert -m 1 on that merge commit: the
 //     file is back to its pre-merge content, a Revert commit sits on top, the
 //     job ends "sent back" and reviews.json records the "reverted" verdict.
@@ -52,23 +54,28 @@ function makeRepo(it) {
   git(repo, "config", "user.email", "t@t"); git(repo, "config", "user.name", "t");
   fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
   git(repo, "add", "a.txt"); git(repo, "commit", "-qm", "init");
+  // The project's real test command, run sandboxed in each copy's worktree:
+  // it fails wherever one.txt exists (job 1's work).
+  fs.mkdirSync(path.join(repo, ".constance"));
+  fs.writeFileSync(path.join(repo, ".constance", "rules.md"), "test: test ! -e one.txt\n");
+  git(repo, "add", ".constance/rules.md"); git(repo, "commit", "-qm", "project rules");
   return repo;
 }
 
-// A finished-looking copy: its own worktree on constance/job-<id>, one committed
-// change and the done file a real run would leave (uncommitted, in .constance/).
+// A finished-looking copy: its own worktree on constance/job-<id>, one change
+// left uncommitted (workers can't commit; Constance commits it) and the done
+// file a real run would leave in its sandbox tmp's .constance/.
 // `done` is the done-file JSON verbatim so each job controls its own report.
 function makeCopy(repo, it, id, rel, content, done) {
   const wt = path.join(it.iter, `wt-${id}`);
   const branch = `constance/job-${id}`;
   git(repo, "worktree", "add", "-q", "-b", branch, wt, "HEAD");
   fs.writeFileSync(path.join(wt, rel), content);
-  git(wt, "add", rel); git(wt, "commit", "-qm", `job ${id} work`);
-  const tip = git(wt, "rev-parse", "HEAD");
-  const doneDir = path.join(wt, ".constance");
+  const tmp = fs.mkdtempSync(path.join(it.iter, `jobtmp-${id}-`));
+  const doneDir = path.join(tmp, ".constance");
   fs.mkdirSync(doneDir, { recursive: true });
-  fs.writeFileSync(path.join(doneDir, `done-${id}.json`), JSON.stringify({ commit: tip, files: [rel], ...done }));
-  return { worktree: wt, branch, tip, rel };
+  fs.writeFileSync(path.join(doneDir, `done-${id}.json`), JSON.stringify({ commit: "", files: [rel], ...done }));
+  return { worktree: wt, branch, rel, tmp };
 }
 
 // A copy job as handOut would have left it mid-run: status "running" with its
@@ -77,7 +84,7 @@ function makeCopy(repo, it, id, rel, content, done) {
 function runningJob(it, repo, goalId, id, c) {
   return { id, agent: "devin", worker: `devin-${id}`, copy: true, goal: goalId,
     dir: repo, worktree: c.worktree, branch: c.branch, files: [c.rel],
-    task: `change ${c.rel}`, status: "running", pid: null, startedAt: Date.now() - 1000,
+    task: `change ${c.rel}`, status: "running", pid: null, startedAt: Date.now() - 1000, doneInTmp: true, tmp: c.tmp,
     log: path.join(it.iter, `job-${id}.log`), guardChecked: true };
 }
 
@@ -98,10 +105,10 @@ async function run() {
   const ORIG = "a\n";
   const CHANGED = "a changed by job 2\n";
 
-  // Job 1 reports a failing test: finished by the sweep, never self-merged.
+  // Job 1's work fails the project's suite: finished by the sweep, never merged.
   const c1 = makeCopy(repo, it, 1, "one.txt", "one\n",
     { summary: "job 1 done; its new check fails", report: "the new test fails: expected 1 got 2", files: ["one.txt"] });
-  // Job 2 reports passing tests: self-merges, then gets sent back.
+  // Job 2 passes the suite: self-merges, then gets sent back.
   const c2 = makeCopy(repo, it, 2, "a.txt", CHANGED,
     { summary: "job 2 done, tests passed", tests: "passed" });
 
@@ -109,24 +116,26 @@ async function run() {
   fs.writeFileSync(jobsFile(it), JSON.stringify({ goal, jobs: [
     runningJob(it, repo, goal.id, 1, c1), runningJob(it, repo, goal.id, 2, c2)], next: 3, guards: {} }));
 
-  // One sweep: both done files are seen. Job 1 finishes and waits for review;
-  // job 2 is flagged selfMerging and its detached `selfmerge` process starts.
+  // One sweep: both done files are seen. Both are committed by Constance and
+  // flagged selfMerging; their detached `selfmerge` processes run the suite.
   cli(it, ["jobs"]);
   let j1 = jobById(it, 1), j2 = jobById(it, 2);
   assert.equal(j1.status, "finished", `job 1 ended ${j1.status}, expected finished`);
-  assert.ok(!j1.selfMerging, "job 1 was flagged selfMerging despite its failing test");
   assert.equal(j2.status, "finished", `job 2 ended ${j2.status} before its self-merge`);
   assert.equal(j2.selfMerging, true, "job 2 was not flagged selfMerging");
+  assert.equal(j2.controllerCommit, true, "Constance committed job 2's work");
+  const tip2 = j2.commit;
+  assert.equal(git(c2.worktree, "rev-parse", "HEAD"), tip2, "the commit is on job 2's branch");
 
-  // The detached selfmerge runs the (empty) suite and merges under the lock.
+  // The detached selfmerge runs the suite and merges under the lock; job 1's
+  // suite fails, so its flag clears and it stays finished.
   const deadline = Date.now() + 60000;
   for (;;) {
-    j2 = jobById(it, 2);
-    if (j2.status === "merged") break;
-    assert.ok(Date.now() < deadline, `job 2 never merged (status ${j2.status}, ${(j2.mergeError || "").slice(-200)})`);
+    j1 = jobById(it, 1); j2 = jobById(it, 2);
+    if (j2.status === "merged" && !j1.selfMerging) break;
+    assert.ok(Date.now() < deadline, `job 2 never merged (status ${j2.status}, ${(j2.mergeError || "").slice(-200)}) or job 1 stayed flagged`);
     await sleep(100);
   }
-  j1 = jobById(it, 1);
   assert.equal(j1.status, "finished", `job 1 changed to ${j1.status} while job 2 self-merged`);
 
   // The merge landed: one --no-ff merge commit whose second parent is job 2's
@@ -135,7 +144,7 @@ async function run() {
   assert.equal(merges.length, 1, `expected exactly one merge commit, got ${merges.length}`);
   const parents = git(repo, "rev-list", "--parents", "-n", "1", merges[0]).trim().split(/\s+/);
   assert.equal(parents.length, 3, `${merges[0]} is not a two-parent merge commit`);
-  assert.equal(parents[2], c2.tip, "the merge's second parent is not job 2's tip");
+  assert.equal(parents[2], tip2, "the merge's second parent is not job 2's tip");
   assert.equal(fs.readFileSync(path.join(repo, "a.txt"), "utf8"), CHANGED, "job 2's change is not in the repo");
   assert.ok(!fs.existsSync(path.join(repo, "one.txt")), "job 1's file was merged even though it was never reviewed");
   const pending = readReviews(it).pending;

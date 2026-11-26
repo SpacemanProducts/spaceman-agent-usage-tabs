@@ -128,7 +128,11 @@ export function protectedBinds(proj, exists = (p) => fs.existsSync(p)) {
   if (gi?.type === "dir") a.push("--ro-bind", gi.dir, gi.dir);
   else if (gi?.type === "worktree") {
     a.push("--ro-bind", gi.file, gi.file);
-    if (exists(gi.common)) a.push("--ro-bind", gi.common, gi.common);
+    // A pointer at a git dir that doesn't exist fails closed: if it pointed
+    // inside the project, the worker could create it (with a config of its
+    // choosing) for host git to trust later.
+    if (!exists(gi.common)) throw new Error(`ENOENT: the git dir ${gi.common} named by ${gi.file} is missing`);
+    a.push("--ro-bind", gi.common, gi.common);
   }
   const dc = path.join(proj, ".constance");
   let st = null;

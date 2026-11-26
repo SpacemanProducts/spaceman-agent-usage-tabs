@@ -154,25 +154,25 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
 
 // ============================================================ 4. .git read-only surfaces
 {
-  // Plain repo: .git is a directory. hooks/ and config/ must be ro-bound ON TOP
-  // of the writable project bind (later mounts win in bwrap).
+  // Plain repo: .git is a directory. The WHOLE of it (hooks, config, refs,
+  // objects, index) is ro-bound ON TOP of the writable project bind (later
+  // mounts win in bwrap): workers can't commit; Constance commits for them.
   const home = mkHome(), proj = mkProj(home);
   put(path.join(proj, ".git", "config"), "[core]\n\trepositoryformatversion = 0\n");
   fs.mkdirSync(path.join(proj, ".git", "hooks"));
   const a = args({ agent: "grok", dir: proj, env: envFor(home) });
-  const hooks = path.join(proj, ".git", "hooks"), cfg = path.join(proj, ".git", "config");
-  assert.ok(hasMount(a, "ro-bind", hooks), ".git/hooks is read-only");
-  assert.ok(hasMount(a, "ro-bind", cfg), ".git/config is read-only");
-  assert.ok(!hasMount(a, "bind", hooks) && !hasMount(a, "bind", cfg), "git surfaces are never writable");
-  assert.ok(argIndex(a, "--bind", proj) < argIndex(a, "--ro-bind", cfg), "project bind comes before the config ro-bind");
-  assert.ok(argIndex(a, "--bind", proj) < argIndex(a, "--ro-bind", hooks), "project bind comes before the hooks ro-bind");
+  const dotgit = path.join(proj, ".git");
+  assert.ok(hasMount(a, "ro-bind", dotgit), ".git is read-only as a whole");
+  assert.ok(!mounts(a).some((m) => m.op === "bind" && (m.dst === dotgit || m.dst.startsWith(dotgit + "/"))), "nothing under .git is writable");
+  assert.ok(argIndex(a, "--bind", proj) < argIndex(a, "--ro-bind", dotgit), "project bind comes before the .git ro-bind");
+  assert.ok(hasMount(a, "ro-bind", path.join(proj, ".constance")), ".constance/ is read-only too");
 
-  // hooks/ missing: the builder creates it (on the host) so it can ro-bind it.
+  // hooks/ missing: nothing needs creating inside .git (the whole dir is ro).
   const home2 = mkHome(), proj2 = mkProj(home2, "p2");
   put(path.join(proj2, ".git", "config"));
   const a2 = args({ agent: "grok", dir: proj2, env: envFor(home2) });
-  assert.ok(fs.existsSync(path.join(proj2, ".git", "hooks")), "missing .git/hooks is created for the ro-bind");
-  assert.ok(hasMount(a2, "ro-bind", path.join(proj2, ".git", "hooks")), "created hooks dir is ro-bound");
+  assert.ok(!fs.existsSync(path.join(proj2, ".git", "hooks")), "no hooks dir is created");
+  assert.ok(hasMount(a2, "ro-bind", path.join(proj2, ".git")), ".git is read-only");
 
   // No .git at all: no git mounts, and nothing is created inside the project.
   const home3 = mkHome(), proj3 = mkProj(home3, "p3");
@@ -180,9 +180,9 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   assert.ok(!a3.join(" ").includes(".git"), "a non-repo project gets no .git mounts");
 }
 
-// Linked worktree: .git is a pointer FILE. The pointer stays ro, the shared git
-// dir is bound for objects/refs, hooks/config/worktrees stay ro on top, and only
-// THIS worktree's gitdir is writable.
+// Linked worktree: .git is a pointer FILE. The pointer and the whole shared git
+// dir (objects, refs, hooks, config, every worktree's gitdir, this one's
+// included) are read-only.
 {
   const home = mkHome();
   const main = mkProj(home, "main");
@@ -198,16 +198,9 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   const a = args({ agent: "grok", dir: wt, env: envFor(home) });
   const common = path.join(main, ".git");
   assert.ok(hasMount(a, "ro-bind", path.join(wt, ".git")), "the .git pointer file is read-only");
-  assert.ok(hasMount(a, "bind", common, common), "the shared git dir is writable (objects/refs)");
-  assert.ok(hasMount(a, "ro-bind", path.join(common, "hooks")), "shared hooks stay read-only");
-  assert.ok(hasMount(a, "ro-bind", path.join(common, "config")), "shared config stays read-only");
-  assert.ok(hasMount(a, "ro-bind", path.join(common, "worktrees")), "the worktrees dir is read-only");
-  assert.ok(hasMount(a, "bind", gitDir, gitDir), "this worktree's gitdir is writable");
-  // Order matters: every ro-bind protecting shared git state must sit AFTER the
-  // writable common bind, and the worktree gitdir bind after the worktrees ro-bind.
-  assert.ok(argIndex(a, "--bind", common) < argIndex(a, "--ro-bind", path.join(common, "hooks")), "hooks ro on top of common bind");
-  assert.ok(argIndex(a, "--ro-bind", path.join(common, "worktrees")) < argIndex(a, "--bind", gitDir), "own gitdir writable on top of worktrees ro");
-  assert.ok(!hasMount(a, "bind", path.join(common, "worktrees", "sibling")), "a sibling worktree's gitdir is never writable");
+  assert.ok(hasMount(a, "ro-bind", common, common), "the shared git dir is read-only");
+  assert.ok(!mounts(a).some((m) => m.op === "bind" && (m.dst === common || m.dst.startsWith(common + "/"))), "nothing under the shared git dir is writable, this worktree's gitdir included");
+  assert.ok(argIndex(a, "--bind", wt) < argIndex(a, "--ro-bind", common), "the ro-bind sits on top of the project bind");
 }
 
 // ============================================================ 5. keyring opt-in and env
@@ -269,17 +262,14 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
 
 // BUG 2 (fixed): `.git/config` (plain repo) and `<common>/config` (worktree)
 // were only ro-bound `if (exists(cfg))`. With no config file yet, the agent
-// could create one inside the writable project bind and set
-// core.hooksPath/core.fsmonitor; the next UNSANDBOXED host git command would
-// then run that hook. bwrap can only ro-bind an existing file, so the builder
-// now creates an empty config on the host (valid git) and always ro-binds it.
+// could create one and set core.hooksPath/core.fsmonitor for the next host git
+// command. Now the whole git dir is ro-bound, so a missing config can't be
+// created either (and host git runs with fsmonitor/hooks off: constance-git.mjs).
 {
   const home = mkHome(), proj = mkProj(home);
   put(path.join(proj, ".git", "HEAD"));              // .git exists, config does NOT
   const a = args({ agent: "grok", dir: proj, env: envFor(home) });
-  const cfg = path.join(proj, ".git", "config");
-  assert.ok(hasMount(a, "ro-bind", cfg), ".git/config is read-only even when it was missing");
-  assert.equal(fs.readFileSync(cfg, "utf8"), "", "the created config is empty");
+  assert.ok(hasMount(a, "ro-bind", path.join(proj, ".git")), ".git is read-only even with no config in it");
 
   // Same for a linked worktree's common-dir config.
   const home2 = mkHome();
@@ -290,9 +280,7 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   fs.writeFileSync(path.join(gitDir, "commondir"), "../..\n");
   fs.writeFileSync(path.join(wt, ".git"), `gitdir: ${gitDir}\n`);
   const a2 = args({ agent: "grok", dir: wt, env: envFor(home2) });
-  const commonCfg = path.join(main, ".git", "config");
-  assert.ok(hasMount(a2, "ro-bind", commonCfg), "worktree common config is read-only even when missing");
-  assert.equal(fs.readFileSync(commonCfg, "utf8"), "", "the created common config is empty");
+  assert.ok(hasMount(a2, "ro-bind", path.join(main, ".git")), "the worktree's common dir is read-only even with no config in it");
 }
 
 // ============================================================ 8. sandboxEnv: defaults, wrong types, purity
@@ -378,8 +366,7 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   fs.writeFileSync(path.join(projR, ".git"), "gitdir: sub/gitdir\n");
   const aR = args({ agent: "grok", dir: projR, tmp: jobtmp, env: envFor(homeR) });
   assert.ok(hasMount(aR, "ro-bind", path.join(projR, ".git")), "the relative-pointer .git file is read-only");
-  assert.ok(hasMount(aR, "bind", absGit, absGit), "the relative gitdir resolves under the project");
-  assert.ok(hasMount(aR, "ro-bind", path.join(absGit, "config")), "the resolved gitdir's config is read-only");
+  assert.ok(hasMount(aR, "ro-bind", absGit, absGit), "the relative gitdir resolves under the project and is read-only");
 
   // A commondir that is a DIRECTORY (not a file) can't be read: common falls
   // back to the gitdir itself.
@@ -389,8 +376,7 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   fs.mkdirSync(path.join(gitC, "commondir"), { recursive: true }); // a dir named commondir
   fs.writeFileSync(path.join(wtC, ".git"), `gitdir: ${gitC}\n`);
   const aC = args({ agent: "grok", dir: wtC, tmp: jobtmp, env: envFor(homeC) });
-  assert.ok(hasMount(aC, "bind", gitC, gitC), "an unreadable commondir falls back to the gitdir as common");
-  assert.ok(hasMount(aC, "ro-bind", path.join(gitC, "config")), "the fallback common's config is still read-only");
+  assert.ok(hasMount(aC, "ro-bind", gitC, gitC), "an unreadable commondir falls back to the gitdir as common, read-only");
 
   // A symlinked .git dir still counts as a directory (statSync follows it).
   const homeS = mkHome(), projS = mkProj(homeS, "sym");
@@ -398,14 +384,13 @@ const args = (o) => sandboxArgs({ tmp: jobtmp, ...o });
   put(path.join(realGit, "config")); fs.mkdirSync(path.join(realGit, "hooks"));
   fs.symlinkSync(realGit, path.join(projS, ".git"));
   const aS = args({ agent: "grok", dir: projS, tmp: jobtmp, env: envFor(homeS) });
-  assert.ok(hasMount(aS, "ro-bind", path.join(projS, ".git", "hooks")), "a symlinked .git dir still protects hooks");
+  assert.ok(hasMount(aS, "ro-bind", path.join(projS, ".git")), "a symlinked .git dir is still read-only");
 
-  // .git/hooks existing as a FILE is ro-bound as a file (no mkdir, no throw):
-  // inside the sandbox the agent sees a file where git wants a dir.
+  // .git/hooks existing as a FILE: no mkdir, no throw; the whole .git is ro.
   const homeH = mkHome(), projH = mkProj(homeH, "hookfile");
   put(path.join(projH, ".git", "config")); put(path.join(projH, ".git", "hooks"), "not a dir\n");
   const aH = args({ agent: "grok", dir: projH, tmp: jobtmp, env: envFor(homeH) });
-  assert.ok(hasMount(aH, "ro-bind", path.join(projH, ".git", "hooks")), "a hooks FILE is ro-bound verbatim");
+  assert.ok(hasMount(aH, "ro-bind", path.join(projH, ".git")), "a hooks FILE changes nothing: .git is ro");
 
   // HOME pointing at a plain file can't hold profile folders: raw fs error.
   const homeFile = path.join(tmp, `homefile${seq}`); put(homeFile);
@@ -551,20 +536,14 @@ if (!bwrapWorks()) {
   assert.ok(!aBlank.join(" ").includes(".git"), "a blank gitdir yields no git mounts");
   assert.ok(!fs.existsSync(path.join(pBlank, "config")) && !fs.existsSync(path.join(pBlank, "hooks")),
     "a blank gitdir creates no stray config/hooks in the project");
-  // A gitdir pointing at a NONEXISTENT dir throws a raw ENOENT from mkdirSync —
-  // better than silently doing nothing, but not a friendly error either.
+  // A gitdir pointing at a NONEXISTENT dir is refused (fail closed): the worker
+  // must never be able to create the git dir host git will trust.
   const homeN = mkHome(), projN = mkProj(homeN, "nogitdir");
   fs.writeFileSync(path.join(projN, ".git"), `gitdir: ${path.join(tmp, "no-such-gitdir-" + seq)}\n`);
   assert.throws(() => args({ agent: "grok", dir: projN, tmp: jobtmp, env: envFor(homeN) }), /ENOENT/);
 
-  // BUG: for a worktree whose common dir has no `worktrees/` folder, the
-  // `--ro-bind <common>/worktrees` is skipped entirely — inside the sandbox
-  // that path stays writable through the common bind, so a sibling worktree
-  // gitdir could be created or overwritten. hooks/ and config/ get
-  // created-if-missing; worktrees/ doesn't.
-  //   // craft: wt/.git -> gitdir <gd>; <gd>/commondir -> <common>; <common>
-  //   // exists but has no worktrees/ subdir. Then assert no argv entry ro-binds
-  //   // <common>/worktrees — currently true (the gap), should be refused/created.
+  // A worktree whose common dir has no `worktrees/` folder: the whole common
+  // dir is ro-bound, so no sibling gitdir can be created inside the sandbox.
   const homeW = mkHome();
   const commonW = path.join(tmp, `common${seq}`); fs.mkdirSync(commonW);
   const gdW = path.join(tmp, `gd${seq}`); fs.mkdirSync(gdW);
@@ -572,9 +551,8 @@ if (!bwrapWorks()) {
   const wtW = path.join(tmp, `wtw${seq}`); fs.mkdirSync(wtW);
   fs.writeFileSync(path.join(wtW, ".git"), `gitdir: ${gdW}\n`);
   const aW = args({ agent: "grok", dir: wtW, tmp: jobtmp, env: envFor(homeW) });
-  assert.ok(hasMount(aW, "bind", commonW, commonW), "the common dir is bound writable");
-  assert.ok(!aW.join(" ").includes(path.join(commonW, "worktrees")),
-    "BUG: no worktrees/ dir means no ro-bind protects it inside the sandbox");
+  assert.ok(hasMount(aW, "ro-bind", commonW, commonW), "the common dir is read-only as a whole");
+  assert.ok(!hasMount(aW, "bind", commonW, commonW), "and never writable");
   for (const d of [commonW, gdW, wtW]) fs.rmSync(d, { recursive: true, force: true });
 }
 

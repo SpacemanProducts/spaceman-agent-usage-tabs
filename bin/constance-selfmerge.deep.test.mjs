@@ -19,7 +19,7 @@ const SELF = path.join(path.dirname(fileURLToPath(import.meta.url)), "constance-
 const git = (dir, ...a) => execFileSync("git", ["-C", dir, ...a], { encoding: "utf8" });
 const sh = (dir, ...a) => spawnSync("git", ["-C", dir, ...a], { encoding: "utf8" });
 const okSuite = () => ({ ok: true, failed: [], output: "" });
-const ALL = { ownTests: true, guard: true, diff: true };
+const ALL = { guard: true, diff: true };
 
 function makeRepo(name) {
   const repo = path.join(root, name, "repo");
@@ -62,16 +62,21 @@ const spawnNode = (file, args) => new Promise((resolve) => {
   p.on("close", (code) => resolve({ code, out, err }));
 });
 
-// runSuite, no bin dir at all: an empty suite passes.
+// runSuite takes the project's real test commands (testCommands) and runs
+// each one sandboxed (suiteLaunch). The plugin convention's command, as
+// testCommands builds it for a repo with bin/*.test.mjs:
+const PLUGIN_CMD = { kind: "test", cmd: 'for t in bin/*.test.mjs; do node "$t" || { echo "FAILED: $t"; exit 1; }; done', source: "bin/*.test.mjs" };
+
+// runSuite with no command at all never passes: no command, no self-merge.
 {
   const dir = path.join(root, "nobin");
   fs.mkdirSync(dir, { recursive: true });
   const s = runSuite(dir);
-  assert.equal(s.ok, true); assert.deepEqual(s.failed, []);
+  assert.equal(s.ok, false); assert.equal(s.empty, true); assert.deepEqual(s.failed, []);
 }
 
-// runSuite ignores anything that is not bin/*.test.mjs, and a file that throws
-// counts as a failure just like one that exits non-zero.
+// The plugin command runs only top-level bin/*.test.mjs, and a file that
+// throws counts as a failure just like one that exits non-zero.
 {
   const dir = path.join(root, "suite2");
   fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
@@ -80,10 +85,14 @@ const spawnNode = (file, args) => new Promise((resolve) => {
   fs.mkdirSync(path.join(dir, "bin", "nested"));
   fs.writeFileSync(path.join(dir, "bin", "nested", "deep.test.mjs"), `process.exit(1);\n`);
   fs.writeFileSync(path.join(dir, "bin", "aaa-throw.test.mjs"), `throw new Error("boom");\n`);
-  const s = runSuite(dir);
+  const s = runSuite(dir, { commands: [PLUGIN_CMD] });
   assert.equal(s.ok, false);
-  assert.deepEqual(s.failed, ["aaa-throw.test.mjs"], "only top-level *.test.mjs files run");
+  assert.deepEqual(s.failed, [PLUGIN_CMD.cmd]);
+  assert.ok(s.output.includes("FAILED: bin/aaa-throw.test.mjs"), s.output);
   assert.ok(s.output.includes("boom"), "the thrown error reached the output");
+  fs.rmSync(path.join(dir, "bin", "aaa-throw.test.mjs"));
+  fs.writeFileSync(path.join(dir, "bin", "ok.test.mjs"), `console.log("fine");\n`);
+  assert.equal(runSuite(dir, { commands: [PLUGIN_CMD] }).ok, true, "helper.mjs and nested tests never run");
 }
 
 // runSuite keeps only the last 2000 chars of everything the tests printed.
@@ -92,15 +101,15 @@ const spawnNode = (file, args) => new Promise((resolve) => {
   fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
   const pad = "x".repeat(5000);
   fs.writeFileSync(path.join(dir, "bin", "a.test.mjs"), `console.log(${JSON.stringify(pad)}); console.log("TAIL-MARK");\n`);
-  const s = runSuite(dir);
-  assert.equal(s.ok, true);
+  const s = runSuite(dir, { commands: [PLUGIN_CMD] });
+  assert.equal(s.ok, true, s.output.slice(-300));
   assert.ok(s.output.length <= 2000, `output truncated to 2000 chars, got ${s.output.length}`);
   assert.ok(s.output.endsWith("TAIL-MARK\n"), "the tail of the output is what survives");
   assert.ok(s.output.startsWith("x".repeat(100)), "only the last 2000 chars survive, not the head");
 }
 
-// runSuite runs each file with cwd = dir and still uses its own temp HOME even
-// when the caller's env already sets HOME.
+// runSuite runs with cwd = dir inside the suite sandbox, whose HOME is its own
+// throwaway (/tmp/home), never the caller's.
 {
   const dir = path.join(root, "suite4");
   fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
@@ -109,18 +118,20 @@ const spawnNode = (file, args) => new Promise((resolve) => {
     `import fs from "node:fs";\n` +
     `if (process.cwd() !== ${JSON.stringify(dir)}) process.exit(2);\n` +
     `if (fs.readFileSync("sibling.txt", "utf8") !== "sibling-data\\n") process.exit(3);\n` +
-    `if (!process.env.HOME.includes("constance-suite-home-")) process.exit(4);\n`);
-  const s = runSuite(dir, { env: { ...process.env, HOME: "/nonexistent-home" } });
+    `if (process.env.HOME !== "/tmp/home") process.exit(4);\n`);
+  const s = runSuite(dir, { commands: [PLUGIN_CMD] });
   assert.equal(s.ok, true, `cwd/HOME contract broke: ${s.output}`);
 }
 
-// selfMerge: the default suite is runSuite, and the default merge is the
-// --no-ff selfMergeBranch — a copy on an unmoved main still lands as a merge
-// commit. The worktree has no bin dir, so the real suite passes trivially.
+// selfMerge: the default suite is runSuite with no commands, which never
+// passes, so nothing merges by default. The default merge is the --no-ff
+// selfMergeBranch — a copy on an unmoved main still lands as a merge commit.
 {
   const repo = makeRepo("defaults");
   const c = makeCopy(repo, 20, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
-  const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL });
+  const none = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL });
+  assert.equal(none.merged, false, "no test command: no self-merge");
+  const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL, suite: okSuite });
   assert.equal(r.merged, true, JSON.stringify(r));
   assert.equal(git(repo, "log", "-1", "--format=%P").trim().split(" ").length, 2, "default merge is --no-ff");
 }
@@ -130,7 +141,7 @@ const spawnNode = (file, args) => new Promise((resolve) => {
 {
   const repo = makeRepo("strictchecks");
   const c = makeCopy(repo, 21, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
-  for (const checks of [{}, { ownTests: "yes", guard: true, diff: true }, { ownTests: true, guard: 1, diff: true }, { ownTests: true, guard: true }]) {
+  for (const checks of [{}, { guard: "yes", diff: true }, { guard: 1, diff: true }, { guard: true }, { guard: true, diff: 1 }]) {
     let suiteCalled = false, lockCalled = false;
     const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks,
       suite: () => { suiteCalled = true; return okSuite(); },
@@ -200,26 +211,25 @@ const spawnNode = (file, args) => new Promise((resolve) => {
   assert.equal(noRebaseLeft(c.worktree), true, "no rebase state left in the worktree");
 }
 
-// selfMerge with a dirty worktree: the rebase refuses, is aborted, and both
-// the repo and the worktree keep their uncommitted changes.
+// selfMerge with a dirty worktree: it fails before the suite or any rebase
+// (status "failed" frees the slot), and the worktree keeps its changes.
 {
   const repo = makeRepo("dirtywt");
   const c = makeCopy(repo, 26, (wt) => commitFile(wt, "b.txt", "b\n", "copy b"));
   fs.writeFileSync(path.join(c.worktree, "a.txt"), "dirty\n");   // unstaged change to a tracked file
   const r = selfMerge({ repo, worktree: c.worktree, branch: c.branch, checks: ALL, suite: okSuite });
-  assert.equal(r.merged, false); assert.equal(r.flagged, true);
-  assert.equal(fs.readFileSync(path.join(c.worktree, "a.txt"), "utf8"), "dirty\n", "the dirty file survived the aborted rebase");
+  assert.equal(r.merged, false); assert.equal(r.failed, true, JSON.stringify(r));
+  assert.equal(fs.readFileSync(path.join(c.worktree, "a.txt"), "utf8"), "dirty\n", "the dirty file survived");
   assert.equal(noMergeHead(repo), true);
   assert.equal(fs.existsSync(path.join(repo, "b.txt")), false, "nothing merged");
 }
 
-// selfMerge with a worktree that does not exist: reported as not merged and
-// flagged, and the repo is untouched. (The reason says "conflict" even though
-// nothing conflicted — a missing worktree is not a merge conflict.)
+// selfMerge with a worktree that does not exist: its status is unreadable, so
+// it failed (not a conflict), and the repo is untouched.
 {
   const repo = makeRepo("nowt");
   const r = selfMerge({ repo, worktree: path.join(root, "nowt", "ghost"), branch: "constance/job-99", checks: ALL, suite: okSuite });
-  assert.equal(r.merged, false); assert.equal(r.flagged, true);
+  assert.equal(r.merged, false); assert.equal(r.failed, true, JSON.stringify(r));
   assert.equal(noMergeHead(repo), true); assert.equal(cleanStatus(repo), true);
 }
 
@@ -293,7 +303,7 @@ const lock = lockDir ? (fn) => {
   }
   try { return fn(); } finally { fs.rmSync(lockDir, { recursive: true, force: true }); }
 } : (fn) => fn();
-const r = selfMerge({ repo, worktree: wt, branch, checks: { ownTests: true, guard: true, diff: true },
+const r = selfMerge({ repo, worktree: wt, branch, checks: { guard: true, diff: true },
   suite: () => ({ ok: true, failed: [], output: "" }), lock });
 console.log("RESULT " + JSON.stringify(r));
 `);
@@ -414,25 +424,24 @@ console.log("done");
 
 // --- More edge cases and error paths --------------------------------------
 
-// runSuite, `bin` exists but is a regular file: readdirSync throws before any
-// temp HOME is made, so nothing is leaked.
+// runSuite, a command the sandbox can't run fails like any other failure.
 {
   const dir = path.join(root, "suite-binstr");
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "bin"), "not a dir\n");
-  assert.throws(() => runSuite(dir));
+  const s = runSuite(dir, { commands: [{ kind: "test", cmd: "no-such-command-xyz" }] });
+  assert.equal(s.ok, false);
+  assert.deepEqual(s.failed, ["no-such-command-xyz"]);
 }
 
 // runSuite, a directory named *.test.mjs: node cannot run it, so it counts as
-// a failed file exactly like a non-zero exit.
+// a failed file exactly like a non-zero exit, and the run stops there.
 {
   const dir = path.join(root, "suite-dirt");
   fs.mkdirSync(path.join(dir, "bin", "dir.test.mjs"), { recursive: true });
   fs.writeFileSync(path.join(dir, "bin", "ok.test.mjs"), `console.log("ok-marker");\n`);
-  const s = runSuite(dir);
+  const s = runSuite(dir, { commands: [PLUGIN_CMD] });
   assert.equal(s.ok, false);
-  assert.deepEqual(s.failed, ["dir.test.mjs"]);
-  assert.ok(s.output.includes("ok-marker"), "the good file still ran");
+  assert.ok(s.output.includes("FAILED: bin/dir.test.mjs"), s.output);
 }
 
 // selfMerge, the merge lock itself can fail: a lock that throws propagates
@@ -486,17 +495,16 @@ console.log("done");
   assert.equal(r.retried, false);
 }
 
-// selfMerge, the worktree path exists but is not a git worktree at all: the
-// rebase fails inside the lock and the result is flagged as a conflict even
-// though nothing conflicted — same mislabel as the missing-worktree case.
+// selfMerge, the worktree path exists but is not a git worktree at all: its
+// status is unreadable, so it failed before any suite or rebase ran.
 {
   const repo = makeRepo("nongitwt");
   const fake = path.join(root, "nongitwt", "plain-dir");
   fs.mkdirSync(fake, { recursive: true });
   fs.writeFileSync(path.join(fake, "keep.txt"), "keep\n");
   const r = selfMerge({ repo, worktree: fake, branch: "constance/job-44", checks: ALL, suite: okSuite });
-  assert.equal(r.merged, false); assert.equal(r.flagged, true);
-  assert.equal(r.reason, "conflict, rebase failed");
+  assert.equal(r.merged, false); assert.equal(r.failed, true, JSON.stringify(r));
+  assert.equal(r.reason, "worktree status unreadable");
   assert.equal(fs.readFileSync(path.join(fake, "keep.txt"), "utf8"), "keep\n", "the plain dir is untouched");
   assert.equal(cleanStatus(repo), true);
 }

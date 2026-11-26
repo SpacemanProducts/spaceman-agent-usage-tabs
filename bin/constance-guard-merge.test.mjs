@@ -1,18 +1,19 @@
 // Constance guard vs a copy's self-merge, end to end: a shared-folder job
 // (no worktree — e.g. a read-only Grok job in the project folder) whose run
-// overlaps a Devin copy's self-merge must not be guard-checked against the
-// merge's commits. Driven only through real `node bin/constance.mjs` sweeps
-// (`jobs`) against a temp repo and temp state dir, with jobs.json crafted the
-// way handOut/maybeSelfMerge/the selfmerge process leave it.
+// overlaps a Devin copy's self-merge must never be blamed for the merge's
+// commits. Since 1.50.2 workers can't commit (git data is read-only) and the
+// guard attributes only the commit Constance makes for a job, so commits that
+// appear in a shared folder during a run are someone else's. Driven only
+// through real `node bin/constance.mjs` sweeps (`jobs`) against a temp repo
+// and temp state dir, with jobs.json crafted the way handOut/maybeSelfMerge/
+// the selfmerge process leave it.
 //
-//   - merge already recorded: the shared job finishes, the sweep excuses the
-//     copy's merge commit and everything it pulled in — no violation, the
-//     copy's file stays, nothing is reverted.
-//   - merge still in flight (copy selfMerging, no mergeCommit yet): the
-//     shared job's guard defers WITHOUT guardChecked; once the merge lands
-//     and is recorded, the next sweep checks it and excuses the same way.
-//   - the shared job's OWN merge of a branch with outside files is still a
-//     violation: badCommits are reverted as before.
+//   - merge already recorded: no violation, the copy's file stays, nothing
+//     is reverted.
+//   - merge still in flight: the shared job is checked at once (no deferral
+//     is needed) and passes; once the merge lands nothing is reverted.
+//   - a merge nobody recorded is still never blamed or reverted (it is not the
+//     job's); a stray file the job's own run leaves in the tree is.
 //
 // Every file lives under one mkdtemp dir; the children get HOME and the XDG
 // vars pointed inside it, so nothing touches the real home or state folders.
@@ -75,16 +76,18 @@ function makeCopy(repo, it, id, rel, content) {
 }
 
 // A shared-folder job mid-run: status "running" with its done file already in
-// place in the repo's .constance/, so the next sweep finishes it and runs the
-// guard. guardBefore is the pre-run snapshot taken before the copy's merge.
+// place in its sandbox tmp's .constance/ (doneInTmp), so the next sweep
+// finishes it and runs the guard. guardBefore is the pre-run snapshot taken
+// before the copy's merge.
 function sharedJob(it, repo, id, before, files = []) {
-  const doneDir = path.join(repo, ".constance");
+  const tmp = fs.mkdtempSync(path.join(it.iter, `jobtmp-${id}-`));
+  const doneDir = path.join(tmp, ".constance");
   fs.mkdirSync(doneDir, { recursive: true });
   fs.writeFileSync(path.join(doneDir, `done-${id}.json`),
     JSON.stringify({ summary: `job ${id} done`, commit: "", files }));
   const log = path.join(it.iter, `job-${id}.log`); fs.writeFileSync(log, "");
   return { id, agent: "grok", worker: "grok-1", goal: null, dir: repo, files,
-    task: "look around, change nothing", status: "running", pid: null,
+    task: "look around, change nothing", status: "running", pid: null, doneInTmp: true, tmp,
     startedAt: Date.now() - 60e3, log, guardBefore: before };
 }
 
@@ -158,8 +161,8 @@ async function run() {
   }
 
   // ---- scenario 2: the copy's self-merge is still in flight when the shared
-  // job finishes. The guard must defer (no guardChecked, guardDeferred set);
-  // once the merge lands and is recorded, the NEXT sweep checks and excuses.
+  // job finishes. The guard checks at once and passes; when the merge lands
+  // afterwards, nothing is reverted.
   {
     const it = makeIter("inflight");
     const repo = makeRepo(it);
@@ -172,8 +175,8 @@ async function run() {
     cli(it, ["jobs"]);
     let done = jobById(it, 1);
     assert.equal(done.status, "finished", `job 1 ended ${done.status}`);
-    assert.ok(!done.guardChecked, "the guard checked while the self-merge was still in flight");
-    assert.equal(done.guardDeferred, true, "the deferred check was not marked for the next sweep");
+    assert.equal(done.guardChecked, true, "the guard ran at once");
+    assert.ok(!done.guardViolation?.length, `no violation: ${JSON.stringify(done.guardViolation)}`);
     assert.ok(!fs.existsSync(path.join(repo, "copy.txt")), "precondition: the merge has not landed yet");
 
     // The selfmerge process lands the merge and records it, exactly like
@@ -189,16 +192,15 @@ async function run() {
 
     cli(it, ["jobs"]);
     done = jobById(it, 1);
-    assert.equal(done.guardChecked, true, "the deferred guard never re-ran on a later sweep");
     assert.ok(!done.guardViolation?.length, `no violation after the merge landed: ${JSON.stringify(done.guardViolation)}`);
-    assert.ok(!done.guardDeferred, "guardDeferred was not cleared once checked");
     assert.equal(fs.readFileSync(path.join(repo, "copy.txt"), "utf8"), "copy work\n",
       "the copy's merged file was reverted by the shared job's guard");
     fs.rmSync(it.iter, { recursive: true, force: true });
   }
 
-  // ---- scenario 3: a merge the shared job's agent made ITSELF (no copy job
-  // recorded it) is still a violation: the guard reverts the bad commits.
+  // ---- scenario 3: a merge nobody recorded lands in the shared folder during
+  // the run (workers can't merge, so it is the owner's or another tool's). It is
+  // never blamed on the job or reverted; a stray file the run left is flagged.
   {
     const it = makeIter("ownmerge");
     const repo = makeRepo(it);
@@ -211,6 +213,7 @@ async function run() {
     git(repo, "add", "outside.txt"); git(repo, "commit", "-qm", "feature work");
     git(repo, "checkout", "-q", "main");
     git(repo, "merge", "--no-ff", "-m", "Merge branch 'feature'", "feature");
+    fs.writeFileSync(path.join(repo, "stray.txt"), "left by the run\n");
     const j1 = sharedJob(it, repo, 1, before);
     writeJobs(it, [j1]);
 
@@ -218,9 +221,10 @@ async function run() {
     const done = jobById(it, 1);
     assert.equal(done.status, "finished", `job 1 ended ${done.status}`);
     assert.equal(done.guardChecked, true, "the guard ran");
-    assert.ok(done.guardViolation?.length, "the agent's own merge was not flagged");
-    assert.ok(!fs.existsSync(path.join(repo, "outside.txt")),
-      "the outside file the agent's own merge brought in was not reverted");
+    assert.ok(done.guardViolation?.some((v) => v.includes("stray.txt")), `the run's stray file is flagged: ${JSON.stringify(done.guardViolation)}`);
+    assert.ok(!done.guardViolation?.some((v) => v.includes("outside.txt")), "the unrecorded merge is not blamed on the job");
+    assert.ok(fs.existsSync(path.join(repo, "outside.txt")), "someone else's merge is never reverted");
+    assert.ok(fs.existsSync(path.join(repo, "stray.txt")), "the guard never deletes anything");
     fs.rmSync(it.iter, { recursive: true, force: true });
   }
 }

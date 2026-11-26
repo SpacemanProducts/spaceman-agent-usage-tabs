@@ -33,8 +33,10 @@ function setup({ exclude = true } = {}) {
   return { root, home, projects, repo, env, git, write, head, commit, before: () => snapshot(env, repo), done: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
-// ---- several commits, each touching different outside files: every new commit
-// is diff-checked, badCommits comes back newest-first, badPaths is the union.
+// ---- several commits since the snapshot: only the commit Constance vouches for
+// (`commit`) is the job's (workers can't commit). In a shared folder the others
+// are someone else's and never blamed; in the job's own worktree (ownTree) they
+// are flagged and their files checked, but still not attributed to the job.
 {
   const s = setup();
   const b = s.before();
@@ -44,11 +46,17 @@ function setup({ exclude = true } = {}) {
   s.write("sub/bad2.txt"); s.write("bad3.txt"); const c3 = s.commit("bad two and three");
   const res = checkRun({ dir: s.repo, files: ["ok.txt"], commit: c3, before: b, env: s.env });
   assert.equal(res.ok, false);
-  assert.deepEqual(res.ownCommits, [c1, c2, c3], "all three commits since the snapshot, oldest first");
-  assert.deepEqual(res.badCommits, [c3, c2], "newest first; the clean commit is not bad");
-  for (const p of ["bad1.txt", "sub/bad2.txt", "bad3.txt"]) assert.ok(res.badPaths.includes(p), `${p} flagged`);
+  assert.deepEqual(res.ownCommits, [c3], "only the vouched commit is attributed");
+  assert.deepEqual(res.badCommits, [c3]);
+  assert.deepEqual([...res.foreignCommits].sort(), [c1, c2].sort(), "the other commits are foreign");
+  for (const p of ["sub/bad2.txt", "bad3.txt"]) assert.ok(res.badPaths.includes(p), `${p} flagged`);
+  assert.ok(!res.badPaths.includes("bad1.txt"), "a foreign commit's file is never blamed in a shared folder");
   assert.ok(!res.badPaths.includes("ok.txt"), "the allowed file is never blamed");
-  assert.equal(res.ownCommit, c3, "the reported new commit stays ownCommit even though it is bad");
+  assert.equal(res.ownCommit, c3, "the vouched new commit stays ownCommit even though it is bad");
+  const own = checkRun({ dir: s.repo, files: ["ok.txt"], commit: c3, before: b, env: s.env, ownTree: true });
+  assert.ok(own.violations.some((v) => /didn't make/.test(v)), "own worktree: unvouched commits are flagged");
+  assert.ok(own.badPaths.includes("bad1.txt"), "own worktree: their files are checked too");
+  assert.deepEqual(own.ownCommits, [c3], "own worktree: still not attributed");
   s.done();
 }
 
@@ -110,7 +118,7 @@ function setup({ exclude = true } = {}) {
   assert.equal(res.ok, false);
   assert.ok(res.violations.some((v) => v.includes("not a new commit")), res.violations.join("; "));
   assert.deepEqual(res.badCommits, [], "the foreign commit is never marked bad or good — just untrusted");
-  assert.equal(res.ownCommit, c, "ownCommit falls back to the newest real new commit");
+  assert.equal(res.ownCommit, "", "no fallback: an unvouched commit is never adopted as the run's");
   s.done();
 }
 
@@ -125,10 +133,12 @@ function setup({ exclude = true } = {}) {
   const rc = s.head();
   s.git("rm", "gone.txt"); s.git("commit", "-qm", "delete an outside file");
   const dc = s.head();
-  const res = checkRun({ dir: s.repo, files: ["ok2.txt"], commit: dc, before: b, env: s.env });
+  // ownTree: the job's own worktree, so the unvouched rename commit is checked too.
+  const res = checkRun({ dir: s.repo, files: ["ok2.txt"], commit: dc, before: b, env: s.env, ownTree: true });
   assert.equal(res.ok, false);
-  assert.deepEqual(res.ownCommits, [rc, dc]);
-  assert.deepEqual(res.badCommits, [dc, rc], "both commits touched a path outside the list: the rename deleted ok.txt");
+  assert.deepEqual(res.ownCommits, [dc], "only the vouched commit is attributed");
+  assert.deepEqual(res.badCommits, [dc]);
+  assert.deepEqual(res.foreignCommits, [rc], "the rename commit is flagged as not Constance's");
   assert.deepEqual([...res.badPaths].sort(), ["gone.txt", "ok.txt"],
     "the deleted outside file and the rename's source are caught; ok2.txt is fine");
   s.done();
@@ -167,16 +177,18 @@ function setup({ exclude = true } = {}) {
   s.done();
 }
 
-// ---- empty allowed list: read-only job. Any tracked change is a violation;
-// an untracked .constance/ folder alone (no exclude configured here, so it
-// really reaches dirtyPaths) is inside the built-in ".constance/" entry.
+// ---- empty allowed list: read-only job. Any change is a violation, and
+// .constance/ is no exception: only Constance writes there (the sandbox keeps
+// it read-only), so a worker's file there is flagged.
 {
   const s = setup({ exclude: false });
   const b = s.before();
   fs.mkdirSync(path.join(s.repo, ".constance"));
   fs.writeFileSync(path.join(s.repo, ".constance", "done-1.json"), "{}");
   let res = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env });
-  assert.equal(res.ok, true, "only .constance/ churn on a read-only job: " + JSON.stringify(res.violations));
+  assert.equal(res.ok, false, ".constance/ churn is flagged");
+  assert.deepEqual(res.badPaths, [".constance/done-1.json"]);
+  fs.rmSync(path.join(s.repo, ".constance"), { recursive: true });
   s.write("x.txt");
   res = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env });
   assert.equal(res.ok, false, "read-only jobs flag any real change");
@@ -235,12 +247,15 @@ function setup({ exclude = true } = {}) {
 }
 
 // ---- restoreRun dedupes: the same commit passed as both `commit` and inside
-// `commits` is reverted exactly once; commits revert newest-first as given.
+// `commits` is reverted exactly once; commits revert newest-first as given, and
+// only commits attributed to the job (`commit` or `attributed`) are touched.
 {
   const s = setup();
   s.write("a1.txt"); const c1 = s.commit("a1");
   s.write("b2.txt"); const c2 = s.commit("b2");
-  const did = restoreRun({ dir: s.repo, commit: c2, commits: [c2, c1] });
+  const alone = restoreRun({ dir: s.repo, commit: "", commits: [c2, c1] });
+  assert.equal(alone.filter((d) => d.startsWith("reverted commit")).length, 0, "nothing attributed, nothing reverted: " + alone.join("; "));
+  const did = restoreRun({ dir: s.repo, commit: c2, commits: [c2, c1], attributed: [c1] });
   assert.equal(did.filter((d) => d.startsWith("reverted commit")).length, 2, did.join("; "));
   assert.ok(!fs.existsSync(path.join(s.repo, "a1.txt")) && !fs.existsSync(path.join(s.repo, "b2.txt")));
   assert.equal(s.git("status", "--porcelain").trim(), "", "clean tree after the reverts");
@@ -268,9 +283,8 @@ function setup({ exclude = true } = {}) {
 // The five suspected bugs, now fixed in bin/constance-guard.mjs and asserted
 // here for real.
 
-// ---- a directory entry in the allowed list covers files INSIDE it: ".constance/"
-// aside means a forced add or a tracked .constance file is not "outside the
-// list" (inside() now also matches changed paths under an allowed entry).
+// ---- .constance/ is not on any list: a commit carrying a .constance file is
+// outside the list (and a directory entry covers files inside it: see below).
 {
   const s = setup({ exclude: false });
   const b = s.before();
@@ -279,7 +293,10 @@ function setup({ exclude = true } = {}) {
   s.git("add", "-f", ".constance/done-1.json");
   const c = s.commit("done file committed");
   const res = checkRun({ dir: s.repo, files: [], commit: c, before: b, env: s.env });
-  assert.equal(res.ok, true, ".constance/ aside: " + JSON.stringify(res.violations));
+  assert.equal(res.ok, false, ".constance/ is never allowed");
+  assert.ok(res.badPaths.includes(".constance/done-1.json"));
+  const dir = checkRun({ dir: s.repo, files: [".constance/"], commit: c, before: b, env: s.env });
+  assert.equal(dir.ok, true, "a directory entry covers files inside it: " + JSON.stringify(dir.violations));
   s.done();
 }
 
@@ -406,13 +423,13 @@ function setup({ exclude = true } = {}) {
 }
 
 // ---- restoreRun on a hash-shaped string that resolves to nothing: isHash
-// passes, rev-parse fails, the revert fails and is aborted — reported as
-// "could not revert", and the tree is left exactly as it was.
+// passes, rev-parse fails, so it is no commit of this job's and nothing is run;
+// the tree is left exactly as it was.
 {
   const s = setup();
   const did = restoreRun({ dir: s.repo, commit: "0".repeat(40) });
-  assert.deepEqual(did, ["could not revert commit 000000000 cleanly; left it for you"], did.join("; "));
-  assert.equal(s.git("status", "--porcelain").trim(), "", "a failed revert aborts cleanly");
+  assert.deepEqual(did, [], did.join("; "));
+  assert.equal(s.git("status", "--porcelain").trim(), "", "nothing was touched");
   s.done();
 }
 
@@ -476,8 +493,7 @@ function setup({ exclude = true } = {}) {
   s.done();
 }
 
-// ---- an empty-string allowed entry allows nothing (besides the built-in
-// ".constance/"): norm("") matches no real path.
+// ---- an empty-string allowed entry allows nothing: norm("") matches no real path.
 {
   const s = setup();
   const b = s.before();
@@ -489,8 +505,9 @@ function setup({ exclude = true } = {}) {
 }
 
 // A merge commit's changed files are checked too: commitFiles diffs a merge
-// against its first parent, so a run that merges in a branch carrying files
-// outside its list is caught here.
+// against its first parent, so a merge that appears in a copy's own worktree
+// (ownTree) carrying files outside its list is caught. In a shared folder an
+// unvouched merge is someone else's and never blamed on the job.
 {
   const s = setup();
   const b = s.before();
@@ -498,7 +515,9 @@ function setup({ exclude = true } = {}) {
   s.write("bad-merge.txt"); s.git("add", "-A"); s.git("commit", "-qm", "bad on side");
   s.git("checkout", "-q", "-");
   s.git("merge", "-q", "--no-ff", "side", "-m", "merge side");
-  const res = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env });
+  const shared = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env });
+  assert.ok(!shared.badPaths.includes("bad-merge.txt"), "shared folder: someone else's merge is not this job's");
+  const res = checkRun({ dir: s.repo, files: [], commit: "", before: b, env: s.env, ownTree: true });
   assert.equal(res.ok, false, "a merge that brings in outside files must not pass: " + JSON.stringify(res.violations));
   assert.ok(res.badPaths.includes("bad-merge.txt"));
   s.done();

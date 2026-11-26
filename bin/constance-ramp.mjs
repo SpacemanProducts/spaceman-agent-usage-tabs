@@ -33,7 +33,8 @@ export const RAMP = {
 export function rampGap(env = process.env, ramp = RAMP) {
   const v = env.CONSTANCE_RAMP_GAP_MS;
   const n = v === undefined || v === "" ? NaN : Number(v);
-  return Number.isFinite(n) && n >= 0 ? n : ramp.minGapMs;
+  // A null ramp must not throw here: roomForCopy fails it closed on memory.
+  return Number.isFinite(n) && n >= 0 ? n : ramp?.minGapMs;
 }
 
 // Reads /proc (or CONSTANCE_PROC, a fake one in tests). null when unreadable.

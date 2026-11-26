@@ -42,6 +42,10 @@ for (const d of [tabs, cdir, bin, repo, path.join(fakeHome, "Projects")]) fs.mkd
 const git = (...a) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8" });
 git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t");
 fs.writeFileSync(path.join(repo, "a.txt"), "a\n"); git("add", "a.txt"); git("commit", "-qm", "init");
+// The project's real test command: a self-merge runs it sandboxed (a worker's
+// "tests passed" is never a signal).
+fs.mkdirSync(path.join(repo, ".constance")); fs.writeFileSync(path.join(repo, ".constance", "rules.md"), "test: true\n");
+git("add", ".constance/rules.md"); git("commit", "-qm", "project rules");
 
 const soon = (h) => new Date(Date.now() + h * 3600e3).toISOString();
 const agents = () => [
@@ -70,7 +74,7 @@ p="\${@: -1}"; f=$(grep -o '/[^ ]*/.constance/done-[0-9]*.json' <<<"$p" | head -
 want=$(grep -o 'if it is not exactly [^ ]*, stop now' <<<"$p" | head -1 | sed 's/^if it is not exactly //; s/, stop now$//')
 here=$(pwd)
 [[ -n "$want" && "$here" == "$want" ]] || { echo "pwd check failed: here=$here want=$want"; exit 1; }
-[[ "$f" == "$here/.constance/"* ]] || { echo "done file $f is not in $here"; exit 1; }
+[[ "$f" == "/tmp/.constance/"* ]] || { echo "done file $f is not in the sandbox tmp"; exit 1; }
 while [[ ! -e "${root}/go" ]]; do sleep 0.2; done
 while [[ ! -e "${root}/reads-ok" ]]; do sleep 0.2; done
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1); name=\${name:-x.txt}

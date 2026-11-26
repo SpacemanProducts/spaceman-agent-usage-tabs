@@ -921,14 +921,16 @@ $C delegate --agent devin --files d1.txt --task "sneaky copy: also commit cover.
 $C delegate --agent grok --files cover.txt --task "add cover" >> "${root}/copyguard.out" 2>&1
 touch "${root}/go"
 $C wait --timeout 60 > "${root}/cg-wait1.json"
-# Both jobs must be finished before reviewing: two waits can hand back the same
-# (not yet reviewed) copy when it finishes first, and the grok review would be refused.
+# Both must be finished before reviewing: the grok job, and the devin copy's
+# auto-retry (its guard violation fails the first run on its own, which is sent
+# back and redone before review). Two waits can hand back the same (not yet
+# reviewed) job when it finishes first, so poll the job list instead.
 for i in $(seq 1 240); do
   $C jobs > "${root}/cg-jobs.json"
-  node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs.filter(j=>j.task==="add cover"||/sneaky copy/.test(j.task));process.exit(js.length>=2&&js.every(j=>j.status==="finished"&&!j.settling)?0:1)' "${root}/cg-jobs.json" && break
+  node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;const g=js.find(j=>j.task==="add cover"),d=js.find(j=>j.agent==="devin"&&j.files.includes("d1.txt")&&j.autoRetry);process.exit(g&&d&&[g,d].every(j=>j.status==="finished"&&!j.settling)?0:1)' "${root}/cg-jobs.json" && break
   sleep 0.25
 done
-did=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.agent==="devin"&&j.files.includes("d1.txt")).id)' "${root}/cg-jobs.json")
+did=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.agent==="devin"&&j.files.includes("d1.txt")&&j.status==="finished").id)' "${root}/cg-jobs.json")
 gid=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.agent==="grok"&&j.files.includes("cover.txt")).id)' "${root}/cg-jobs.json")
 $C review "$did" send-back --note "strayed outside its list" >> "${root}/copyguard.out" 2>&1
 $C review "$gid" accept --note "cover is fine" >> "${root}/copyguard.out" 2>&1
@@ -1334,7 +1336,9 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 36
 // Auto-retry: a copy whose done file reports failing tests failed on its own,
 // so it is retried once on a fresh copy before review — the original is sent
 // back flagged autoRetried, the redo is linked with --again and flagged so it
-// can never retry itself.
+// can never retry itself. (A worker's test claim only ever makes it redo work;
+// whether the redo self-merges is the project's real suite's call, so the
+// brain reviews it finished or merged.)
 fs.rmSync(path.join(root, "go"), { force: true });
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
@@ -1342,7 +1346,7 @@ $C delegate --agent devin --files ar1.txt --task "add ar1 failtests" >> "${root}
 touch "${root}/go"
 $C wait --timeout 60 > "${root}/ar-wait.json"
 $C jobs > "${root}/ar-jobs.json"
-id=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.files.includes("ar1.txt")&&j.status==="finished").id)' "${root}/ar-jobs.json")
+id=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.files.includes("ar1.txt")&&j.autoRetry&&["finished","merged"].includes(j.status)).id)' "${root}/ar-jobs.json")
 $C review "$id" accept --note "ok" >> "${root}/ar.out" 2>&1
 echo "AR report: done."
 `, { mode: 0o755 });

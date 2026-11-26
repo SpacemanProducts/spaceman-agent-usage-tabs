@@ -106,7 +106,8 @@ assert.equal(roomForCopy({ memTotal: Infinity, memAvailable: 100 * G }, { ramp, 
 assert.match(roomForCopy({ memTotal: Infinity, memAvailable: 100 * G }, { ramp, now: NOW }).reason,
   /starts at Infinity GiB/, "reason string leaks Infinity (cosmetic)");
 
-// load1/cpus/running/lastStartAt/now never gate a copy when memory is fine.
+// load1/cpus/running never gate a copy when memory is fine (these ramps have
+// no minGapMs, so lastStartAt/now don't either).
 for (const machine of [
   { ...calm, load1: Infinity },
   { ...calm, load1: NaN },
@@ -122,7 +123,7 @@ assert.equal(roomForCopy(calm, { running: 999, lastStartAt: NOW - 1, now: NOW, r
 assert.equal(roomForCopy(calm, { running: -3, ramp, now: NOW }).ok, true);
 assert.equal(roomForCopy(calm, { running: 0.5, ramp, now: NOW }).ok, true);
 
-// `now` and `lastStartAt` are accepted but ignored: same answer at any clock.
+// With no minGapMs in the ramp, `now` and `lastStartAt` don't matter: same answer at any clock.
 for (const now of [0, 1, NOW, NOW + 1e15, -NOW]) {
   assert.deepEqual(roomForCopy(calm, { running: 2, lastStartAt: now - 1, now, ramp }),
     { ok: true, reason: "" }, `now=${now} changes nothing`);
@@ -279,9 +280,12 @@ assert.ok(tiny, "fake proc parses");
 assert.equal(roomForCopy(tiny, { ramp, now: NOW }).ok, false,
   "8 GiB machine with ~1 GiB free is held");
 
-// RAMP defaults match the documented floor/share.
-assert.deepEqual(RAMP, { minFreeBytes: 2 * G, minFreeShare: 0.1 });
+// RAMP defaults match the documented floor/share and the 5 s start spacing.
+assert.deepEqual(RAMP, { minFreeBytes: 2 * G, minFreeShare: 0.1, minGapMs: 5000 });
 assert.equal(roomForCopy(calm, { now: NOW }).ok, true, "default ramp param works");
+// The default ramp spaces copy starts: 1 s after the last start is held, 6 s is fine.
+assert.equal(roomForCopy(calm, { running: 1, lastStartAt: NOW - 1000, now: NOW, ramp: RAMP, gapMs: 5000 }).ok, false, "starts are spaced");
+assert.equal(roomForCopy(calm, { running: 1, lastStartAt: NOW - 6000, now: NOW, ramp: RAMP, gapMs: 5000 }).ok, true, "after the gap a copy starts");
 
 // ---- Malformed inputs fail closed -------------------------------------------
 // roomForCopy() treats any machine object with missing/non-numeric memory
