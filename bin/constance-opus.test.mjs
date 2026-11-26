@@ -41,14 +41,15 @@ settings();
 fs.writeFileSync(path.join(bin, "grok"), `#!/bin/bash
 p="\${@: -1}"
 name=$(sed -n 's/^Only edit these files: \\([^ ,]*\\)\\..*/\\1/p' <<<"$p" | head -1)
+[[ -n "$name" ]] || exit 0   # not a job prompt (the collector runs e.g. "grok models"): never touch the cwd
 echo "grok: working on $name"
 echo half > "$name"
 sleep 600
 `, { mode: 0o755 });
 // Fake claude. As Constance (her system prompt is appended): a QUEUE-GOAL N waits for release-N and
 // ticks its item; any other goal delegates FILE=x to grok and reviews whatever comes back. As the Opus
-// worker (no system prompt): checks the partial work is there, finishes the file, commits, writes
-// its done file — the path comes from the prompt, as for every worker.
+// worker (no system prompt): checks the partial work is there, finishes the file (Constance commits
+// it on the host, as for every worker), writes its done file — the path comes from the prompt, as for every worker.
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
 if [[ " $* " == *" --append-system-prompt "* ]]; then
@@ -79,8 +80,8 @@ grep -q 'Taking over: Grok started this job' <<<"$p" || ok=no
 grep -q 'grok: working on' <<<"$p" || ok=no
 grep -q "^finish $name" <<<"$p" || ok=no
 echo "opus: partial work seen=$ok"
-echo "done by opus (saw=$ok)" > "$name"; git add "$name"; git commit -qm "opus: $name"
-echo "{\\"summary\\": \\"finished $name (saw=$ok)\\", \\"commit\\": \\"$(git rev-parse HEAD)\\", \\"files\\": [\\"$name\\"]}" > "$d"
+echo "done by opus (saw=$ok)" > "$name"
+echo "{\\"summary\\": \\"finished $name (saw=$ok)\\", \\"files\\": [\\"$name\\"]}" > "$d"
 `, { mode: 0o755 });
 // A fake home and projects folder (the guard snapshots them), a quiet busctl and a recording notify-send.
 const fakeHome = path.join(root, "home"); fs.mkdirSync(path.join(fakeHome, "Projects"), { recursive: true });
@@ -138,7 +139,7 @@ try {
   assert.match(j1.prompt, /--- new file h1\.txt ---\nhalf\n/, "with the partial diff");
   assert.match(j1.workerPrompt, /finish h1\.txt/);
   assert.equal(fs.readFileSync(path.join(repo, "h1.txt"), "utf8"), "done by opus (saw=yes)\n");
-  assert.match(git("log", "-1", "--format=%s"), /opus: h1\.txt/);
+  assert.match(git("log", "-1", "--format=%s"), /^Opus \(job 1\)/, "Constance committed Opus's file for it");
   const log = fs.readFileSync(status().jobs.find((j) => j.id === 1).log, "utf8");   // `job` puts its log entries under .log
   assert.match(log, /grok: working on h1/, "grok's log is kept");
   assert.match(log, /handed to Opus/); assert.match(log, /opus: partial work seen=yes/, "Opus's output follows it");

@@ -121,6 +121,7 @@ export function alive(pid, needle = "") {
   if (!needle) return true;
   try { return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(needle); } catch { return false; }
 }
+const claudeOf = (d) => (d.agents || []).find((a) => a.id === "claude");   // takeover always runs Claude
 function killGroup(pid, sig = "SIGTERM") { try { process.kill(-pid, sig); } catch { try { process.kill(pid, sig); } catch {} } }
 // The CLI a job's process runs: its agent's, or Claude Code's once Opus took it over.
 const cliOf = (j) => (j.handedFrom ? OPUS.cli : LAUNCH[j.agent]?.cli || "");
@@ -2117,7 +2118,7 @@ function ratioReportFor(g) {
 function milkStatus() {
   const v = readMilk(readSettings());
   const step = milkStep(v);
-  return { ...milkPolicy(v), stepName: step.name, stepDescription: step.description,
+  return { ...milkPolicy(v), autoTakeover: autoTakeoverOn(v), stepName: step.name, stepDescription: step.description,
     steps: MILK_STEPS.map((s) => ({ name: s.name, value: s.value, description: s.description })) };
 }
 
@@ -2141,7 +2142,7 @@ function statusPayload() {
     model: b.id === "antigravity" ? (brainTop(d, b)?.name || "") : modelName(s.goal?.model || "opus"),
     milkLabel: milkLabel(b.id) };
   return { goal: s.goal, board, progress: { line: pline }, tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p, brain,
-    leverage: leverageView(s, tv.goal?.total ?? null), milk: { ...milkStatus(), autoTakeover: autoTakeoverOn(readMilk(readSettings())) }, practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
+    leverage: leverageView(s, tv.goal?.total ?? null), milk: milkStatus(), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
 }
 
