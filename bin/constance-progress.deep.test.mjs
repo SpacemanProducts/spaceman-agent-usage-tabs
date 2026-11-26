@@ -23,58 +23,58 @@ const { progressLine, due, notify, tick } = await import("./constance-progress.m
 // Number.isFinite counts), but session pcts are Number()-coerced.
 assert.equal(
   progressLine({ devinTokens: "42e6", sessionUsedPct: 62, sessionStartPct: "52", copiesRunning: 9 }),
-  "Devin can't tell · can't tell per 1% of session (target 5M) · 9 copies running · session 62%");
+  "Workers can't tell · can't tell per 1% of session (target 5M) · 9 copies running · session 62%");
 // NaN and both infinities are "can't tell" for tokens — never InfinityT.
 for (const bad of [NaN, Infinity, -Infinity]) {
   assert.equal(
     progressLine({ devinTokens: bad, sessionUsedPct: 62, sessionStartPct: 52 }),
-    "Devin can't tell · can't tell per 1% of session (target 5M) · 0 copies running · session 62%",
+    "Workers can't tell · can't tell per 1% of session (target 5M) · 0 copies running · session 62%",
     `devinTokens ${bad}`);
 }
 // sessionUsedPct NaN -> "no session spent yet" and "session ?%".
 assert.equal(
   progressLine({ devinTokens: 42e6, sessionUsedPct: NaN, sessionStartPct: 52 }),
-  "Devin 42M · no session spent yet · 0 copies running · session ?%");
+  "Workers 42M · no session spent yet · 0 copies running · session ?%");
 // sessionUsedPct Infinity: delta is Infinity, perPct collapses to 0, the
 // session percent itself stays honest ("?").
 assert.equal(
   progressLine({ devinTokens: 42e6, sessionUsedPct: Infinity, sessionStartPct: 52 }),
-  "Devin 42M · 0 per 1% of session (target 5M) · 0 copies running · session ?%");
+  "Workers 42M · 0 per 1% of session (target 5M) · 0 copies running · session ?%");
 // copiesRunning must be a real finite number: strings, NaN, Infinity -> 0;
 // negative and fractional values pass through verbatim.
 assert.equal(
   progressLine({ devinTokens: 1e6, sessionUsedPct: 60, sessionStartPct: 50, copiesRunning: "9" }),
-  "Devin 1M · 100K per 1% of session (target 5M) · 0 copies running · session 60%");
+  "Workers 1M · 100K per 1% of session (target 5M) · 0 copies running · session 60%");
 assert.equal(
   progressLine({ devinTokens: 1e6, sessionUsedPct: 60, sessionStartPct: 50, copiesRunning: NaN }),
-  "Devin 1M · 100K per 1% of session (target 5M) · 0 copies running · session 60%");
+  "Workers 1M · 100K per 1% of session (target 5M) · 0 copies running · session 60%");
 assert.equal(
   progressLine({ devinTokens: 1e6, sessionUsedPct: 60, sessionStartPct: 50, copiesRunning: 1.5 }),
-  "Devin 1M · 100K per 1% of session (target 5M) · 1.5 copies running · session 60%");
-// devinTokens 0 is a real reading: "Devin 0", and a spent window gives "0".
+  "Workers 1M · 100K per 1% of session (target 5M) · 1.5 copies running · session 60%");
+// devinTokens 0 is a real reading: "Workers 0", and a spent window gives "0".
 assert.equal(
   progressLine({ devinTokens: 0, sessionUsedPct: 60, sessionStartPct: 50 }),
-  "Devin 0 · 0 per 1% of session (target 5M) · 0 copies running · session 60%");
+  "Workers 0 · 0 per 1% of session (target 5M) · 0 copies running · session 60%");
 // A negative delta counts as "not spent" even when used > start is false but
 // tokens are known — covered above; here start > used with huge tokens.
 assert.equal(
   progressLine({ devinTokens: 1e12, sessionUsedPct: 10, sessionStartPct: 90 }),
-  "Devin 1T · no session spent yet · 0 copies running · session 10%");
+  "Workers 1T · no session spent yet · 0 copies running · session 10%");
 // Over-100% session readings pass through.
 assert.equal(
   progressLine({ devinTokens: 1e6, sessionUsedPct: 150, sessionStartPct: 140 }),
-  "Devin 1M · 100K per 1% of session (target 5M) · 0 copies running · session 150%");
+  "Workers 1M · 100K per 1% of session (target 5M) · 0 copies running · session 150%");
 // target is only used for display; a negative target prints raw, a huge one
 // goes through fmtTokens.
 assert.equal(
   progressLine({ devinTokens: 1e6, sessionUsedPct: 60, sessionStartPct: 50, target: 0 }),
-  "Devin 1M · 100K per 1% of session (target 0) · 0 copies running · session 60%");
+  "Workers 1M · 100K per 1% of session (target 0) · 0 copies running · session 60%");
 // A non-finite target is unknown, like a missing one: "can't tell", never a
 // crash (fmtTokens(NaN) throws; Infinity would print "InfinityT").
 for (const bad of [NaN, Infinity, -Infinity]) {
   assert.equal(
     progressLine({ devinTokens: 1e6, sessionUsedPct: 60, sessionStartPct: 50, target: bad }),
-    "Devin 1M · 100K per 1% of session (target can't tell) · 0 copies running · session 60%",
+    "Workers 1M · 100K per 1% of session (target can't tell) · 0 copies running · session 60%",
     `target ${bad}`);
 }
 
@@ -200,7 +200,7 @@ assert.equal(notify("x", { exec: null }), false);
 
 // ---- tick: combinations and the unwritable-stamp path.
 const t = { devinTokens: 42e6, sessionUsedPct: 62, sessionStartPct: 52, copiesRunning: 9 };
-const line = "Devin 42M · 4.2M per 1% of session (target 5M) · 9 copies running · session 62%";
+const line = "Workers 42M · 4.2M per 1% of session (target 5M) · 9 copies running · session 62%";
 // stateFile truthy but unusable (a number): due() reports due every call, so
 // EVERY tick notifies — the stamp can never persist. Documented best-effort
 // behavior; a real caller always passes a path string.
