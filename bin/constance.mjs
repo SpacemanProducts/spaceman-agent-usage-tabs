@@ -59,7 +59,7 @@ import { logText } from "./constance-logtext.mjs";
 import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, branchFor } from "./constance-worktree.mjs";
 import { tokenMeter, matchJobs, snapshots, readRecords, usageFile, refreshInBackground, refreshNow } from "./constance-tokens.mjs";
 import { parseItems, parseItemArg, checklist } from "./constance-checklist.mjs";
-import { cards, nowLine, history, goalRecord } from "./constance-board.mjs";
+import { cards, nowLine, history, goalRecord, meters } from "./constance-board.mjs";
 import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, queueStops, holdQueue, releaseQueue } from "./constance-goalqueue.mjs";
 import { stuckCheck, expectedMs, activitySignature, observe, dueForCheck, IDLE_MS, CHECK_GAP_MS } from "./constance-stuck.mjs";
 import { OPUS, opusCommand, autoTakeoverOn, takeoverProblem, opusBlocked, lastLines, partialDiff, readTail, takeoverPrompt } from "./constance-takeover.mjs";
@@ -2175,17 +2175,69 @@ function tokensView(s, d, records) {
   return view;
 }
 
+// How long preparing took on earlier goals: goal start to its first handed-out
+// job (handoff, practice or held), measured from the log's entries. Goals still
+// on record only as history.jsonl rows carry no job times, so the log is the
+// source; the running goal's own segment is skipped. Empty when nothing is known.
+function prepHistory(s, log) {
+  const cutoff = s.goal && ["running", "paused"].includes(s.goal.status) ? (s.goal.startedAt || Infinity) : Infinity;
+  const out = [];
+  let start = null;
+  for (const e of log || []) {
+    if (e.kind === "goal") { start = Number.isFinite(e.at) && e.at < cutoff ? e.at : null; continue; }
+    if (start === null) continue;
+    if (["handoff", "practice", "held"].includes(e.kind)) {
+      if (Number.isFinite(e.at) && e.at > start) out.push(e.at - start);
+      start = null;
+    } else if (["report", "stopped", "failed"].includes(e.kind)) start = null;
+  }
+  return out;
+}
+
+// Her own Claude sessions' tokens on this goal: folder-usage records for agent
+// "claude" in the goal's folder that started while it ran (each brain step
+// spawns one there). null when there is no goal or nothing matched — the Rev
+// Meter's lead share stays hidden rather than guessing.
+function leadTokensOf(goal, records) {
+  if (!goal || !goal.dir || !Number.isFinite(goal.startedAt)) return null;
+  const until = Number.isFinite(goal.finishedAt) ? goal.finishedAt : Infinity;
+  let total = 0, seen = false;
+  for (const r of records || []) {
+    if (!r || r.agent !== "claude" || r.unit !== "tokens" || r.folder !== goal.dir) continue;
+    const start = Number(r.start), amount = Number(r.amount);
+    if (!Number.isFinite(start) || start < goal.startedAt || start > until || !Number.isFinite(amount) || amount < 0) continue;
+    seen = true; total += amount;
+  }
+  return seen ? total : null;
+}
+
 function boardView(s, d, records) {
   const names = Object.fromEntries((d.agents || []).filter((a) => a.name).map((a) => [a.id, a.name]));
   const name = (id) => names[id] || (id ? id[0].toUpperCase() + id.slice(1) : id);
   const live = matchJobs(s.jobs, records);
   const gq = readGoalQueue(store.dir);
+  const cl = checklist(s.goal, asAccepted(s.jobs));
+  const log = store.readLog(5000);
+  // The Rev Meter's inputs: running workers (lead lanes counted apart), the
+  // copy slots free plus the ones busy, her per-1% leverage and the goal's
+  // measured worker/lead token split — each null when it can't be known.
+  const goalTokens = tokenMeter({ jobs: s.jobs, goal: s.goal, records }).goal;
+  const workerTokens = goalTokens && (goalTokens.total > 0 || goalTokens.cantTell === 0) ? goalTokens.total : null;
+  const leadTokens = leadTokensOf(s.goal, records);
+  const busyJobs = s.jobs.filter((j) => ["running", "waiting"].includes(j.status));
+  const lanes = busyJobs.filter((j) => j.lane).length;
+  const running = busyJobs.length - lanes;
+  let freeSlots = 0;
+  if (s.goal) for (const agent of Object.keys(PUBLISHED_MAX)) freeSlots += Math.max(0, limitOf(agent) - copySlots(s, agent, s.goal.dir).length);
   return {
-    checklist: checklist(s.goal, asAccepted(s.jobs)),
+    ...meters({ goal: s.goal, items: cl.items, jobs: s.jobs, steps: memoryOf(s.goal).steps.length,
+      prepHistory: prepHistory(s, log), now: Date.now(), running, lanes, slots: freeSlots + running,
+      perPct: leverageView(s, workerTokens).perPct, workerTokens, leadTokens }),
+    checklist: cl,
     cards: cards({ jobs: s.jobs, goal: s.goal, queue: s.goal && ["running", "paused"].includes(s.goal.status) ? queueView(s.goal.dir, store.dir, s.goal.id) : [], live, names: name }),
     // A merged job still waits for her review, so the Now line counts it with the finished ones.
     now: nowLine({ goal: s.goal, jobs: s.jobs.map((j) => (j.status === "merged" ? { ...j, status: "finished" } : j)), names: name, goalQueue: gq.goals, queuePaused: gq.paused, queueHeld: gq.ownerPaused }),
-    history: history({ records: readHistory(), log: store.readLog(5000), goal: s.goal, jobs: s.jobs, live }),
+    history: history({ records: readHistory(), log, goal: s.goal, jobs: s.jobs, live }),
     goalQueue: gq,
     scorecard: scorecardView(name, s.goal?.dir),
   };
