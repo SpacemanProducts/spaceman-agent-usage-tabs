@@ -935,6 +935,10 @@ Panel {
   function copyConstanceLog() {
     Quickshell.execDetached(["bash", "-c", 'node "$1" log | wl-copy', "copy-log", pluginDir + "/bin/constance.mjs"])
   }
+  // Copy summary: a short report (goals, checklist, failed jobs, leverage, last log lines), not the raw log.
+  function copyConstanceSummary() {
+    Quickshell.execDetached(["bash", "-c", 'node "$1" summary | wl-copy', "copy-summary", pluginDir + "/bin/constance.mjs"])
+  }
   onConstanceOpenChanged: if (!constanceOpen) { goalArea.focus = false; constanceTyping = false }
   property var constance: ({ goal: null, jobs: [], agents: [], pace: null, log: [], practice: true, queue: [], signals: [] })
   property string constanceError: ""
@@ -1088,8 +1092,22 @@ Panel {
     if (!l || !isFinite(Number(l.perPct))) return root.dim
     return Number(l.vsTarget) >= 1 ? root.green : root.amber
   }
-  // The Milk Opus slider (settings.json constanceMilk, 0..100 step 5; bin/constance-milk.mjs):
-  // status.milk wins when the payload carries it, else the saved setting, else the default 25.
+  // The big leverage tile under Now: free-worker tokens per 1% of her session,
+  // colored against the 5M target (green >= 5M, amber >= 2.5M, red below; gray "—" until measurable).
+  readonly property string constanceLeverageTileText: {
+    var p = root.constanceLeverage ? Number(root.constanceLeverage.perPct) : NaN
+    return isFinite(p) ? root.fmtTokens(p) : "—"
+  }
+  readonly property color constanceLeverageTileColor: {
+    var p = root.constanceLeverage ? Number(root.constanceLeverage.perPct) : NaN
+    if (!isFinite(p)) return root.dim
+    if (p >= 5e6) return root.green
+    if (p >= 2.5e6) return root.amber
+    return root.red
+  }
+  // The Milk Opus slider (settings.json constanceMilk, 0..100 snapping to the five
+  // steps 0/25/50/75/100; bin/constance-milk.mjs): status.milk wins when the payload
+  // carries it, else the saved setting, else the default 25.
   readonly property int constanceMilk: {
     var m = constance.milk
     var v = m && isFinite(Number(m.value)) ? Number(m.value)
@@ -1102,6 +1120,55 @@ Panel {
     var v = root.constanceMilk
     return v <= 33 ? "milk" : (v <= 66 ? "balanced" : "quality")
   }
+  // The five steps the knob snaps to (bin/constance-milk.mjs MILK_STEPS): the status
+  // payload's list wins when it carries one, else the same five copied here so the
+  // step caption still works before the first status arrives.
+  readonly property var constanceMilkSteps: (constance.milk && constance.milk.steps && constance.milk.steps.length)
+    ? constance.milk.steps
+    : [
+        { name: "Max delegation", value: 0, description: "free agents do nearly everything; she only plans and checks reports" },
+        { name: "Lean", value: 25, description: "she reads the reports closely and plans once up front" },
+        { name: "Balanced", value: 50, description: "she skims the diffs of risky files and re-checks the plan between waves" },
+        { name: "Thorough", value: 75, description: "she reads every diff, re-plans each wave and may edit the hard parts herself" },
+        { name: "Max Opus", value: 100, description: "she plans carefully, re-plans after each wave and reads every diff" }
+      ]
+  // The step a slider value belongs to: nearest step wins, a tie goes to the lower one.
+  function constanceMilkStepAt(v) {
+    var steps = root.constanceMilkSteps
+    if (!steps || !steps.length) return null
+    var n = Math.max(0, Math.min(100, Math.round(Number(v) || 0))), best = steps[0]
+    for (var i = 0; i < steps.length; i++) {
+      var s = steps[i]
+      if (Math.abs(Number(s.value) - n) < Math.abs(Number(best.value) - n)) best = s
+    }
+    return best
+  }
+  // The step under the knob: the pending drag value while moving, else the saved one.
+  readonly property var constanceMilkStep: root.constanceMilkStepAt(milkArea.pending >= 0 ? milkArea.pending : root.constanceMilk)
+  readonly property string constanceMilkStepText: {
+    var s = root.constanceMilkStep
+    if (!s) return ""
+    var d = s.description === undefined || s.description === null ? "" : " — " + String(s.description)
+    return String(s.name || "") + d
+  }
+  // The Brain picker (settings.json constanceBrain, "claude" or "antigravity"): which agent's
+  // model she thinks with. status.brain reports the live pick; every field is optional, and
+  // ok === false means the wanted brain can't run, with why saying so in one calm line.
+  readonly property string constanceBrain: userSettings.constanceBrain !== undefined
+    ? String(userSettings.constanceBrain) : String(root.setting("constanceBrain", "claude"))
+  readonly property var constanceBrainInfo: constance.brain && typeof constance.brain === "object" ? constance.brain : null
+  readonly property string constanceBrainCaption: {
+    var b = root.constanceBrainInfo
+    if (!b) return ""
+    if (b.ok === false) return b.why === undefined || b.why === null ? "" : String(b.why)
+    if (b.model) {
+      var n = b.name === undefined || b.name === null || b.name === "" ? "" : String(b.name) + " · "
+      return "Runs on " + n + String(b.model)
+    }
+    return ""
+  }
+  // The slider's lead-in: the brain's own milkLabel when status.brain carries one, else text: "Milk Opus".
+  readonly property string constanceMilkLabel: (constance.brain && constance.brain.milkLabel) || "Milk Opus"
   // Live clock for running cards' elapsed time (ticks only while her screen is open).
   property real constanceNow: Date.now()
   Timer { interval: 1000; running: root.constanceOpen && root.opened; repeat: true; triggeredOnStart: true; onTriggered: root.constanceNow = Date.now() }
@@ -2697,6 +2764,50 @@ Panel {
               }
             }
 
+            // Brain: which agent's model she thinks with. The pick saves constanceBrain;
+            // the caption under the chips says why the wanted brain isn't running, or what
+            // it runs on. Sandbox and guardrails stay either way.
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+              Flow {
+                width: parent.width
+                spacing: Style.space(6)
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Brain"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                  height: Style.font.bodySmall * 1.3
+                  verticalAlignment: Text.AlignVCenter
+                }
+                MiniChip {
+                  label: "Claude Code"
+                  tip: "She thinks with Claude Code (the claude CLI login)"
+                  on: root.constanceBrain === "claude"
+                  onClicked: root.writeSetting(["constanceBrain", "claude"])
+                }
+                MiniChip {
+                  label: "Antigravity"
+                  tip: "She thinks with Antigravity (the agy CLI login)"
+                  on: root.constanceBrain === "antigravity"
+                  onClicked: root.writeSetting(["constanceBrain", "antigravity"])
+                }
+              }
+              Text {
+                visible: root.constanceBrainCaption !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: root.constanceBrainCaption
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
             // Milk Opus: how much of the work she keeps for herself on the paid plan versus
             // hands to the free agents. Moving it saves constanceMilk; sandbox and guardrails
             // stay on at every setting.
@@ -2711,7 +2822,7 @@ Panel {
                   anchors.left: parent.left
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
-                  text: "Milk Opus"
+                  text: root.constanceMilkLabel
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -2770,10 +2881,11 @@ Panel {
                   cursorShape: Qt.PointingHandCursor
                   preventStealing: true
                   // Dragging only moves the knob; the setting is saved once, on release.
+                  // The knob snaps to the five steps (0/25/50/75/100).
                   property int pending: -1
                   function setFromX(x) {
                     var f = Math.max(0, Math.min(1, (x - milkRail.x) / milkRail.width))
-                    pending = Math.round(f * 20) * 5
+                    pending = Math.round(f * 4) * 25
                   }
                   onPressed: function(m) { setFromX(m.x) }
                   onPositionChanged: function(m) { if (pressed) setFromX(m.x) }
@@ -2783,7 +2895,18 @@ Panel {
                   }
                   onCanceled: pending = -1
                 }
-                PanelToolTip { visible: milkArea.containsMouse; text: "Milk Opus " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
+                PanelToolTip { visible: milkArea.containsMouse; text: root.constanceMilkLabel + " " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
+              }
+              // The step the knob sits on: name plus its one-line description. While
+              // dragging it follows milkArea.pending; otherwise the saved value.
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: root.constanceMilkStepText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
               }
               Item {
                 width: parent.width
@@ -3048,6 +3171,57 @@ Panel {
               color: root.constance.goal && root.constance.goal.needsOwner && !root.constanceActive ? root.amber : root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
+            }
+
+            // Her progress ping (status.progress.line): one calm secondary line
+            // under Now; the row is hidden when the payload carries none.
+            Text {
+              visible: text !== ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: (root.constance.progress && root.constance.progress.line) ? String(root.constance.progress.line) : ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            // The big leverage tile: free-worker tokens per 1% of her session,
+            // colored against the 5M target; "—" until the meter can measure.
+            Rectangle {
+              width: parent.width
+              height: levNum.implicitHeight + levCap.implicitHeight + Style.space(14)
+              radius: Style.cornerRadius
+              color: root.soft(root.foreground, 0.04)
+              border.width: 1
+              border.color: root.soft(root.foreground, 0.12)
+              Text {
+                id: levNum
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(10)
+                horizontalAlignment: Text.AlignLeft
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                text: root.constanceLeverageTileText
+                color: root.constanceLeverageTileColor
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body * 1.8
+                font.bold: true
+              }
+              Text {
+                id: levCap
+                anchors.left: levNum.left
+                anchors.right: levNum.right
+                anchors.top: levNum.bottom
+                anchors.topMargin: Style.space(2)
+                textFormat: Text.PlainText
+                text: "Devin tokens per 1% of session · target 5M"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
             }
 
             // The goal checklist: its items, ticked as their jobs merge, with a progress bar.
@@ -3525,12 +3699,22 @@ Panel {
             // The raw log, folded away by default; filters by job, worker and kind. Newest entry on top.
             Item {
               width: parent.width
-              height: Math.max(logHeader.implicitHeight, copyAllChip.height)
+              height: Math.max(logHeader.implicitHeight, copyAllChip.height, copySummaryChip.height)
               PanelSectionHeader {
                 id: logHeader
-                anchors.left: parent.left; anchors.right: copyAllChip.left; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter
+                anchors.left: parent.left; anchors.right: copySummaryChip.left; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter
                 text: (root.constanceLogOpen ? "▾ " : "▸ ") + "LOG" + ((root.constance.log || []).length ? " (" + (root.constance.log || []).length + ")" : "")
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.constanceLogOpen = !root.constanceLogOpen }
+              }
+              CopyChip {
+                id: copySummaryChip
+                visible: (root.constance.log || []).length > 0
+                anchors.right: copyAllChip.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                label: "Copy summary"
+                tip: "Copy a short report: goals, checklist, failed jobs, leverage and the last 30 log lines"
+                onCopy: root.copyConstanceSummary()
               }
               CopyChip {
                 id: copyAllChip

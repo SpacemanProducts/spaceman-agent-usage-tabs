@@ -59,15 +59,22 @@ export function statedReset(text, now = Date.now()) {
 // For an exit's output: null when it isn't a limit hit, else { until, stated, text }.
 export function limitWall(text, now = Date.now()) {
   if (!isLimitHit(text)) return null;
-  const line = String(text).split("\n").find((l) => isLimitHit(l)) || "";
-  const at = statedReset(line, now) ?? statedReset(text, now);
+  const lines = String(text).split("\n");
+  const hit = lines.findIndex((l) => isLimitHit(l));
+  const line = hit >= 0 ? lines[hit] : "";
+  // The reset may sit on the hit line or a line after it; a 'resets' on an
+  // unrelated earlier line is not Claude stating the wall's reset time.
+  let at = statedReset(line, now);
+  for (let i = hit + 1; at === null && i < lines.length; i++) at = statedReset(lines[i], now);
   return { until: at ?? now + FALLBACK_WAIT_MS, stated: at !== null, text: line.trim().slice(0, 200) };
 }
 
 export function wallFile(dir) { return path.join(dir, "wall.json"); }
 export function writeWall(dir, wall, now = Date.now()) {
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(wallFile(dir), JSON.stringify({ until: wall.until, stated: !!wall.stated, text: wall.text || "", at: now }) + "\n");
+  const file = wallFile(dir), tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ until: wall.until, stated: !!wall.stated, text: wall.text || "", at: now }) + "\n");
+  try { fs.renameSync(tmp, file); } catch (e) { try { fs.unlinkSync(tmp); } catch {} throw e; }
 }
 // The wall still standing at `now`, or null.
 export function readWall(dir, now = Date.now()) {

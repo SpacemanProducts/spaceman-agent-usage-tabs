@@ -41,6 +41,8 @@ import { readKimiUsage } from "./kimi-usage.mjs";
 import { readQwenUsage } from "./qwen-usage.mjs";
 import { readDshUsage } from "./dsh-usage.mjs";
 import { readMcodeUsage } from "./mcode-usage.mjs";
+import { readKiloUsage } from "./kilo-usage.mjs";
+import { readFreebuffUsage } from "./freebuff-usage.mjs";
 
 const HOME = os.homedir();
 const STATE = path.join(process.env.XDG_STATE_HOME || path.join(HOME, ".local/state"), "omarchy");
@@ -70,6 +72,8 @@ const AGENTS = [
   { id: "kiro", name: "Kiro", bins: ["kiro-cli"] },
   { id: "devin", name: "Devin", bins: ["devin"], builtin: "devin" },
   { id: "amp", name: "Amp", bins: ["amp"] },
+  { id: "kilo", name: "Kilo Code", bins: ["kilo"] },
+  { id: "freebuff", name: "Freebuff", bins: ["freebuff"] },
 ];
 
 // The catalog agents (agents-catalog.json) get a tab too, found by their binaries, with a note for how they report usage.
@@ -79,6 +83,10 @@ for (const c of CATALOG.agents) AGENTS.push({ id: c.id, name: c.name, bins: c.bi
 const isInstalled = makeInstalledCheck({ dirs: PATH_DIRS, env: ENV });
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
+// Only a real ISO timestamp survives into data.json: anything else (a number,
+// a junk string) would leak through raw or be misread by Date.parse downstream.
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/;
+const isoOrEmpty = (v) => (typeof v === "string" && ISO_TIME.test(v) && Number.isFinite(Date.parse(v)) ? v : "");
 const localDate = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const lastDays = (n) => Array.from({ length: n }, (_, i) => localDate(Date.now() - (n - 1 - i) * 86400000));
 const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
@@ -100,13 +108,48 @@ function titleFor(text, seconds) {
 
 function modelRows(usageByModel) {
   return Object.entries(usageByModel || {}).map(([name, b]) => {
-    const input = +b.inputTokens || 0, output = +b.outputTokens || 0;
-    const cacheRead = +b.cacheReadInputTokens || 0, cacheWrite = +b.cacheCreationInputTokens || 0;
+    const input = +(b?.inputTokens) || 0, output = +(b?.outputTokens) || 0;
+    const cacheRead = +(b?.cacheReadInputTokens) || 0, cacheWrite = +(b?.cacheCreationInputTokens) || 0;
     return { name, input, output, cacheRead, cacheWrite, total: input + output + cacheRead + cacheWrite };
   }).sort((a, b) => b.total - a.total);
 }
 
 function daysFrom(map) { return lastDays(7).map((date) => ({ date, tokens: map[date] || 0 })); }
+
+// ------------------------------------------------- Kilo Code and Freebuff
+// Both keep local usage but report no plan-limit percentages, so their tabs
+// stay gray: the reader's numbers become the one calm status line (the same
+// place Amp's token total goes) plus a plain "can't read" note — never
+// meters. Pure so the collector and its test share one mapping.
+const fmtCount = (n) => {
+  n = Number(n) || 0;
+  if (n >= 1e6) return `${+(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${+(n / 1e3).toFixed(1)}K`;
+  return String(Math.round(n));
+};
+const fmtMoney = (c) => (c >= 0.01 ? `$${c.toFixed(2)}` : c > 0 ? `$${c.toFixed(3)}` : "");
+const kiloBucket = (b = {}) => [
+  `${fmtCount(b.tokens)} tokens`,
+  b.requests === null || b.requests === undefined ? "" : `${b.requests} request${b.requests === 1 ? "" : "s"}`,
+  fmtMoney(b.cost),
+].filter(Boolean).join(" · ");
+const freebuffBucket = (b = {}) => [
+  `${b.chats || 0} chat${b.chats === 1 ? "" : "s"}`,
+  b.credits === null || b.credits === undefined ? "" : `${+Number(b.credits).toFixed(2)} credits`,
+  b.tokens === null || b.tokens === undefined ? "" : `${fmtCount(b.tokens)} tokens`,
+].filter(Boolean).join(" · ");
+export function localUsageFields(id, u) {
+  const out = { status: "", cantRead: "" };
+  if (id === "kilo") out.cantRead = "Can't read: Kilo's plan limits or reset windows — its local database (kilo.db) records usage only.";
+  else if (id === "freebuff") out.cantRead = "Can't read: Freebuff's plan limits or reset windows — they are cloud-only; its local run state records usage only.";
+  else return out;
+  if (!u || u.available !== true) { out.status = String(u?.status || "local data not available"); return out; }
+  const line = id === "kilo"
+    ? `Today: ${kiloBucket(u.today)} · last 24h: ${kiloBucket(u.last24h)}`
+    : `Today: ${freebuffBucket(u.today)} · last 24h: ${freebuffBucket(u.last24h)}`;
+  out.status = line;
+  return out;
+}
 
 // ------------------------------------------------------------------ Claude
 function claudeTranscripts() {
@@ -191,17 +234,29 @@ function fromBuiltin(id, agentId = id) {
   const r = readJson(file);
   if (!r) { if (fs.existsSync(file)) diag.add(agentId, "Omarchy's usage record exists but isn't readable JSON", { file }); return null; }
   if (!Array.isArray(r.limits ?? [])) diag.add(agentId, "Omarchy's usage record has limits that aren't a list", { type: typeof r.limits });
-  const days = {}; for (const d of r.recentDays || []) days[d.date] = +d.messageCount || 0;
+  if (r.recentDays != null && !Array.isArray(r.recentDays)) diag.add(agentId, "Omarchy's usage record has recentDays that aren't a list", { type: typeof r.recentDays });
+  // Wrong-typed fields count as missing: a record that parses but carries no
+  // real numbers must not fabricate a zero-usage week.
+  const byDay = {};
+  if (Array.isArray(r.recentDays)) {
+    for (const d of r.recentDays) {
+      if (d && typeof d === "object" && typeof d.date === "string") byDay[d.date] = +d.messageCount || 0;
+    }
+  }
+  const week = lastDays(7);
+  const modelUsage = r.modelUsage && typeof r.modelUsage === "object" && !Array.isArray(r.modelUsage) ? r.modelUsage : null;
+  const usageText = typeof r.usageStatusText === "string" ? r.usageStatusText : "";
+  const authText = typeof r.authHelpText === "string" ? r.authHelpText : "";
   return {
     plan: r.tierLabel || "",
-    limits: (r.limits || []).filter((l) => Number(l.percent) >= 0)
-      .map((l) => ({ title: l.title || titleFor(l.label), percent: clamp01(Number(l.percent)), resetsAt: l.resetsAt || "" })),
-    models: modelRows(r.modelUsage), modelScope: "all time",
-    days: daysFrom(days),
+    limits: (Array.isArray(r.limits) ? r.limits : []).filter((l) => l && typeof l === "object" && Number(l.percent) >= 0)
+      .map((l) => ({ title: l.title || titleFor(l.label), percent: clamp01(Number(l.percent)), resetsAt: isoOrEmpty(l.resetsAt) })),
+    models: modelRows(modelUsage), modelScope: "all time",
+    days: week.some((date) => date in byDay) ? daysFrom(byDay) : [],
     resets: codexResets(r),
     signedIn: r.ready === true,
-    status: r.ready === false ? String(r.usageStatusText || r.authHelpText || "") : "",
-    note: String(r.usageStatusText || ""),
+    status: r.ready === false ? (usageText || authText) : "",
+    note: usageText,
   };
 }
 
@@ -286,6 +341,12 @@ for (const a of AGENTS) {
     const m = planInfo("amp", { env: ENV, stateDir: OUT_DIR, onUnexpected });
     out.signedIn = !!m;
     if (m) { if (m.note) out.planNote = m.note; out.status = ""; const u = readAmpUsage({ env: ENV }); if (u.status) out.status = u.status; }   // `amp usage --details`: the token total only
+  }
+  // Kilo and Freebuff: local usage readers, no plan-limit percentages — the
+  // calm usage line and the "can't read" note, never meters.
+  if (a.id === "kilo" || a.id === "freebuff") {
+    const u = a.id === "kilo" ? readKiloUsage({ home: HOME, env: ENV }) : readFreebuffUsage({ home: HOME, env: ENV });
+    Object.assign(out, localUsageFields(a.id, u));
   }
   if (a.id === "opencode") out.signedIn = null; // free models need no login
   if (a.id === "opencode" && (live || []).some((m) => /free/i.test(m.id)) && plans.opencode?.freeNote) out.planNote = plans.opencode.freeNote;
@@ -421,7 +482,8 @@ function notifyHighUsage(list) {
 const SOUND_VOLUME = Number.isFinite(argAfter("--volume")) ? argAfter("--volume") : 60;
 const pendingResets = [];
 const RESET_FIRED = path.join(OUT_DIR, "reset-fired.json");   // which windows already celebrated, kept across restarts
-const resetFired = readJson(RESET_FIRED) || {};
+const resetFiredRaw = readJson(RESET_FIRED);
+const resetFired = resetFiredRaw && typeof resetFiredRaw === "object" && !Array.isArray(resetFiredRaw) ? resetFiredRaw : {};
 applyResets(agents, prev?.agents, (a, windows, info) => pendingResets.push({ a, windows, info }), Date.now(), resetFired);
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(RESET_FIRED, JSON.stringify(resetFired) + "\n", { mode: 0o600 });

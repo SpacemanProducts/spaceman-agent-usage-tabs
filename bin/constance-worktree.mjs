@@ -40,7 +40,15 @@ export function createWorktree(repo, id) {
     git(repo, "worktree", "prune");
   }
   fs.mkdirSync(path.dirname(wt), { recursive: true });
-  const r = git(repo, "worktree", "add", "-b", branch, wt, "HEAD");
+  // A retry of the same job finds its branch still there (only the worktree
+  // folder was cleaned up). Reuse it — never delete it — as long as no
+  // worktree has it checked out.
+  const branchExists = git(repo, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`).status === 0;
+  const checkedOut = branchExists && git(repo, "worktree", "list", "--porcelain").stdout
+    .split("\n").some((l) => l === `branch refs/heads/${branch}`);
+  const r = branchExists && !checkedOut
+    ? git(repo, "worktree", "add", wt, branch)
+    : git(repo, "worktree", "add", "-b", branch, wt, "HEAD");
   if (r.status !== 0) throw new Error(`could not create worktree: ${(r.stderr || r.stdout || "").trim()}`);
   return { worktree: wt, branch };
 }
@@ -77,16 +85,26 @@ export function mergeBranch(repo, branch, { noFf = false } = {}) {
 // and for rejected copies; the branch is only deleted when asked.
 export function dropWorktree(repo, worktree, branch, { deleteBranch = false, merged = false } = {}) {
   const did = [];
+  let worktreeGone = true;
   if (worktree && fs.existsSync(worktree)) {
     const r = git(repo, "worktree", "remove", "--force", worktree);
     if (r.status !== 0) { try { fs.rmSync(worktree, { recursive: true, force: true }); } catch {} }
-    did.push("worktree removed");
+    if (fs.existsSync(worktree)) {
+      worktreeGone = false;
+      did.push(`worktree removal failed: ${worktree}`);
+    } else {
+      did.push("worktree removed");
+    }
   }
   git(repo, "worktree", "prune");
   if (deleteBranch && branch) {
-    const r = git(repo, "branch", merged ? "-d" : "-D", branch);
-    if (r.status === 0) did.push(`branch ${branch} deleted`);
-    else did.push(`branch ${branch} kept (${(r.stderr || "").trim().slice(-120)})`);
+    if (!worktreeGone) {
+      did.push(`branch ${branch} kept (worktree still present)`);
+    } else {
+      const r = git(repo, "branch", merged ? "-d" : "-D", branch);
+      if (r.status === 0) did.push(`branch ${branch} deleted`);
+      else did.push(`branch ${branch} kept (${(r.stderr || "").trim().slice(-120)})`);
+    }
   }
   return did;
 }

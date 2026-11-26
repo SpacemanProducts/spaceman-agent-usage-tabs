@@ -36,9 +36,11 @@ function headOf(dir) {
   return r.status === 0 ? r.stdout.trim() : "";
 }
 
-// Paths dirty in the worktree right now. -z prints raw unquoted names,
-// --untracked-files=all lists every new file instead of collapsing a wholly
-// untracked folder to "dir/", and a rename reports BOTH sides.
+// Paths dirty in the worktree right now. -z prints raw unquoted names (a file
+// literally called "x -> y.txt" survives), --untracked-files=all lists every
+// new file instead of collapsing a wholly untracked folder to "dir/", and a
+// rename reports BOTH sides ("to\0from"), so renaming into an allowed name
+// still shows the deleted source.
 export function dirtyPaths(dir) {
   const out = [];
   const st = git(dir, "status", "--porcelain", "-z", "--untracked-files=all");
@@ -47,7 +49,8 @@ export function dirtyPaths(dir) {
   for (let i = 0; i < fields.length; i++) {
     const f = fields[i];
     if (!f || f.length < 4) continue;
-    out.push(f.slice(3));
+    const p = f.slice(3);
+    out.push(p);
     const xy = f.slice(0, 2);
     if (xy.includes("R") || xy.includes("C")) {
       const other = fields[++i];
@@ -69,12 +72,50 @@ export function commitFromRun(dir, commit, baseHead) {
   return git(dir, "merge-base", "--is-ancestor", baseHead, commit).status === 0;
 }
 
-const commitFiles = (dir, commit) => {
+// --name-only reports a rename under its new name only, which would hide the
+// deleted source; --name-status shows "R<score>\told\tnew", so both sides of a
+// rename are checked (a copy's source is untouched, so only its destination
+// counts).
+export const commitFiles = (dir, commit) => {
   const out = [];
-  const r = git(dir, "show", "--name-only", "--format=", commit);
-  if (r.status === 0) r.stdout.split("\n").filter(Boolean).forEach((p) => out.push(p));
+  // `git show --name-status` prints nothing for a clean merge commit, which
+  // would hide every file the merge brought in: for a merge, diff the commit
+  // against its first parent instead. Both outputs share the
+  // "STATUS\tpath[\tpath]" format parsed below.
+  const p = git(dir, "rev-list", "--parents", "-n", "1", commit);
+  const parents = p.status === 0 ? p.stdout.trim().split(/\s+/).length - 1 : 0;
+  const r = parents > 1
+    ? git(dir, "diff", "--name-status", "-M", commit + "^1", commit)
+    : git(dir, "show", "--name-status", "--format=", "-M", commit);
+  if (r.status !== 0) return out;
+  for (const line of r.stdout.split("\n")) {
+    if (!line.trim()) continue;
+    const f = line.split("\t");
+    const st = f[0] || "";
+    if (st.startsWith("R")) { if (f[1]) out.push(f[1]); if (f[2]) out.push(f[2]); }
+    else if (st.startsWith("C")) { if (f[2]) out.push(f[2]); }
+    else if (f[1]) out.push(f[1]);
+  }
   return out;
 };
+
+// Every commit a recorded self-merge brought into the shared history: the
+// merge commit itself plus the branch-side commits `rev-list <merge>^1..<merge>`
+// lists (the merge is already in that range). Empty when the commit is not a
+// merge or does not resolve — a merge an agent made itself is never excused
+// through this, only one a copy job recorded as its self-merge.
+export function mergedInCommits(dir, mergeCommit) {
+  const full = git(dir, "rev-parse", "--verify", "--quiet", String(mergeCommit || "") + "^{commit}");
+  if (full.status !== 0) return [];
+  const sha = full.stdout.trim();
+  const p = git(dir, "rev-list", "--parents", "-n", "1", sha);
+  const parents = p.status === 0 ? p.stdout.trim().split(/\s+/).length - 1 : 0;
+  if (parents < 2) return [];
+  const r = git(dir, "rev-list", sha + "^1.." + sha);
+  if (r.status !== 0) return [];
+  const list = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  return list.includes(sha) ? list : [sha, ...list];
+}
 
 // Every commit the run made: baseHead..HEAD, oldest first. A missing or
 // unresolvable base means "can't tell which commits are the run's", so the
@@ -83,10 +124,23 @@ export function newCommits(dir, baseHead) {
   if (!baseHead) return [];
   const base = git(dir, "rev-parse", "--verify", "--quiet", baseHead + "^{commit}");
   if (base.status !== 0) return [];
+  // A base that is not an ancestor of HEAD (history rewritten mid-run) makes
+  // base..HEAD span everything: "can't tell which commits are the run's".
+  if (git(dir, "merge-base", "--is-ancestor", base.stdout.trim(), "HEAD").status !== 0) return [];
   const r = git(dir, "rev-list", "--reverse", base.stdout.trim() + "..HEAD");
   if (r.status !== 0) return [];
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 }
+
+// True when the recorded pre-run HEAD still resolves but is no longer an
+// ancestor of HEAD: the run rewrote history, so base..HEAD can no longer be
+// trusted to list the run's own commits — checkRun reports this as a
+// violation instead of silently checking nothing.
+const historyRewritten = (dir, baseHead) => {
+  if (!baseHead) return false;
+  const base = git(dir, "rev-parse", "--verify", "--quiet", baseHead + "^{commit}");
+  return base.status === 0 && git(dir, "merge-base", "--is-ancestor", base.stdout.trim(), "HEAD").status !== 0;
+};
 
 // Paths the run changed: its own commit's files plus anything dirty now that
 // wasn't dirty before the run (an agent that forgot to commit still shows up;
@@ -100,7 +154,9 @@ export function changedPaths(dir, commit, before = null) {
 }
 
 const norm = (p) => String(p).replace(/^\.\//, "").replace(/\/+$/, "");
-const inside = (p, list) => list.some((f) => { const a = norm(f), b = norm(p); return a === b || a === "." || b === a + "/" || a.startsWith(b + "/"); });
+// An allowed entry covers a changed path inside it (".constance/" aside), the
+// path itself, or — for collapsed/odd entries — either direction of nesting.
+const inside = (p, list) => list.some((f) => { const a = norm(f), b = norm(p); return a === b || a === "." || b === a + "/" || a.startsWith(b + "/") || b.startsWith(a + "/"); });
 
 // Dot-prefixed entries are ignored in the comparisons: tools churn hidden dirs
 // constantly (~/.cache, ~/.local, browser state), and an agent misbehaving in a
@@ -131,6 +187,9 @@ export function checkRun({ dir, files = [], commit = "", before = null, env = pr
   const ownFull = own ? fullOf(commit) : "";
   const attributed = own ? [commit] : [];
   const foreignCommits = since.filter((c) => c !== ownFull);
+  // A rewritten base makes newCommits return [] — "can't verify", not "clean":
+  // the run's commits cannot be identified, so say so instead of passing.
+  if (historyRewritten(dir, before.head)) violations.push("history rewritten during the run; its commits cannot be verified");
   const paths = new Set();
   for (const c of attributed) commitFiles(dir, c).forEach((p) => paths.add(p));
   if (ownTree && foreignCommits.length) {

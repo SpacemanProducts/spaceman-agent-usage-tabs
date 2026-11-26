@@ -3,7 +3,7 @@
 // line to <home>/sessions/<workspace>/<session>/agents/<agent>/wire.jsonl under
 // its home (KIMI_CODE_HOME, else ~/.kimi-code). A `usage.record` line carries
 // { agentId, model, usage: { inputOther, output, inputCacheRead?,
-// inputCacheCreation }, usageScope?, time } where `model` is the model alias the
+// inputCacheCreation? }, usageScope?, time } where `model` is the model alias the
 // request ran on and `time` is epoch milliseconds. Forked sessions copy their
 // source's records verbatim, so identical records are counted once.
 // Plan limits are NOT in these files (they come from the quota API), so
@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 const USAGE_FIELDS = ["inputOther", "output", "inputCacheRead", "inputCacheCreation"];
+const OPTIONAL_USAGE_FIELDS = new Set(["inputCacheRead", "inputCacheCreation"]);
 const DAY_MS = 86400000;
 
 function localDate(ms) {
@@ -46,7 +47,8 @@ export function parseWireJsonl(text) {
     if (!rec || rec.type !== "usage.record") continue;
     const usage = rec.usage;
     if (!usage || typeof usage !== "object") continue;
-    const counts = USAGE_FIELDS.map((f) => usage[f]);
+    const counts = USAGE_FIELDS.map((f) =>
+      usage[f] === undefined && OPTIONAL_USAGE_FIELDS.has(f) ? 0 : usage[f]);
     if (!counts.every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0)) continue;
     const tokens = counts.reduce((a, b) => a + b, 0);
     if (!(tokens > 0) || typeof rec.time !== "number" || !Number.isFinite(rec.time)) continue;

@@ -25,6 +25,11 @@
 //   note TEXT                   a line in the owner's log
 //   stop                        halt everything at once (her, every job)
 //   recover                     panel load: restart the driver if a goal is active and it isn't running
+//   route STEP                  which model her STEP runs on, as JSON (constance-route.mjs)
+//   batchreview [--apply FILE]  review up to 5 self-merged jobs in one pass; --apply
+//                               parses a verdict reply and confirms/reverts each
+//   split [--goal TEXT] [--dir D]   autosplit a goal into delegate-ready jobs, as JSON
+//   spec KIND --what ... --files ... --accept ...   fill a job-spec template, as text
 //   drive                       (internal) the background loop that runs her and paces her
 import fs from "node:fs";
 import os from "node:os";
@@ -32,14 +37,14 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { judgeAll, launchCommand, accountEnv, LAUNCH } from "./constance-agents.mjs";
+import { judgeAll, launchCommand, accountEnv, LAUNCH, preferOrder, KILO_NOTE, kiloPaidVerdict, reviewText } from "./constance-agents.mjs";
 import { copyLimit, roomForCopy, readMachine, PUBLISHED_MAX } from "./constance-ramp.mjs";
 import { pace, canResume, keptGoing } from "./constance-pace.mjs";
-import { limitWall, writeWall } from "./constance-wall.mjs";
+import { writeWall, wallFile, clock } from "./constance-wall.mjs";
 import { nextModel, modelName } from "./constance-model.mjs";
 import { openStore, conflicts, handoffPrompt, doneFile, reviewQueue, overlaps, settling, inHand } from "./constance-jobs.mjs";
 import { readLessons, addLesson, lessonsBlock, readProjectRules, rulesBlock, guardrailBlock } from "./constance-lessons.mjs";
-import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap } from "./constance-guard.mjs";
+import { snapshot as guardSnapshot, checkRun, restoreRun, fileCap, commitFiles } from "./constance-guard.mjs";
 import { NotifyParser, handleNotification, recentSignals, recordSignal, jobFinishSignal, logSaysFinished } from "./constance-notify.mjs";
 import { addTask, peekNext, finishTask, removeTask, queueView, readyTasks } from "./constance-queue.mjs";
 import { withLock } from "./constance-mergelock.mjs";
@@ -52,26 +57,57 @@ import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, bra
 import { tokenMeter, matchJobs, snapshots, readRecords, usageFile, refreshInBackground, refreshNow } from "./constance-tokens.mjs";
 import { parseItems, parseItemArg, checklist } from "./constance-checklist.mjs";
 import { cards, nowLine, history, goalRecord } from "./constance-board.mjs";
-import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, needsOwner } from "./constance-goalqueue.mjs";
+import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, queueStops } from "./constance-goalqueue.mjs";
 import { readScorecard, recordReview, scoreRows, sizeHint, rankAgents, scoreLine } from "./constance-scorecard.mjs";
-import { secondTry, sendBackAdvice } from "./constance-retry.mjs";
+import { secondTry, sendBackAdvice, shouldAutoRetry, retrySpec } from "./constance-retry.mjs";
+import { refill } from "./constance-refill.mjs";
+import { batches, batchPrompt, parseVerdicts, applyVerdicts } from "./constance-batchreview.mjs";
+import { ratioReport, saveReport } from "./constance-ratio-report.mjs";
+import { autosplit } from "./constance-autosplit.mjs";
+import { fillSpec } from "./constance-specs.mjs";
 import { planSpare, useItOrLoseItOn } from "./constance-spare.mjs";
 import { readBacklog, addItem as addBacklogItem, markTaken, markDone, removeItem as removeBacklogItem, openItems as openBacklog, formatItem, KINDS as BACKLOG_KINDS } from "./constance-backlog.mjs";
 import { buildReport, writeReport, lastReportAt } from "./constance-morning.mjs";
-import { addSample, readSamples, sessionSpent, leverage, bestReturnLesson } from "./constance-leverage.mjs";
-import { readMilk, milkPolicy, milkPrompt } from "./constance-milk.mjs";
+import { addSample, readSamples, sessionSpent, leverage, bestReturnLesson, TARGET_PER_PCT } from "./constance-leverage.mjs";
+import { readMilk, milkPolicy, milkPrompt, milkStep, MILK_STEPS } from "./constance-milk.mjs";
 import { writeRemoteStatus } from "./constance-remote.mjs";
+import { briefFor } from "./constance-brief.mjs";
+import { progressLine, tick as progressTick } from "./constance-progress.mjs";
+import { resumePlan, logAsk } from "./constance-resume.mjs";
+import { routeModel, logRoute } from "./constance-route.mjs";
+import { pickBrain, topModel, brainLimits, brainCommand, brainWall, milkLabel } from "./constance-brain.mjs";
+import { buildSummary } from "./constance-summary.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
 const ENV = { ...process.env, PATH: `${process.env.HOME}/.local/bin:${process.env.PATH || ""}` };
-const STATE = path.dirname(openStore().dir);   // <state>/omarchy/agent-usage-tabs
-const store = openStore();
+const base = openStore();
+const STATE = path.dirname(base.dir);   // <state>/omarchy/agent-usage-tabs
+// jobs.json is hand-editable state: a null job entry or a goal/guards value that
+// isn't an object would crash readers and writers alike. Every read and update
+// sees only well-shaped entries — bad ones are skipped, never wiped by a crash.
+const cleanState = (s) => {
+  if (s && typeof s === "object") {
+    s.jobs = (Array.isArray(s.jobs) ? s.jobs : []).filter((j) => j && typeof j === "object");
+    if (!s.goal || typeof s.goal !== "object" || Array.isArray(s.goal)) s.goal = null;
+    if (!s.guards || typeof s.guards !== "object") s.guards = {};
+  }
+  return s;
+};
+const store = { ...base, read: () => cleanState(base.read()), update: (fn) => base.update((s) => fn(cleanState(s))) };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function arg(name, fallback = "") { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] ?? fallback : fallback; }
 function out(x) { process.stdout.write(typeof x === "string" ? x + "\n" : JSON.stringify(x, null, 2) + "\n"); }
 function fail(msg) { process.stderr.write(msg + "\n"); process.exit(1); }
+
+// Small state files are rewritten through a temp file in the same folder + rename, so a
+// concurrent reader never sees a torn file; the temp is removed if the rename fails.
+export function writeAtomic(file, data) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, data);
+  try { fs.renameSync(tmp, file); } catch (e) { try { fs.unlinkSync(tmp); } catch {} throw e; }
+}
 
 // A pid is ours only if it is alive and its command line still names what we started.
 export function alive(pid, needle = "") {
@@ -82,7 +118,16 @@ export function alive(pid, needle = "") {
 }
 function killGroup(pid) { try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch {} } }
 
-function readData() { try { return JSON.parse(fs.readFileSync(path.join(STATE, "data.json"), "utf8")); } catch { return { agents: [] }; } }
+// data.json is collector output but still just a file on disk: a payload that
+// isn't an object, or an agents list holding non-object entries, reads as no
+// data rather than crashing every command that uses it.
+function readData() {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(STATE, "data.json"), "utf8"));
+    if (!d || typeof d !== "object" || Array.isArray(d)) return { agents: [] };
+    return { ...d, agents: (Array.isArray(d.agents) ? d.agents : []).filter((a) => a && typeof a === "object" && !Array.isArray(a)) };
+  } catch { return { agents: [] }; }
+}
 // Fresh numbers before a handoff: run the collector when data.json is over 5 minutes old (same sound
 // settings as the panel's own runs).
 function freshData() {
@@ -94,7 +139,25 @@ function freshData() {
   }
   return d;
 }
-const claudeOf = (d) => (d.agents || []).find((a) => a.id === "claude");
+// Her planning brain (constance-brain.mjs): Claude Code by default, or Antigravity's
+// `agy` when the owner picked it and opted it into the sandboxed keyring. brainOf()/paceNow()
+// hand pace() the brain's own limits — for agy that's only the quota pool her chosen model
+// burns, renamed to plain Session/Weekly so the pacing windows line up with Claude's.
+const brainNow = () => pickBrain(readSettings());
+const agyOf = (d) => (d.agents || []).find((a) => a.id === "antigravity");
+const brainTop = (d, b) => (b.id === "antigravity" ? topModel(agyOf(d), readSettings()) : null);
+const brainName = (b) => (b && b.id === "antigravity" ? "Antigravity" : "Claude");
+const brainCli = (id) => (id === "antigravity" ? "agy" : "claude");
+// The model one brain run spawns with: agy's picked model id, else her Claude model.
+function brainModel(d, b) {
+  if (b.id === "antigravity") return brainTop(d, b)?.id || "";
+  return store.read().goal?.model || "opus";
+}
+function brainOf(d) { const b = brainNow(); return brainLimits(d, b.id, brainTop(d, b)); }
+function paceNow(d) {
+  const b = brainNow();
+  return pace(brainLimits(d, b.id, brainTop(d, b)), Date.now(), undefined, { name: brainName(b) });
+}
 
 // Agents the owner lets reach the desktop keyring from inside the sandbox
 // (settings.json constanceKeyringAgents; none by default — see constance-sandbox.mjs).
@@ -108,7 +171,13 @@ function boxProblem(id) {
   if (!bwrapWorks()) return "bubblewrap (bwrap) is missing or can't run here";
   return sandboxProblem(id, keyringAgents());
 }
-const judged = (d) => judgeAll(d, Date.now(), { sandbox: boxProblem });
+const judged = (d) => {
+  const list = judgeAll(d, Date.now(), { sandbox: boxProblem });
+  // While agy is her brain it never doubles as a worker.
+  if (brainNow().id === "antigravity")
+    for (const a of list) if (a.id === "antigravity") { a.available = false; a.reason = "it is her brain right now"; }
+  return list;
+};
 
 // Practice mode (the panel's switch, on by default for now): a dry run. She still plans the goal and
 // picks agents, but delegate() only writes each handoff's agent, reason and full prompt into the log —
@@ -159,6 +228,11 @@ function tailFile(f, n = 8192) {
   } catch { return ""; }
 }
 
+// A done file that won't parse is given this long (by its last write) to be
+// finished by its agent before the sweep believes it: agents write the file in
+// more than one write, and a read between them must not end a healthy job.
+const DONE_FILE_STALE_MS = 10e3;
+
 function sweep() {
   const signals = [];
   const changed = store.update((s) => {
@@ -172,16 +246,29 @@ function sweep() {
         if (j.selfMerging && gone) { delete j.selfMerging; delete j.selfMergePid; delete j.selfMergeAt; }
         continue;
       }
-      const f = jobDoneFile(j);
+      // A running record with no dir, worktree or tmp has nowhere a done file
+      // could be: jobDoneFile() throws on it, so treat the file as missing.
+      const f = (() => { try { return jobDoneFile(j); } catch { return ""; } })();
       let done = null, source = "";
+      // A done file that exists but doesn't parse may just be caught mid-write:
+      // it only counts once the agent is gone AND the file has sat unparseable
+      // for DONE_FILE_STALE_MS, so a healthy run is never finished on a torn read.
+      let awaitingDone = false;
       try { done = JSON.parse(fs.readFileSync(f, "utf8")); j.finishedAt = fs.statSync(f).mtimeMs; source = "done-file"; }
       catch {
-        if (fs.existsSync(f)) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
+        if (fs.existsSync(f)) {
+          let age = Infinity;
+          try { age = Date.now() - fs.statSync(f).mtimeMs; } catch {}
+          if (!alive(j.pid, LAUNCH[j.agent]?.cli || "") && age > DONE_FILE_STALE_MS) { done = { summary: "(done file was not valid JSON)", commit: "" }; j.finishedAt = Date.now(); source = "done-file"; }
+          else awaitingDone = true;
+        }
       }
-      if (!done && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
+      if (!done && !awaitingDone && !alive(j.pid, LAUNCH[j.agent]?.cli || "")) { done = { summary: "(the agent exited without writing its done file)", commit: "" }; j.finishedAt = Date.now(); source = "exit"; }
       // A worker can't commit, so its done file's "commit" is only what it claimed
       // (kept as reportedCommit); the job's commit is the one commitForJob makes.
-      if (done) { j.status = "finished"; j.settling = Date.now(); j.summary = String(done.summary || ""); j.reportedCommit = String(done.commit || ""); j.commit = ""; changed.push(j); signals.push({ j, source }); }
+      // `tests` is the worker's own claim, shown on its card only: it is never a
+      // self-merge signal (that is the sandboxed suite's job).
+      if (done) { j.status = "finished"; j.settling = Date.now(); j.summary = reviewText(j.agent, String(done.summary || "")); j.reportedCommit = String(done.commit || ""); j.commit = ""; if (done.tests !== undefined) j.tests = done.tests; changed.push(j); signals.push({ j, source }); }
       // Still running, but its own log says it finished: record the signal
       // (deduped in notify.jsonl) without touching its status.
       else if (j.log && logSaysFinished(tailFile(j.log))) signals.push({ j, source: "log" });
@@ -192,7 +279,11 @@ function sweep() {
   // the guard and the self-merge decision are done; maybeSelfMerge swaps it
   // for selfMerging in one update, and it is cleared here otherwise.
   for (const j of changed) {
-    try { guardFinished(j); commitForJob(j); dropJobTmp(j); maybeSelfMerge(j); }
+    try {
+      // A kilo run that billed fails on the spot: no guard, commit, retry or self-merge.
+      if (kiloPaidFail(j)) { dropJobTmp(j); continue; }
+      guardFinished(j); commitForJob(j); dropJobTmp(j); autoRetry(j); maybeSelfMerge(j);
+    }
     finally { store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) delete x.settling; }); }
   }
   // Whoever's sweep sees the finish logs the return — status polls can beat `wait` to it.
@@ -208,6 +299,21 @@ const normRel = (p) => String(p).replace(/^\.\//, "").replace(/\/+$/, "");
 function coversPath(files, p) {
   const b = normRel(p);
   return files.some((f) => { const a = normRel(f); return a === b || a === "." || b === a + "/" || a.startsWith(b + "/"); });
+}
+
+// A finished kilo job's own --format json stream is its log: kiloPaidVerdict
+// fails it when the run shows a paid model or any cost > 0 (kilo bills per
+// token, so this is checked before the guard and self-merge ever see it).
+// Returns the verdict, or null when the job isn't kilo or came back clean.
+function kiloPaidFail(j) {
+  if (j.agent !== "kilo") return null;
+  let text = "";
+  try { text = fs.readFileSync(j.log, "utf8"); } catch { text = tailFile(j.log, 65536); }
+  const v = kiloPaidVerdict(text);
+  if (!v) return null;
+  store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x && x.status === "finished") { x.status = "failed"; x.reviewNote = v.note; } });
+  store.log({ kind: "note", job: j.id, agent: j.agent, worker: j.worker, text: `Job ${j.id} failed: ${v.note}` });
+  return v;
 }
 
 // After a delegated run ends, check it stayed inside its guardrails: only its
@@ -312,8 +418,8 @@ function excludeDoneFiles(dir) {
 
 // ---------------------------------------------------------------- self-merge and slot filling
 // A finished copy whose guard is clean, whose branch only touches its allowed
-// files and whose own report says its tests passed merges itself at once
-// (constance-selfmerge.mjs runs the repo's whole suite first, then merges,
+// files and whose project has a real test command merges itself at once
+// (constance-selfmerge.mjs runs that suite sandboxed first, then merges,
 // with one rebase-and-retry on conflict). The merge lands in reviews.json for
 // Constance's background review — accept confirms it, send-back reverts it.
 // A flagged conflict is marked "conflict" and keeps its worktree, exactly like
@@ -449,6 +555,39 @@ function runSelfMerge(id) {
   }
 }
 
+// A copy that failed on its own — failing tests, a guard violation or a crash
+// (shouldAutoRetry decides, retrySpec builds the redo) — is retried once on a
+// fresh copy of the same agent before Constance's review ever sees the
+// failure: the original is marked sent back (the run failed; she didn't
+// reject it), its worktree and branch dropped unmerged, and the redo goes out
+// linked with --again and flagged autoRetry so it is never retried itself. A
+// refusal (the agent is busy, the second-try rule, a file conflict) puts the
+// job back to finished for the normal review.
+function autoRetry(j) {
+  try {
+    if (!j.copy || j.autoRetry) return;
+    const fresh = store.read().jobs.find((k) => k.id === j.id);
+    if (!fresh || fresh.status !== "finished" || fresh.autoRetried || !shouldAutoRetry(fresh, store.read().jobs)) return;
+    const spec = retrySpec(fresh, { errorOutput: fresh.log ? tailFile(fresh.log) : "" });
+    store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "sent back"; x.reviewNote = "auto-retry: the run failed on its own"; x.reviewedAt = Date.now(); x.autoRetried = true; } });
+    let r;
+    try { r = handOut({ agent: spec.agent, task: spec.task, files: spec.files, againOf: spec.again }); }
+    catch (e) {
+      store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "finished"; delete x.autoRetried; delete x.reviewNote; delete x.reviewedAt; } });
+      store.log({ kind: "note", job: j.id, agent: j.agent, text: `auto-retry for job ${j.id} refused, it goes to review instead: ${e.message}` });
+      return;
+    }
+    store.update((s) => {
+      const x = s.jobs.find((k) => k.id === r.job.id); if (x) x.autoRetry = true;
+      const y = s.jobs.find((k) => k.id === j.id); if (y) y.retryJob = r.job.id;
+    });
+    try { cleanupRejected(fresh); } catch {}
+    store.log({ kind: "retry", job: j.id, agent: j.agent, worker: j.worker, text: `failed on its own; retried as job ${r.job.id}${r.held ? " (held until the machine has room)" : ""}.` });
+  } catch (e) {
+    store.log({ kind: "note", job: j.id, agent: j.agent, text: `auto-retry skipped for job ${j.id}: ${e.message}` });
+  }
+}
+
 // A self-merged job is already in the repo: wherever an accepted job counts
 // (checklist ticks, goal history, the goal-end checks) a merged one counts the
 // same — her later review only confirms it or reverts it.
@@ -469,16 +608,59 @@ function fillSlots() {
     let slots = 0;
     for (const agent of Object.keys(PUBLISHED_MAX)) slots += Math.max(0, limitOf(agent) - copySlots(s, agent, dir).length);
     if (!slots) return;
+    let handed = 0;
     for (const t of readyTasks(dir, { busyFiles, limit: slots }, store.dir)) {
       if (!t.agent) continue;
       try {
         const r = handOut({ agent: t.agent, task: t.task, files: t.files || [], items: parseItemArg(t.items || []), title: t.title || "" });
+        handed++;
         finishTask(dir, t.id, r.job.id, store.dir);
+        markRefillTaken(dir, t.id, r.job.id);
         store.log({ kind: "note", text: `Ready queue: "${t.task.slice(0, 80)}" went to ${t.agent} automatically as job ${r.job.id} (a copy slot was free).` });
       } catch (e) {
         if (!fillMissed.has(t.id)) { fillMissed.add(t.id); store.log({ kind: "note", text: `Ready queue: "${t.task.slice(0, 80)}" stays queued — ${e.message}` }); }
       }
     }
+    refillQueue(dir, { freeSlots: slots - handed, busyFiles });
+  } catch {}
+}
+
+// ---------------------------------------------------------------- backlog refill
+// When the ready queue runs dry while copy slots sit free, refill() pulls open
+// backlog items (test/docs/task/bug kinds only) into it so autoNext always has
+// work for a freed agent. Queue tasks carry no extra fields, so each refill
+// remembers its backlog item in refills.json; the take is marked with the job
+// id when the task is actually handed out (markRefillTaken, called wherever a
+// queued task starts).
+const refillsFile = () => path.join(store.dir, "refills.json");
+const REFILL_LOW = 3;
+function readRefills() { try { return JSON.parse(fs.readFileSync(refillsFile(), "utf8")) || {}; } catch { return {}; } }
+function writeRefills(d) { try { writeAtomic(refillsFile(), JSON.stringify(d, null, 2) + "\n"); } catch {} }
+function rememberRefill(dir, taskId, backlogId) {
+  const d = readRefills(); (d[dir] ||= {})[taskId] = backlogId; writeRefills(d);
+}
+function markRefillTaken(dir, taskId, jobId) {
+  const d = readRefills(), m = d[dir];
+  if (!m || !(taskId in m)) return;
+  const backlogId = m[taskId];
+  delete m[taskId]; if (!Object.keys(m).length) delete d[dir];
+  writeRefills(d);
+  try { if (markTaken(dir, backlogId, jobId)) store.log({ kind: "note", text: `Backlog #${backlogId} is job ${jobId}'s now.` }); } catch {}
+}
+// Queue length below REFILL_LOW with freeSlots to spare: add refill tasks,
+// skipping backlog items already queued (they aren't marked taken until they
+// start, so the map is what keeps a later sweep from queueing them twice).
+function refillQueue(dir, { freeSlots, busyFiles }) {
+  try {
+    const queueLen = queueView(dir, store.dir).length;
+    if (queueLen >= REFILL_LOW || freeSlots <= 0) return;
+    const queued = new Set(Object.values(readRefills()[dir] || {}));
+    const r = refill(dir, { queueLen, freeSlots, backlog: openBacklog(dir).filter((it) => !queued.has(it.id)), busyFiles });
+    for (const t of r.tasks) {
+      const item = addTask(dir, { task: t.task, files: t.files || [] }, store.dir);
+      rememberRefill(dir, item.id, t.backlogId);
+    }
+    if (r.tasks.length) store.log({ kind: "note", text: `Ready queue refilled from the backlog: ${r.tasks.length} task${r.tasks.length === 1 ? "" : "s"} queued.` });
   } catch {}
 }
 
@@ -526,6 +708,11 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
   const verdict = judged(freshData()).find((a) => a.id === agent);
   if (!verdict?.available) throw new Error(`${agent} is not available: ${verdict ? verdict.reason : "unknown agent"}. Run \`agents\` and pick another, or do it yourself.`);
   const dir = g.dir;
+  // The cached repo brief (layout, test loop, rules, never-touch list) rides at
+  // the top of every worker prompt; briefFor rebuilds it only when the tree
+  // moved a lot or the cache is a week old.
+  let brief = "";
+  try { brief = briefFor(dir, { cacheDir: path.join(store.dir, "briefs") }); } catch {}
   // Guardrail strikes shrink what this agent may touch: after a violation it gets
   // smaller tasks only, enforced here rather than left to her judgment.
   const strikes = Number(store.read().guards?.[agent]?.strikes) || 0;
@@ -576,7 +763,8 @@ function handOut({ agent, task, files = [], preferCopy = 0, items = [], title = 
     const built = asCopy
       ? handoffPrompt({ id, dir, task, files, account, worktree: wt, branch: br, mainDir: dir }, promptExtra)
       : handoffPrompt(j, promptExtra);
-    j.prompt = built.split(doneFile(asCopy ? wt : dir, id)).join(doneFile("/tmp", id));
+    const body = built.split(doneFile(asCopy ? wt : dir, id)).join(doneFile("/tmp", id));
+    j.prompt = brief ? `Repo brief:\n${brief}\n\n${body}` : body;
     s.jobs.push(j);
     return j;
   });
@@ -720,6 +908,7 @@ function autoNext(j) {
   try {
     const r = handOut({ agent, task: item.task, files: item.files || [], preferCopy: agent === j.agent ? j.copy || 0 : 0, items: parseItemArg(item.items || []), title: item.title || "" });
     finishTask(j.dir, item.id, r.job.id, store.dir);
+    markRefillTaken(j.dir, item.id, r.job.id);
     store.log({ kind: "note", text: `Ready queue: "${item.task.slice(0, 80)}" went to ${agent} automatically as job ${r.job.id}.` });
     return r.practice
       ? ` Next queued task logged for ${agent} (practice).`
@@ -778,9 +967,9 @@ async function waitJob() {
       const earlier = s.jobs.filter((j) => j.id !== next.id && j.goal === next.goal && ["finished", "merged", "accepted"].includes(j.status) && (j.finishedAt || 0) <= (next.finishedAt || 0))
         .map((j) => ({ id: j.id, agent: j.agent, commit: j.commit, shared: overlaps(changedFiles(j.dir, j.commit), files) })).filter((x) => x.shared.length);
       let tail = ""; try { tail = fs.readFileSync(next.log, "utf8").slice(-2500); } catch {}
-      return out({ review: { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: next.summary, commit: next.commit, changedFiles: files,
+      return out({ review: { id: next.id, agent: next.agent, worker: next.worker || null, dir: runDir(next), files: next.files, task: next.task, summary: reviewText(next.agent, next.summary), commit: next.commit, changedFiles: files,
         guardViolation: next.guardViolation || null,
-        checkAgainst: earlier, logTail: tail, queue: queueView(next.dir, store.dir) }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
+        checkAgainst: earlier, logTail: reviewText(next.agent, tail), queue: queueView(next.dir, store.dir) }, stillRunning: busyJobs(s), signals: recentSignals(store.dir, 6),
         next: "Review it now: read its report and check it against the goal; read the full diff yourself only when the change is risky or the report doesn't add up. Compare it with any earlier job listed under checkAgainst. Fix small problems yourself or send it back with a new delegate. Then `review " + next.id + " accept|send-back --note ...`." });
     }
     const held = s.jobs.filter((j) => j.status === "held").map((j) => ({ id: j.id, agent: j.agent, worker: j.worker || null, heldReason: j.heldReason || "" }));
@@ -931,6 +1120,88 @@ function reviewMerged(j, verdict, note) {
   out(`Job ${j.id} sent back; its self-merge was reverted.`);
 }
 
+// The diff a self-merged job brought into the repo: its merge commit against
+// the branch it landed on (the first parent), for the batch review prompt.
+function mergedDiff(j) {
+  const c = j.mergeCommit || j.commit;
+  if (!c || !/^[0-9a-f]{7,40}$/i.test(String(c))) return "";
+  const d = safeGit(j.dir, ["diff", `${c}^`, c]);
+  return d.status === 0 ? d.stdout : "";
+}
+
+// `batchreview`: her background review of self-merged jobs, up to five at a
+// time (constance-batchreview.mjs). Bare prints the batch prompt — every
+// pending job's id, task and diff plus the one-line reply contract. With
+// --apply FILE it parses the verdict reply ("ID ok" / "ID fail: reason"; a
+// missing or garbled verdict counts as a fail) and applies it: ok confirms the
+// merge, fail reverts it through the same revertMerge path `review` uses.
+function batchReviewCmd() {
+  const batch = batches(store.read().jobs)[0] || [];
+  if (!batch.length) { out("No merged jobs are waiting for review."); return; }
+  const apply = arg("--apply");
+  if (!apply) {
+    process.stdout.write(`Batch review: ${batch.length} merged job${batch.length === 1 ? "" : "s"} waiting for review (${batch.map((j) => j.id).join(", ")}). Reply with one line per job — "<id> ok" or "<id> fail: <reason>" — and run: C batchreview --apply FILE\n\n`);
+    out(batchPrompt(batch, { diffOf: mergedDiff }));
+    return;
+  }
+  let text;
+  try { text = fs.readFileSync(apply, "utf8"); } catch (e) { fail(`Can't read ${apply}: ${e.message}`); }
+  const ids = batch.map((j) => j.id);
+  const verdicts = parseVerdicts(text, ids);
+  const reasons = Object.fromEntries(ids.map((id) => [id, String(verdicts[String(id)]?.reason || "")]));
+  const extras = [];
+  const summary = applyVerdicts(verdicts, {
+    jobs: batch,
+    revert: (job) => withMergeLock(() => revertMerge(job.dir, job.mergeCommit || job.commit)),
+    markReviewed: (job, verdict) => {
+      const j = store.read().jobs.find((k) => k.id === job.id) || job;
+      const ok = verdict === "ok";
+      const note = reasons[j.id] || (ok ? "confirmed" : "no verdict");
+      store.log({ kind: "review", job: j.id, agent: j.agent, worker: j.worker, verdict: ok ? "accept" : "send-back", text: `batch review: ${note}` });
+      markReviewed(reviewsFile(), j.id, verdict);
+      if (ok) {
+        store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "accepted"; x.reviewNote = note; x.reviewedAt = Date.now(); } });
+        score(j, "accept");
+        const nx = autoNext(j); if (nx.trim()) extras.push(nx.trim());
+      } else {
+        store.update((s) => { const x = s.jobs.find((k) => k.id === j.id); if (x) { x.status = "sent back"; x.revertedAt = Date.now(); x.reviewNote = note; x.reviewedAt = Date.now(); } });
+        store.log({ kind: "revert", job: j.id, agent: j.agent, worker: j.worker, text: `reverted the self-merge of ${j.branch || "the branch"} (batch review): ${note}` });
+        score(j, "send-back");
+      }
+    },
+  });
+  const failed = summary.revertFailed.length ? ` ${summary.revertFailed.length} revert${summary.revertFailed.length === 1 ? "" : "s"} failed — still merged and pending: ${summary.revertFailed.join(", ")}.` : "";
+  out(`Batch review applied: ${summary.ok} confirmed, ${summary.reverted} reverted.${failed}${extras.length ? " " + extras.join(" ") : ""}`);
+}
+
+// `split`: autosplit a goal's text into ready-to-delegate jobs (one per
+// checklist item, disjoint file lists, deeper-test padding) printed as JSON —
+// for planning a big goal. Defaults to the running goal's text and folder;
+// --goal/--dir override.
+function splitCmd() {
+  const g = store.read().goal;
+  const text = arg("--goal") || g?.text;
+  const dir = arg("--dir") ? path.resolve(arg("--dir")) : g?.dir;
+  if (!text) fail("No goal is running: pass --goal TEXT (and --dir PROJECT).");
+  let files = [];
+  if (dir) {
+    const r = safeGit(dir, ["ls-files"]);
+    if (r.status === 0) files = r.stdout.split("\n").filter(Boolean);
+  }
+  try { out(autosplit(text, { files, scorecard: scoreRows(readScorecard(store.dir)), agent: arg("--agent") || null, min: Number(arg("--min")) || 15 })); }
+  catch (e) { fail(e.message); }
+}
+
+// `spec KIND --what ... --files a,b --accept ... [--notes ...]`: fill a job-spec
+// template (constance-specs.mjs) and print it — a precise task text for
+// `delegate --task`.
+function specCmd() {
+  const kind = process.argv[3] && !process.argv[3].startsWith("--") ? process.argv[3] : "";
+  try {
+    out(fillSpec(kind, { what: arg("--what"), files: arg("--files").split(",").map((x) => x.trim()).filter(Boolean), accept: arg("--accept"), notes: arg("--notes") }));
+  } catch (e) { fail(e.message); }
+}
+
 // ---------------------------------------------------------------- the goal and the driver
 const ROLE = (dir) => `You are Constance, the quarterback of the owner's coding agents. You run on the owner's one paid plan (Claude). You plan, delegate, review and still play yourself when the work is hard or risky. You have full authority: never stop to ask permission.
 
@@ -1004,7 +1275,8 @@ function startGoal() {
 // ---------------------------------------------------------------- goal end, history and the goal queue
 const historyFile = () => path.join(store.dir, "history.jsonl");
 function readHistory() {
-  try { return fs.readFileSync(historyFile(), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
+  // Goal records only: the end-of-goal ratio report shares the file, marked by `kind`.
+  try { return fs.readFileSync(historyFile(), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r && typeof r === "object" && !r.kind); } catch { return []; }
 }
 // Keep the goal that just ended in history.jsonl (once per goal), with its tokens kept first.
 function recordHistory(fresh = true) {
@@ -1014,6 +1286,8 @@ function recordHistory(fresh = true) {
   if (!s.goal || ["running", "paused"].includes(s.goal.status)) return null;
   if (readHistory().some((r) => r.id === s.goal.id)) return null;
   const rec = goalRecord(s.goal, asAccepted(s.jobs), matchJobs(s.jobs, records));
+  rec.failReason = s.goal.failReason || "";
+  rec.endNotes = s.goal.endNotes || [];
   // The same leverage object status shows, kept on the history line; and, once
   // per goal like the record itself, one lesson naming the handoff that paid
   // off best (jobs carry tokens and their review verdicts for it).
@@ -1035,30 +1309,37 @@ function tellOwner(title, body) {
 function afterGoal() {
   const s = store.read(), g = s.goal;
   if (!g || ["running", "paused"].includes(g.status)) return false;
-  const why = needsOwner(g, asAccepted(s.jobs), { practice: practiceMode() });
-  // A self-merged job still owes its background review: ending the goal with
-  // one pending would orphan the revert path, so it stops the queue like an
-  // unreviewed finished job does.
-  const unreviewedMerged = s.jobs.filter((j) => j.goal === g.id && j.status === "merged").map((j) => j.id);
-  if (unreviewedMerged.length) why.push(`job${unreviewedMerged.length > 1 ? "s" : ""} ${unreviewedMerged.join(", ")} merged and still waiting for review`);
-  if (why.length) {
-    const text = why.join("; ");
-    store.update((x) => { if (x.goal && x.goal.id === g.id) x.goal.needsOwner = text.charAt(0).toUpperCase() + text.slice(1) + "."; });
+  // Only `stop` reasons halt the queue; `notes` (a failed goal, unreviewed or
+  // merged jobs, open checklist items) are kept on the goal and logged, then
+  // the queue goes on. queueStops() sees the jobs as they are — merged jobs
+  // included — and counts them as accepted for the checklist itself.
+  const { stop, notes } = queueStops(g, s.jobs, { practice: practiceMode() });
+  if (stop.length || notes.length) {
+    const text = stop.join("; ");
+    store.update((x) => {
+      if (x.goal && x.goal.id === g.id) {
+        if (notes.length) x.goal.endNotes = notes;
+        if (stop.length) x.goal.needsOwner = text.charAt(0).toUpperCase() + text.slice(1) + ".";
+      }
+    });
   }
+  if (notes.length) store.log({ kind: "note", text: `Goal ended with: ${notes.join("; ")}. The queue goes on.` });
   recordHistory();
+  try { ratioReportFor(g); } catch (e) { store.log({ kind: "note", text: `Ratio report not written: ${e.message}` }); }
   const q = readGoalQueue(store.dir);
-  if (why.length) {
+  if (stop.length) {
+    const text = stop.join("; ");
     if (q.goals.length) {
-      pauseQueue(store.dir, why.join("; "));
-      store.log({ kind: "needs-you", text: `Goal queue stopped: ${why.join("; ")}. ${q.goals.length} goal${q.goals.length === 1 ? "" : "s"} wait for you.` });
-      tellOwner("Constance needs you", `${why.join("; ")}. The goal queue is stopped until you start the next goal.`);
+      pauseQueue(store.dir, text);
+      store.log({ kind: "needs-you", text: `Goal queue stopped: ${text}. ${q.goals.length} goal${q.goals.length === 1 ? "" : "s"} wait for you.` });
+      tellOwner("Constance needs you", `${text}. The goal queue is stopped until you start the next goal.`);
     } else if (g.fromQueue || g.fromSpare) {
       // The queue ran dry on a goal that needs the owner: the morning report says so (one notice, not two).
-      store.log({ kind: "needs-you", text: `${why.join("; ")}.` });
+      store.log({ kind: "needs-you", text: `${text}.` });
       morningReport();
     } else {
-      store.log({ kind: "needs-you", text: `${why.join("; ")}.` });
-      tellOwner("Constance needs you", `${why.join("; ")}.`);
+      store.log({ kind: "needs-you", text: `${text}.` });
+      tellOwner("Constance needs you", `${text}.`);
     }
     return false;
   }
@@ -1116,7 +1397,7 @@ function startSpareGoal(g) {
   const text = [`Use it or lose it: ${plan.reason} Work only on these items from this project's backlog (.constance/backlog.md). If one turns out not to be worth doing, skip it and say why: never make work just to use the room. When an item is finished run \`C backlog done N\` with its backlog number.`, ...lines].join("\n");
   const res = beginGoal(text, g.dir, { fromSpare: true, driverPid: process.pid });
   if (res.busy) return false;
-  fs.writeFileSync(spareFile(), JSON.stringify({ used: [...seen, ...picks.map(key)].slice(-200) }) + "\n");
+  writeAtomic(spareFile(), JSON.stringify({ used: [...seen, ...picks.map(key)].slice(-200) }) + "\n");
   store.log({ kind: "note", text: `Use it or lose it: started a backlog goal (${picks.map((p) => `${names[p.agent] || p.agent} ${p.window.title}`).join(", ")}).` });
   spawnWatcher();
   return true;
@@ -1211,7 +1492,7 @@ function jobCmd() {
   const s = store.read(), j = s.jobs.find((x) => x.id === id);
   if (!j) fail(`No job ${id}.`);
   const { guardBefore, ...rest } = j;
-  out({ ...rest, log: store.readLog(2000).filter((e) => e.job === id && e.kind !== "practice").slice(-20) });
+  out({ ...rest, summary: reviewText(j.agent, rest.summary || ""), log: store.readLog(2000).filter((e) => e.job === id && e.kind !== "practice").slice(-20) });
 }
 
 function spawnDriver() {
@@ -1249,7 +1530,7 @@ function spawnWatcher() {
 async function watch() {
   const pidFile = path.join(store.dir, "watcher.pid");
   try { const p = Number(fs.readFileSync(pidFile, "utf8")); if (isWatcher(p)) process.exit(0); } catch {}
-  fs.writeFileSync(pidFile, String(process.pid));
+  writeAtomic(pidFile, String(process.pid));
   const bus = spawn("busctl", ["--user", "monitor"], { stdio: ["ignore", "pipe", "ignore"] });
   bus.on("error", () => { store.log({ kind: "note", text: "Notification watcher could not start (busctl missing?)." }); process.exit(0); });
   const parser = new NotifyParser();
@@ -1309,13 +1590,26 @@ function openWork(s) {
 
 // The driver's heartbeat (its watch interval and adopt loop): refresh the
 // leverage samples and the phone-safe remote status, each at most once a
-// minute. statusPayload() does the sampling; nothing is sent anywhere.
-let lastBeat = 0;
+// minute. statusPayload() does the sampling; nothing is sent anywhere. It also
+// ticks the progress ping: the line goes out as a silent notify-send at most
+// once per 15 minutes while a goal runs (constance-progress.mjs keeps the
+// stamp in her state dir).
+let lastBeat = 0, lastProgressArgs = null;
+// notify-send for the progress ping, with test overrides: CONSTANCE_NO_NOTIFY=1
+// skips the send, CONSTANCE_NOTIFY_CMD replaces the notify-send binary.
+const progressExec = (cmd, args, opts) => {
+  if (process.env.CONSTANCE_NO_NOTIFY === "1") return { status: 1 };
+  return spawnSync(process.env.CONSTANCE_NOTIFY_CMD || cmd, args, opts);
+};
 function heartbeat() {
   const now = Date.now();
   if (now - lastBeat < SAMPLE_GAP_MS) return;
   lastBeat = now;
   try { writeRemoteStatus(statusPayload(), remoteFile()); } catch {}
+  try { sampleCopiesRunning(); } catch {}
+  try {
+    if (lastProgressArgs) progressTick({ ...lastProgressArgs, target: TARGET_PER_PCT, stateFile: path.join(store.dir, "progress.json"), exec: progressExec });
+  } catch {}
 }
 
 async function drive() {
@@ -1323,8 +1617,21 @@ async function drive() {
   for (;;) {
     const g = store.read().goal;
     if (!g || !["running", "paused"].includes(g.status)) return;
-    const p = pace(claudeOf(freshData()));
-    if (p.mode === "stop") {
+    const dNow = freshData();
+    const p = paceNow(dNow);
+    // A goal paused by Claude's own limit wall follows wall.json, not the
+    // readings: resumePlan waits out the stated reset plus a grace, then
+    // resumes her — no owner ask and no fresh reading required. The raw file
+    // is read (not readWall, which expires at `until`) so the grace still
+    // counts in the minute after the reset.
+    const wallPlan = g.status === "paused" ? resumePlan({ wall: wallJson(), now: Date.now(), goalStatus: g }) : null;
+    if (wallPlan?.action === "wait") { await sleep(60e3); continue; }
+    if (wallPlan?.action === "resume") {
+      store.update((s) => { s.goal.status = "running"; delete s.goal.pauseReason; });
+      store.log({ kind: "resumed", text: "The wall's stated reset plus a minute has passed; picking the goal up again." });
+      g.status = "running"; delete g.pauseReason;
+      pausedLogged = false;
+    } else if (p.mode === "stop") {
       store.update((s) => { s.goal.status = "paused"; s.goal.pauseReason = p.reason; });
       if (!pausedLogged) { store.log({ kind: "paused", text: p.reason }); pausedLogged = true; }
       await sleep(60e3); continue;
@@ -1333,8 +1640,8 @@ async function drive() {
       // Resume only on a reading that is current: a cached or unreadable one can't prove the
       // limit is gone (Keep going is the owner's own call and doesn't need one).
       const kept = keptGoing(p);
-      if (!canResume(p, claudeOf(readData()))) {
-        const why = "Waiting for a current reading of Claude's limits before picking the goal up again.";
+      if (!canResume(p, brainOf(readData()))) {
+        const why = `Waiting for a current reading of ${brainName(brainNow())}'s limits before picking the goal up again.`;
         if (g.pauseReason !== why) { store.update((s) => { s.goal.pauseReason = why; }); store.log({ kind: "paused", text: why }); }
         pausedLogged = true;
         await sleep(60e3); continue;
@@ -1343,39 +1650,69 @@ async function drive() {
       store.log({ kind: "resumed", text: kept ? "You chose Keep going; picking the goal up again." : "Back under her limits; picking the goal up again." });
       pausedLogged = false;
     }
-    // After a restart the previous Claude run may still be going: adopt it rather than start a second one.
-    if (alive(g.brainPid, "claude")) {
+    // After a restart the previous brain run may still be going: adopt it rather than start a second one.
+    const cli = brainCli(g.brainId);
+    if (alive(g.brainPid, cli)) {
       let killed = false;
-      while (alive(g.brainPid, "claude")) {
+      while (alive(g.brainPid, cli)) {
         const st = store.read().goal;
         if (!st || st.status === "stopped") return;
-        if (!killed && pace(claudeOf(readData())).mode === "stop") { killGroup(g.brainPid); killed = true; }
+        if (!killed && paceNow(readData()).mode === "stop") { killGroup(g.brainPid); killed = true; }
         try { releaseHeld(); fillSlots(); heartbeat(); } catch {}
         await sleep(5000);
       }
       const st = store.read().goal;
       if (!st || st.status !== "running" || killed) continue;
     }
-    const resume = g.started;
+    // The brain is picked fresh at every start: the owner can flip
+    // settings.constanceBrain between runs. Wanted-but-not-allowed is told to
+    // the owner once per goal, then she quietly stays on Claude Code.
+    const b = brainNow();
+    if (b.wanted === "antigravity" && !b.ok && !g.brainNoteLogged) {
+      store.update((s) => { if (s.goal) s.goal.brainNoteLogged = true; });
+      store.log({ kind: "note", text: b.why });
+    }
+    const model = brainModel(dNow, b);
     // Fresh lessons and this project's own rules go into the first message of
-    // every goal (advice only — her core rules above never change). A nudge
-    // resume carries its own short message instead of the generic one.
-    const prompt = resume
-      ? nudge || "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal."
-      : `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + "\n" + milkPrompt(readMilk(readSettings())) + rulesBlock(readProjectRules(g.dir));
+    // every goal (advice only — her core rules above never change). agy has no
+    // resume, so an already-started goal always gets the full first prompt plus
+    // the interrupted note (a nudge's own text rides along when there is one);
+    // a brain switch back to Claude can't --resume the other CLI's session, so
+    // it starts a fresh one the same way. A Claude nudge resume carries its own
+    // short message instead of the generic one.
+    const firstPrompt = `Goal from the owner: ${g.text}\nProject folder: ${g.dir}` + lessonsBlock(readLessons(store.dir)) + "\n" + milkPrompt(readMilk(readSettings())) + rulesBlock(readProjectRules(g.dir));
+    const interrupted = "You were interrupted (a restart, a pause for your limits, or an error). Run `C status` and `C jobs` to see where things stand, then carry on with the goal.";
+    let session = g.session, resumeRun = !!g.started, prompt;
+    if (b.id === "antigravity") {
+      prompt = g.started ? `${firstPrompt}\n\n${interrupted}${nudge ? `\n\n${nudge}` : ""}` : firstPrompt;
+      resumeRun = false;
+    } else if (g.brainId && g.brainId !== b.id) {
+      session = randomUUID();
+      prompt = `${firstPrompt}\n\n${interrupted}`;
+      resumeRun = false;
+    } else if (g.started) {
+      prompt = nudge || "You were interrupted (a restart, a pause for your limits, or an error). Run `C jobs` and `C wait` to see where things stand, then carry on with the goal.";
+    } else {
+      prompt = firstPrompt;
+    }
     nudge = null;
-    const args = ["-p", "--model", g.model || "opus", "--dangerously-skip-permissions", "--output-format", "text", "--append-system-prompt", ROLE(g.dir),
-      ...(resume ? ["--resume", g.session] : ["--session-id", g.session]), prompt];
+    const { cmd, args } = brainCommand({ brain: b.id, model, role: ROLE(g.dir), prompt, session, resume: resumeRun });
     const reportPath = path.join(store.dir, `report-${g.id}.txt`);
     const fd = fs.openSync(reportPath, "w");
-    const brain = spawn("claude", args, { cwd: g.dir, env: ENV, detached: true, stdio: ["ignore", fd, fd] });
-    store.update((s) => { s.goal.started = true; s.goal.brainPid = brain.pid; });
+    const brain = spawn(cmd, args, { cwd: g.dir, env: ENV, detached: true, stdio: ["ignore", fd, fd] });
+    store.update((s) => { s.goal.started = true; s.goal.brainPid = brain.pid; s.goal.brainId = b.id; s.goal.brainModel = model; if (session !== s.goal.session) s.goal.session = session; });
+    // Every start for planning leaves a route line: the step, the model she
+    // actually runs on, and the router's reason (constance-route.mjs).
+    try {
+      store.log({ kind: "route", step: "plan", model, text: routeModel("plan", { milk: readMilk(readSettings()) }).why });
+      logRoute(path.join(store.dir, "routes.jsonl"), { step: "plan", model, job: g.id });
+    } catch {}
     let pausedByUs = false;
     const watch = setInterval(() => {
       const st = store.read().goal;
       if (!st || st.status === "stopped") { killGroup(brain.pid); return; }
       try { releaseHeld(); fillSlots(); heartbeat(); } catch {}
-      if (pace(claudeOf(readData())).mode === "stop") { pausedByUs = true; killGroup(brain.pid); }
+      if (paceNow(readData()).mode === "stop") { pausedByUs = true; killGroup(brain.pid); }
     }, 30e3);
     const code = await new Promise((r) => brain.on("exit", (c) => r(c)));
     clearInterval(watch);
@@ -1393,7 +1730,7 @@ async function drive() {
         const n = (s.goal.nudges || 0) + 1;
         store.update((x) => { if (x.goal) x.goal.nudges = n; });
         nudge = `The goal is not finished: ${open}. Keep going: delegate or wait, don't ask.`;
-        store.log({ kind: "note", text: `Claude exited cleanly but the goal is unfinished (${open}); resumed her, nudge ${n} of 3.` });
+        store.log({ kind: "note", text: `${brainName(b)} exited cleanly but the goal is unfinished (${open}); resumed her, nudge ${n} of 3.` });
         continue;
       }
       store.update((s) => { s.goal.status = "done"; s.goal.finishedAt = Date.now(); s.goal.report = report.slice(-4000); });
@@ -1401,14 +1738,18 @@ async function drive() {
       if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
     }
-    // Claude said it hit its limit ("You've hit your 5-hour limit · resets 5:50pm (America/New_York)"):
-    // a pause until the time it stated, never a failure. pace() reads wall.json and stops her until then.
-    const wall = limitWall(report);
+    // Her brain said it hit its limit (Claude's "You've hit your 5-hour limit · resets 5:50pm
+    // (America/New_York)", or agy's quota text): a pause until the time it stated, never a
+    // failure. pace() reads wall.json and stops her until then.
+    const wall = brainWall(b.id, report, Date.now(), brainOf(freshData()).limits);
     if (wall && (code !== 0 || report.length < 400)) {
       writeWall(store.dir, wall);
-      const p2 = pace(claudeOf(readData()));
-      store.update((s) => { if (s.goal) { s.goal.status = "paused"; s.goal.pauseReason = p2.reason; } });
-      store.log({ kind: "paused", text: p2.reason });
+      // The pause reason must name the wall even when its stated reset already
+      // passed (the readings then show "on pace"): resumePlan only follows
+      // wall.json for a pause whose reason starts "<Brain> said it hit its limit".
+      const wallReason = `${brainName(b)} said it hit its limit; paused until ${clock(wall.until)}.`;
+      store.update((s) => { if (s.goal) { s.goal.status = "paused"; s.goal.pauseReason = wallReason; } });
+      store.log({ kind: "paused", text: wallReason });
       pausedLogged = true;
       continue;
     }
@@ -1416,19 +1757,22 @@ async function drive() {
     // and restart the goal fresh — a rejected run leaves no session, so --resume can't be used. This
     // doesn't count as a failure.
     const cur = store.read().goal;
-    const next = cur && cur.status === "running" ? nextModel(cur.model || "opus", report) : null;
+    const next = cur && cur.status === "running" && b.id === "claude" ? nextModel(cur.model || "opus", report) : null;
     if (next) {
       store.update((s) => { if (s.goal) { s.goal.model = next; s.goal.session = randomUUID(); s.goal.started = false; } });
       store.log({ kind: "model", text: `${modelName(cur.model || "opus")} isn't allowed on this Claude plan; Constance switched to ${modelName(next)} and started the goal over.` });
       continue;
     }
     if (++failures >= 3) {
-      store.update((s) => { s.goal.status = "failed"; s.goal.finishedAt = Date.now(); });
-      store.log({ kind: "failed", text: `Claude exited with code ${code} three times. ${report.slice(-400)}` });
-      afterGoal();
+      const last = report.split("\n").map((l) => l.trim()).filter(Boolean).at(-1) || "";
+      const reason = `${brainName(b)} exited with code ${code} three times: ${last ? last.slice(0, 200) : "no output"}`;
+      store.update((s) => { s.goal.status = "failed"; s.goal.finishedAt = Date.now(); s.goal.failReason = reason; });
+      store.log({ kind: "failed", text: reason });
+      // A failed goal is a note, not a stop: afterGoal() starts the next queued goal.
+      if (afterGoal()) { pausedLogged = false; failures = 0; continue; }
       return;
     }
-    store.log({ kind: "note", text: `Claude exited with code ${code}; retrying in a minute.` });
+    store.log({ kind: "note", text: `${brainName(b)} exited with code ${code}; retrying in a minute.` });
     await sleep(60e3);
   }
 }
@@ -1450,7 +1794,7 @@ function stopAll() {
   if (halted.size) keepTokens(true);
   for (const j of s.jobs) if (j.status === "stopped") { if (halted.has(j.id)) guardFinished(j); dropJobTmp(j); if (j.worktree) dropWorktree(j.dir, j.worktree, j.branch, { deleteBranch: true }); }
   const g = s.goal;
-  if (g && alive(g.brainPid, "claude")) killGroup(g.brainPid);
+  if (g && alive(g.brainPid, brainCli(g.brainId))) killGroup(g.brainPid);
   if (g && alive(g.driverPid, "constance.mjs")) killGroup(g.driverPid);
   if (isWatcher(watcherPid())) killGroup(watcherPid());
   store.log({ kind: "stopped", text: "Stop pressed: Constance and every job halted." });
@@ -1536,16 +1880,100 @@ function leverageView(s, tokens) {
   return leverage({ tokens: tokens ?? null, spentPct: sessionSpent(readSamples(leverageFile(), s.goal?.startedAt)) });
 }
 
+// wall.json as stored, expiry ignored: resumePlan needs the stated reset time
+// even in the minute after it (readWall returns null there).
+function wallJson() {
+  try { return JSON.parse(fs.readFileSync(wallFile(store.dir), "utf8")); } catch { return null; }
+}
+
+// The progress ping's inputs, shared by status (the Now line) and the driver
+// heartbeat (the throttled notify): Devin's share of the goal's tokens, her
+// Session window now vs at goal start, and how many copies are running.
+// null while no goal is active — there is no pace to report then.
+function progressArgs(s, p, tv) {
+  const g = s.goal;
+  if (!g || !["running", "paused"].includes(g.status)) return null;
+  const sess = (p?.windows || []).find((w) => w.title === "Session");
+  const usedPct = Number.isFinite(sess?.used) ? sess.used * 100 : NaN;
+  const spent = sessionSpent(readSamples(leverageFile(), g.startedAt));
+  const devin = (tv.goal?.byAgent || []).find((a) => a.agent === "devin");
+  return { devinTokens: devin?.tokens ?? null, sessionUsedPct: usedPct, sessionStartPct: usedPct - spent,
+    copiesRunning: s.jobs.filter((j) => j.copy && (j.status === "running" || j.status === "waiting")).length };
+}
+
+// ---------------------------------------------------------------- ratio report
+// End-of-goal ratio report (constance-ratio-report.mjs): free-worker tokens per
+// 1% of her session, Opus routing by step, average copies and idle
+// slot-minutes. The driver heartbeat drops one copies-running sample into her
+// state dir (ratio-samples.jsonl); afterGoal turns the goal's jobs, its 'route'
+// log lines and those samples into the report, appends it to history.jsonl
+// and keeps its lesson lines.
+const ratioSamplesFile = () => path.join(store.dir, "ratio-samples.jsonl");
+const ROUTE_STEP = { plan: "planning", spec: "specs", review: "reviews", "review-failed": "reviews", fix: "fixes", conflict: "fixes" };
+
+function sampleCopiesRunning() {
+  const s = store.read();
+  const copiesRunning = s.jobs.filter((j) => j.copy && (j.status === "running" || j.status === "waiting")).length;
+  const f = ratioSamplesFile();
+  fs.appendFileSync(f, JSON.stringify({ at: Date.now(), copiesRunning }) + "\n");
+  const lines = fs.readFileSync(f, "utf8").split("\n").filter(Boolean);
+  if (lines.length > 4000) writeAtomic(f, lines.slice(-4000).join("\n") + "\n");
+}
+
+// Her Session window's used share right now, in percent (null when unreadable).
+function sessionPctNow() {
+  const w = (paceNow(readData())?.windows || []).find((x) => x.title === "Session");
+  return Number.isFinite(w?.used) ? w.used * 100 : null;
+}
+
+function ratioReportFor(g) {
+  const s = store.read();
+  const jobs = s.jobs.filter((j) => j.goal === g.id).map((j) => ({
+    ...j, verdict: j.status === "accepted" || j.status === "merged" ? "accept" : j.status === "sent back" ? "send-back" : "review",
+  }));
+  const routes = store.readLog(5000)
+    .filter((l) => l.kind === "route" && l.model && Number(l.at) >= (g.startedAt || 0))
+    .map((l) => ({ step: ROUTE_STEP[l.step] || l.step, model: l.model }));
+  const samples = readSamples(ratioSamplesFile(), g.startedAt);
+  const end = sessionPctNow();
+  const spent = sessionSpent(readSamples(leverageFile(), g.startedAt));
+  const start = end !== null ? Math.max(0, end - spent) : null;
+  const slots = Object.keys(PUBLISHED_MAX).reduce((n, a) => n + limitOf(a), 0);
+  const report = ratioReport({ goal: g, jobs, routes, samples, sessionStartPct: start, sessionEndPct: end, slots });
+  for (const l of saveReport(store.dir, report)) addLesson(l, store.dir);
+}
+
+// status.milk: the slider's policy plus the step it sits on (name, one-line
+// description) and the five steps themselves, so the panel can caption the
+// knob without duplicating bin/constance-milk.mjs. Additive fields only.
+function milkStatus() {
+  const v = readMilk(readSettings());
+  const step = milkStep(v);
+  return { ...milkPolicy(v), stepName: step.name, stepDescription: step.description,
+    steps: MILK_STEPS.map((s) => ({ name: s.name, value: s.value, description: s.description })) };
+}
+
 function statusPayload() {
   sweep();   // the panel's 3 s poll is what notices done files and starts self-merges
   const records = keepTokens();
   fillSlots();
   const s = store.read(), d = readData();
-  const p = pace(claudeOf(d));
+  const p = paceNow(d);
   sampleLeverage(p);
   const tv = tokensView(s, d, records);
-  return { goal: s.goal, board: boardView(s, d, records), tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p,
-    leverage: leverageView(s, tv.goal?.total ?? null), milk: milkPolicy(readMilk(readSettings())), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
+  const pargs = progressArgs(s, p, tv);
+  const board = boardView(s, d, records);
+  const pline = pargs ? progressLine({ ...pargs, target: TARGET_PER_PCT }) : "";
+  if (pline) board.now += ` · ${pline}`;
+  lastProgressArgs = pargs;
+  // The brain picker the panel shows: the live pick (wanted vs ok), the model it
+  // would run on (agy's top model name, else her Claude model) and its milk label.
+  const b = brainNow();
+  const brain = { id: b.id, name: b.name, wanted: b.wanted, ok: b.ok, why: b.why || "",
+    model: b.id === "antigravity" ? (brainTop(d, b)?.name || "") : modelName(s.goal?.model || "opus"),
+    milkLabel: milkLabel(b.id) };
+  return { goal: s.goal, board, progress: { line: pline }, tokens: tv, jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j), agents: judged(d), pace: p, brain,
+    leverage: leverageView(s, tv.goal?.total ?? null), milk: milkStatus(), practice: practiceMode(), guards: s.guards || {}, copies: copiesView(s),
     queue: s.goal ? queueView(s.goal.dir, store.dir) : [], signals: recentSignals(store.dir, 10), log: store.readLog(150) };
 }
 
@@ -1553,6 +1981,8 @@ function status() { out(statusPayload()); }
 
 const cmd = process.argv[2];
 if (process.argv[1] === SELF) {
+  // A closed pipe (e.g. `status | head -1`) must end quietly, not with an 'write EPIPE' stack trace.
+  for (const s of [process.stdout, process.stderr]) s.on("error", (e) => { if (e?.code === "EPIPE") process.exit(0); throw e; });
   if (cmd === "start") startGoal();
   else if (cmd === "drive") await drive();
   else if (cmd === "status") status();
@@ -1562,15 +1992,17 @@ if (process.argv[1] === SELF) {
   else if (cmd === "agents") {
     const d = freshData(), guards = store.read().guards || {}, card = readScorecard(store.dir), rows = scoreRows(card);
     const all = judged(d), order = rankAgents(all.filter((a) => a.available).map((a) => a.id), card);
-    // Available agents first, best scorecard first; each with its record and a size hint.
-    const sorted = [...order.map((id) => all.find((a) => a.id === id)), ...all.filter((a) => !a.available)];
+    // Available agents first, best scorecard first — except Devin leads while
+    // it is available and kilo sits right behind it (preferOrder); each with
+    // its record and a size hint.
+    const sorted = preferOrder([...order.map((id) => all.find((a) => a.id === id)), ...all.filter((a) => !a.available)]);
     out(sorted.map((a) => {
       const row = rows.find((r) => r.agent === a.id), h = sizeHint(row);
       const sc = a.available ? `  [${row ? scoreLine(row) : "no reviewed jobs yet"}; ${h.note}: up to ${h.maxFiles} file${h.maxFiles === 1 ? "" : "s"} a job]` : "";
-      return `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}${sc}`;
+      return `${a.available ? "AVAILABLE  " : "skip       "}${a.id.padEnd(12)} ${a.reason}${guards[a.id]?.strikes ? `  (guardrail strikes: ${guards[a.id].strikes} — smaller tasks only)` : ""}${sc}${a.id === "kilo" ? `  (${KILO_NOTE})` : ""}`;
     }).join("\n"));
   }
-  else if (cmd === "pace") out(pace(claudeOf(freshData())));
+  else if (cmd === "pace") out(paceNow(freshData()));
   else if (cmd === "jobs") { sweep(); releaseHeld(); const s = store.read(); out({ goal: s.goal && { text: s.goal.text, dir: s.goal.dir, status: s.goal.status }, queue: s.goal ? queueView(s.goal.dir, store.dir) : [], copies: copiesView(s), jobs: s.jobs.map(({ prompt, guardBefore, ...j }) => j) }); }
   else if (cmd === "queue") queueCmd();
   else if (cmd === "backlog") backlogCmd();
@@ -1579,6 +2011,22 @@ if (process.argv[1] === SELF) {
   else if (cmd === "signals") out(recentSignals(store.dir, 20));
   // The whole log as plain text (the panel's Copy all): every entry, practice prompts in full.
   else if (cmd === "log") { const names = Object.fromEntries((readData().agents || []).map((a) => [a.id, a.name || a.id])); process.stdout.write(logText(store.readLog(Infinity), (id) => names[id] || id)); }
+  // `summary`: the panel's "Copy summary" — a plain-text board snapshot
+  // (constance-summary.mjs), capped at 80 lines.
+  else if (cmd === "summary") {
+    const s = store.read(), d = readData();
+    const records = keepTokens();
+    const tv = tokensView(s, d, records);
+    out(buildSummary({
+      current: s.goal || null,
+      items: checklist(s.goal, asAccepted(s.jobs)).items,
+      history: readHistory(),
+      queue: readGoalQueue(store.dir).goals,
+      jobs: s.jobs,
+      leverage: leverageView(s, tv.goal?.total ?? null),
+      log: store.readLog(Infinity),
+    }));
+  }
   else if (cmd === "watch") await watch();
   // Internal: the detached half of a self-merge (spawned by maybeSelfMerge).
   else if (cmd === "selfmerge") runSelfMerge(Number(process.argv[3]));
@@ -1601,10 +2049,19 @@ if (process.argv[1] === SELF) {
   else if (cmd === "needs-owner") {
     const text = process.argv.slice(3).join(" ").trim();
     if (!text) fail("Usage: needs-owner TEXT");
-    store.update((s) => { if (s.goal) s.goal.needsOwner = text; });
+    logAsk(path.join(store.dir, "asks.jsonl"), { reason: text });
+    store.update((s) => { if (s.goal && typeof s.goal === "object") s.goal.needsOwner = text; });
     store.log({ kind: "needs-you", text });
     out("noted: the goal queue waits for the owner after this goal");
   }
+  else if (cmd === "route") {
+    const step = process.argv[3];
+    if (!step) fail("Usage: route STEP");
+    out(routeModel(step, { milk: readMilk(readSettings()) }));
+  }
+  else if (cmd === "batchreview") batchReviewCmd();
+  else if (cmd === "split") splitCmd();
+  else if (cmd === "spec") specCmd();
   else if (cmd === "recover") recover();
-  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|watch|selfmerge|stop|recover");
+  else fail("Usage: constance.mjs start|status|remote|agents|scorecard|pace|jobs|job|delegate|wait|review|reviews|check|needs-owner|note|lesson|queue|backlog|spare|goals|signals|log|summary|watch|selfmerge|route|batchreview|split|spec|stop|recover");
 }

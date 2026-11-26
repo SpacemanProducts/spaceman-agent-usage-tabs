@@ -6,8 +6,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// Devin's published concurrent session limit. Agents not listed stay single-job.
-export const PUBLISHED_MAX = { devin: 10 };
+// Published concurrent limits: Devin's is 10, Kilo Code's is 2 (each gets its
+// own worktree copies). Agents not listed stay single-job.
+export const PUBLISHED_MAX = { devin: 10, kilo: 2 };
 
 // The owner can lower it (settings.json `constanceMaxCopies`, 1..the published max).
 export function copyLimit(id, settings = {}) {
@@ -48,15 +49,23 @@ export function readMachine(proc = process.env.CONSTANCE_PROC || "/proc", cpus =
 }
 
 const gib = (b) => (b / 1024 ** 3).toFixed(1);
+const numeric = (v) => typeof v === "number" && !Number.isNaN(v);
 
 // { ok, reason }. `running` = copies of this agent already started;
-// `lastStartAt` = when the newest copy started (0 = never). An unreadable
-// machine allows the first copy and holds the rest.
+// `lastStartAt` = when the newest copy started (0 = never): starts are spaced
+// by the ramp gap. The first copy only needs readable, healthy numbers; an
+// unreadable machine allows the first copy and holds the rest. A malformed
+// machine object counts as unreadable, and a malformed ramp fails closed (no
+// copy) — a NaN need must never read as room.
 export function roomForCopy(machine, { running = 0, lastStartAt = 0, now = Date.now(), ramp = RAMP, gapMs = rampGap(process.env, ramp) } = {}) {
   const since = now - (Number(lastStartAt) || 0);
   if (lastStartAt > 0 && since < gapMs) return { ok: false, reason: `spacing copy starts: the last one started ${Math.max(0, Math.round(since / 1000))} s ago (next after ${Math.round(gapMs / 1000)} s)` };
-  if (!machine) return running === 0 ? { ok: true, reason: "" } : { ok: false, reason: "can't read the machine's load and memory, so only one copy runs" };
-  const memNeed = Math.max(ramp.minFreeBytes, ramp.minFreeShare * machine.memTotal);
+  const unreadable = running === 0
+    ? { ok: true, reason: "" }
+    : { ok: false, reason: "can't read the machine's load and memory, so only one copy runs" };
+  if (!machine || !numeric(machine.memTotal) || !numeric(machine.memAvailable)) return unreadable;
+  const memNeed = Math.max(ramp?.minFreeBytes, ramp?.minFreeShare * machine.memTotal);
+  if (!numeric(memNeed)) return { ok: false, reason: "can't read the memory floor, so no copy starts" };
   if (machine.memAvailable < memNeed) return { ok: false, reason: `low memory: ${gib(machine.memAvailable)} GiB free (starts at ${gib(memNeed)} GiB)` };
   return { ok: true, reason: "" };
 }

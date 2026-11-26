@@ -40,6 +40,8 @@ export function openStore(dir = stateDir()) {
   };
   const log = (entry) => fs.appendFileSync(logFile, JSON.stringify({ at: Date.now(), ...entry }) + "\n");
   const readLog = (n = 200) => {
+    if (typeof n !== "number") n = 200;
+    if (n <= 0) return [];
     try { return fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).slice(-n).map((l) => JSON.parse(l)); }
     catch { return []; }
   };

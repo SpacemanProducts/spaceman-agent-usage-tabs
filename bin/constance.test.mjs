@@ -80,8 +80,9 @@ before=$(git rev-parse HEAD)
 echo "devin $name" > "$name"; git add "$name"; git commit -qm "devin: $name" || true
 if grep -q "sneaky copy" <<<"$p"; then echo cover > cover.txt; git add cover.txt; git commit -qm "devin: cover outside its list" || true; fi
 after=$(git rev-parse HEAD); c=""; [[ "$after" != "$before" ]] && c="$after"
-# The "selfmerge" marker makes it report its tests passed, so the job can self-merge.
-t=""; grep -q selfmerge <<<"$p" && t=', "tests": "pass"'
+# The "selfmerge" marker makes it report its tests passed, so the job can self-merge;
+# "failtests" reports them failed, so the job is a candidate for an auto-retry.
+t=""; grep -q selfmerge <<<"$p" && t=', "tests": "pass"'; grep -q failtests <<<"$p" && t=', "tests": "fail"'
 echo "{\\"summary\\": \\"added \${name%.*} in $here\\", \\"commit\\": \\"$c\\", \\"files\\": [\\"$name\\"]$t}" > "$f"
 `, { mode: 0o755 });
 // Fake Constance: delegate (one read-only investigation, then the fix), wait, review, report.
@@ -795,7 +796,7 @@ echo "Report: done."
   assert.ok(await until(() => status().jobs.some((j) => j.status === "running" && j.title === "building q1")), "the tagged job runs");
   {
     const b = status().board;
-    assert.match(b.now, /^Grok is on building q1\. 2 goals queued\.$/, b.now);
+    assert.match(b.now, /^Grok is on building q1\. 2 goals queued\. · Devin /, b.now);
     const card = b.cards.find((c) => c.title === "building q1");
     assert.equal(card.status, "running"); assert.deepEqual(card.files, ["q1.txt"]); assert.deepEqual(card.items, [1]);
     assert.equal(b.checklist.line, "0 of 1 done");
@@ -947,6 +948,15 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
   assert.ok(!gj.guardViolation, "the shared-folder job stayed inside its list");
   assert.equal(gj.status, "accepted");
   assert.equal(dj.status, "sent back");
+  // The guard violation failed the run on its own, so it was auto-retried
+  // before review: the original is sent back flagged autoRetried, the redo is
+  // a fresh copy linked with --again and flagged so it can't retry again.
+  const retry = cg.jobs.find((j) => j.agent === "devin" && j.files.includes("d1.txt") && j.id !== dj.id);
+  assert.ok(retry, "the failed copy was retried: " + JSON.stringify(cg.jobs.map((j) => [j.id, j.agent, j.status])));
+  assert.equal(dj.autoRetried, true); assert.equal(dj.retryJob, retry.id);
+  assert.equal(retry.againOf, dj.id); assert.equal(retry.autoRetry, true); assert.ok(retry.copy);
+  assert.equal(retry.status, "sent back", "she still reviewed and sent the retry back");
+  assert.ok(cg.log.some((l) => l.kind === "retry" && l.job === dj.id && l.text.includes(String(retry.id))), "the retry is logged");
   assert.equal(fs.readFileSync(path.join(repo, "cover.txt"), "utf8"), "x\n", "only the grok job's cover.txt is in the repo");
 }
 // "Never stop to ask": an exit-0 run with open checklist items is not a finished
@@ -1057,7 +1067,7 @@ $C delegate --agent devin --files gv1.txt --task "sneaky copy selfmerge" >> "${r
 touch "${root}/go"
 $C wait --timeout 60 > "${root}/gv-wait.json"
 $C jobs > "${root}/gv-jobs.json"
-id=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.files.includes("gv1.txt")).id)' "${root}/gv-jobs.json")
+id=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.files.includes("gv1.txt")&&j.status==="finished").id)' "${root}/gv-jobs.json")
 $C review "$id" accept --note "ok" >> "${root}/gv.out" 2>&1
 echo "GV report: done."
 `, { mode: 0o755 });
@@ -1066,12 +1076,15 @@ assert.equal(run("start", "--dir", repo, "--goal", "selfmerge guard").status, 0)
 assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the selfmerge guard goal finishes: " + JSON.stringify(status().goal));
 {
   const mid = JSON.parse(fs.readFileSync(path.join(root, "gv-jobs.json"), "utf8"));
-  const gj = mid.jobs.find((j) => j.files.includes("gv1.txt"));
+  const gj = mid.jobs.find((j) => j.files.includes("gv1.txt") && j.status === "finished");
   assert.equal(gj.status, "finished", "a guard violation never self-merges: " + gj.status);
   const gv = status();
   const gj2 = gv.jobs.find((j) => j.id === gj.id);
   assert.ok(gj2.guardViolation?.some((v) => v.includes("cover.txt")), "the violation is flagged: " + JSON.stringify(gj2.guardViolation));
   assert.equal(gj2.status, "accepted", "the normal review path still merges it");
+  assert.equal(gj2.againOf != null, true, "the reviewed job is the auto-retry redo");
+  const gjOrig = gv.jobs.find((j) => j.files.includes("gv1.txt") && j.id !== gj.id);
+  assert.equal(gjOrig?.status, "sent back"); assert.equal(gjOrig?.autoRetried, true, "the guard-violating original was auto-retried");
   assert.ok(!gv.log.some((l) => l.kind === "merge" && /self-merged/.test(l.text) && l.job === gj.id), "no self-merge for it");
   const pend = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "reviews.json"), "utf8"));
   assert.ok(!pend.pending.some((p) => p.job === gj.id) && !pend.reviewed.some((p) => p.job === gj.id), "it never entered the review list");
@@ -1081,27 +1094,34 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 90
 // slot is free — no review needed. sf1 self-merges; sf2 and sf3 are handed to
 // Devin 2 and Devin 3 while sf1 still waits for its background review.
 fs.rmSync(path.join(root, "go"), { force: true });
+const jobsJson = path.join(tabs, "constance", "jobs.json");
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
 $C delegate --agent devin --files sf1.txt --task "add sf1 selfmerge" >> "${root}/sf.out" 2>&1
 $C queue --task "add sf2" --files sf2.txt --agent devin >> "${root}/sf.out" 2>&1
 $C queue --task "add sf3" --files sf3.txt --agent devin >> "${root}/sf.out" 2>&1
 touch "${root}/go"
-$C wait --timeout 60 > "${root}/sf-wait1.json"
+# sf1's self-merge runs in a detached process; wait for the merged state itself
+# (a fixed sleep races it under load), then snapshot while its review pends.
+for i in $(seq 1 240); do
+  node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const j=s.jobs.find(j=>j.files&&j.files.includes("sf1.txt"));process.exit(j&&j.status==="merged"?0:1)' "${jobsJson}" 2>/dev/null && break
+  sleep 0.5
+done
 $C jobs > "${root}/sf-jobs-mid.json"
+$C wait --timeout 120 > "${root}/sf-wait1.json"
 id1=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait1.json")
 $C review "$id1" accept --note "ok" >> "${root}/sf.out" 2>&1
-$C wait --timeout 60 > "${root}/sf-wait2.json"
+$C wait --timeout 120 > "${root}/sf-wait2.json"
 id2=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait2.json")
 $C review "$id2" accept --note "ok" >> "${root}/sf.out" 2>&1
-$C wait --timeout 60 > "${root}/sf-wait3.json"
+$C wait --timeout 120 > "${root}/sf-wait3.json"
 id3=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/sf-wait3.json")
 $C review "$id3" accept --note "ok" >> "${root}/sf.out" 2>&1
 echo "SF report: done."
 `, { mode: 0o755 });
 writeData();
 assert.equal(run("start", "--dir", repo, "--goal", "slot fill goal").status, 0);
-assert.ok(await until(() => status().goal && status().goal.status === "done", 120000), "the slot fill goal finishes: " + JSON.stringify(status().goal));
+assert.ok(await until(() => status().goal && status().goal.status === "done", 180000), "the slot fill goal finishes: " + JSON.stringify(status().goal));
 {
   const mid = JSON.parse(fs.readFileSync(path.join(root, "sf-jobs-mid.json"), "utf8"));
   const sf1 = mid.jobs.find((j) => j.files.includes("sf1.txt"));
@@ -1121,7 +1141,6 @@ assert.ok(await until(() => status().goal && status().goal.status === "done", 12
 // sweeps) too, wait never hands the job out mid-merge, and it ends up merged
 // for her background review.
 fs.rmSync(path.join(root, "go"), { force: true });
-const jobsJson = path.join(tabs, "constance", "jobs.json");
 fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
 C="node ${CLI}"
 $C delegate --agent devin --files smx.txt --task "add smx selfmerge" >> "${root}/smx.out" 2>&1
@@ -1192,17 +1211,223 @@ delete env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS;
   const rtext = fs.readFileSync(rfile, "utf8");
   assert.match(rtext, /^Goal: /m);
   for (const p of [root, repo, tabs, fakeHome, "/home/", "/var/tmp"]) assert.ok(!rtext.includes(p), `no "${p}" in the remote status`);
-  // Every recorded goal carries the leverage object status computed.
-  const hist = fs.readFileSync(path.join(tabs, "constance", "history.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  // Every recorded goal carries the leverage object status computed. The
+  // end-of-goal ratio report shares history.jsonl under kind "ratio" — it is
+  // not a goal record, so it is skipped here and checked separately.
+  const histAll = fs.readFileSync(path.join(tabs, "constance", "history.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const hist = histAll.filter((h) => !h.kind);
   assert.ok(hist.length > 0);
   for (const h of hist) assert.ok(h.leverage && typeof h.leverage.label === "string" && Number.isFinite(h.leverage.spentPct),
     `history line for "${h.text}" has leverage: ` + JSON.stringify(h.leverage));
+  const ratios = histAll.filter((h) => h.kind === "ratio");
+  assert.ok(ratios.length > 0, "end-of-goal ratio reports were written");
+  const ratioGoals = new Set(ratios.map((r) => r.goal));
+  for (const h of hist.filter((x) => x.status !== "stopped"))
+    assert.ok(ratioGoals.has(h.id), `goal "${h.text}" (${h.status}) left a ratio report`);
+  assert.ok(ratios.every((r) => r.devinTokens === null || Number.isFinite(r.devinTokens)), "ratio reports parse: " + JSON.stringify(ratios[0]));
   // Her first prompt carried the milk lines (after her lessons, before the rules).
   const ga = fs.readFileSync(path.join(root, "claude-args-guard"), "utf8");
   assert.match(ga, /Milk Opus is at 25 \(milk\)/, "the milk line is in her goal prompt");
   assert.match(ga, /Sandbox and guardrails stay on at every setting\./);
   assert.ok(ga.indexOf("Lessons from your earlier goals") < ga.indexOf("Milk Opus is at"), "milk comes after her lessons");
   assert.ok(ga.indexOf("Milk Opus is at") < ga.indexOf("Rules for this project"), "milk comes before the project rules");
+}
+
+// Wiring: the repo brief heads every worker prompt (and is cached in her state
+// dir), status carries the progress line on the Now row and as status.progress,
+// the driver's heartbeat pings it through CONSTANCE_NOTIFY_CMD, needs-owner
+// lands in the ask ledger, `route` reports the model pick, and a goal paused by
+// Claude's own wall resumes by itself after the stated reset plus the grace.
+fs.writeFileSync(path.join(bin, "prog-notify"), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${root}/prog-notify.txt"\n`, { mode: 0o755 });
+fs.rmSync(path.join(tabs, "constance", "progress.json"), { force: true });
+env.CONSTANCE_NOTIFY_CMD = path.join(bin, "prog-notify");
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent grok --files br.txt --task "add br" >> "${root}/wire.out" 2>&1
+touch "${root}/go"
+sleep 40
+$C wait --timeout 30 > "${root}/wire-wait.json"
+id=$(grep -o '"id": [0-9]*' "${root}/wire-wait.json" | head -1 | grep -o '[0-9]*')
+$C review "$id" accept --note "ok" >> "${root}/wire.out" 2>&1
+$C route plan >> "${root}/wire.out" 2>&1
+echo "Wire report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "wire goal").status, 0);
+assert.ok(await until(() => status().jobs.some((j) => j.status === "running" && j.goal === status().goal?.id), 30000), "the wire job runs");
+{
+  const ws = status();
+  assert.match(ws.progress.line, /^Devin can't tell · no session spent yet · 0 copies running · session \d+%$/, "progress line: " + ws.progress.line);
+  assert.ok(ws.board.now.endsWith(" · " + ws.progress.line), "the Now line ends with the progress line: " + ws.board.now);
+  const wj = ws.jobs.find((j) => j.status === "running");
+  const pj = JSON.parse(run("job", String(wj.id)).stdout);
+  assert.ok(pj.prompt.startsWith("Repo brief:\n"), "the brief heads the worker prompt");
+  assert.match(pj.prompt, /Layout: /);
+  assert.equal(run("needs-owner", "probe ask: is the brief helping?").status, 0);
+  assert.ok(await until(() => { try { return fs.readFileSync(path.join(tabs, "constance", "asks.jsonl"), "utf8").includes("probe ask"); } catch { return false; } }), "needs-owner hit the ask ledger");
+}
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the wire goal finishes: " + JSON.stringify(status().goal));
+delete env.CONSTANCE_NOTIFY_CMD;
+{
+  assert.ok(fs.readdirSync(path.join(tabs, "constance", "briefs")).some((f) => f.endsWith(".json")), "the brief is cached in her state dir");
+  assert.ok(await until(() => { try { return /Devin can't tell · no session spent yet · 0 copies running · session \d+%/.test(fs.readFileSync(path.join(root, "prog-notify.txt"), "utf8")); } catch { return false; } }, 30000),
+    "the heartbeat's tick sent the progress line through CONSTANCE_NOTIFY_CMD");
+  assert.match(fs.readFileSync(path.join(root, "prog-notify.txt"), "utf8"), /suppress-sound:true/);
+  const asks = fs.readFileSync(path.join(tabs, "constance", "asks.jsonl"), "utf8");
+  assert.ok(asks.includes("probe ask") && asks.includes("Pick a color for the button"), "every needs-owner is in the ledger");
+  const routes = status().log.filter((l) => l.kind === "route");
+  assert.ok(routes.length >= 1 && routes.every((l) => l.step === "plan" && l.model), "route lines in the log: " + JSON.stringify(routes.slice(0, 3)));
+  assert.ok(fs.existsSync(path.join(tabs, "constance", "routes.jsonl")), "the routes tally file exists");
+  const rp = JSON.parse(run("route", "plan").stdout);
+  assert.equal(rp.model, "opus"); assert.ok(rp.why.length > 0);
+  assert.equal(JSON.parse(run("route", "bogus").stdout).model, "opus", "an unknown step routes to Opus");
+  fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false, constanceMilk: 80 }));
+  assert.equal(JSON.parse(run("route", "fix").stdout).model, "opus", "milk 80 routes fix to Opus");
+  fs.writeFileSync(path.join(tabs, "settings.json"), JSON.stringify({ constancePractice: false }));
+  assert.match(run("route").stderr, /Usage: route/);
+  assert.equal(status().progress.line, "", "no progress line once no goal is active");
+}
+
+// Claude's own limit wall: the exit writes wall.json, the goal pauses, and the
+// driver resumes her once the stated reset plus the 60 s grace has passed —
+// without asking the owner and without waiting on a fresh reading. The stated
+// reset is minute-precision, so it must be minutes ahead: +3 min is the
+// smallest offset whose truncated minute is always more than 2 min out.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+echo run >> "${root}/wall-resume-runs"
+if [[ "$*" == *"--session-id"* ]]; then
+  echo "You've hit your 5-hour limit · resets $(date -u -d '+3 minutes' '+%-I:%M%p') (UTC)"
+  exit 1
+fi
+node ${CLI} check 1 --note "done after the reset" >> "${root}/wall-resume.out" 2>&1
+echo "Wall report: resumed after the reset."
+exit 0
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "wall resume goal").status, 0);
+assert.ok(await until(() => { const g = status().goal; return g && g.status === "paused" && /hit its limit/.test(g.pauseReason || ""); }, 30000), "the wall exit pauses the goal: " + JSON.stringify(status().goal));
+assert.ok(await until(() => status().goal && status().goal.status === "done", 360000), "the wall-paused goal resumes by itself: " + JSON.stringify(status().goal));
+{
+  assert.equal(fs.readFileSync(path.join(root, "wall-resume-runs"), "utf8").trim().split("\n").length, 2, "one wall exit, one resume — no retries into the wall");
+  const wl = status().log.filter((l) => l.kind === "resumed").pop();
+  assert.ok(wl && /stated reset/.test(wl.text), "the wall resume is logged: " + JSON.stringify(wl));
+}
+
+// Second wiring pass commands: `spec` fills a job-spec template, `split`
+// autosplits a goal text into jobs, `batchreview` says so when nothing merged
+// waits for review.
+{
+  const sp = run("spec", "feature", "--what", "a frobnicate", "--files", "a.txt, b.txt", "--accept", "it frobnicated");
+  assert.equal(sp.status, 0, sp.stderr);
+  assert.match(sp.stdout, /Add a frobnicate\./);
+  assert.match(sp.stdout, /Files: a\.txt, b\.txt/);
+  assert.match(sp.stdout, /Done when: it frobnicated/);
+  assert.match(run("spec", "bogus", "--what", "x", "--accept", "y").stderr, /unknown spec kind/);
+  assert.match(run("spec", "test", "--accept", "y").stderr, /needs a what/);
+  const sp2 = JSON.parse(run("split", "--goal", "1. first part\n2. second part", "--dir", repo, "--min", "2").stdout);
+  assert.ok(Array.isArray(sp2) && sp2.length >= 2, "split returns jobs: " + JSON.stringify(sp2).slice(0, 300));
+  assert.equal(sp2[0].item, 1);
+  assert.match(run("batchreview").stdout, /No merged jobs are waiting for review/);
+}
+
+// Auto-retry: a copy whose done file reports failing tests failed on its own,
+// so it is retried once on a fresh copy before review — the original is sent
+// back flagged autoRetried, the redo is linked with --again and flagged so it
+// can never retry itself.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files ar1.txt --task "add ar1 failtests" >> "${root}/ar.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/ar-wait.json"
+$C jobs > "${root}/ar-jobs.json"
+id=$(node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;console.log(js.find(j=>j.files.includes("ar1.txt")&&j.status==="finished").id)' "${root}/ar-jobs.json")
+$C review "$id" accept --note "ok" >> "${root}/ar.out" 2>&1
+echo "AR report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "auto retry goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 90000), "the auto-retry goal finishes: " + JSON.stringify(status().goal));
+{
+  const ar = status();
+  const mine = ar.jobs.filter((j) => j.goal === ar.goal.id && j.files.includes("ar1.txt"));
+  assert.equal(mine.length, 2, "the failed copy plus exactly one retry: " + JSON.stringify(mine.map((j) => [j.id, j.status])));
+  const orig = mine.find((j) => !j.againOf), redo = mine.find((j) => j.againOf != null);
+  assert.ok(orig && redo, "one original, one linked redo");
+  assert.equal(orig.status, "sent back"); assert.equal(orig.autoRetried, true); assert.equal(orig.retryJob, redo.id);
+  assert.equal(redo.autoRetry, true); assert.equal(redo.againOf, orig.id); assert.equal(redo.status, "accepted");
+  assert.ok(ar.log.some((l) => l.kind === "retry" && l.job === orig.id), "the retry is logged: " + JSON.stringify(ar.log.filter((l) => l.kind === "retry")));
+}
+
+// Backlog refill: with the ready queue empty and a copy slot free, the sweep
+// queues open backlog items; the next review accept hands the queued task to
+// the same agent and the backlog item is tagged with the new job's id.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C backlog add --kind docs --text "write the refill notes" --files rf1.txt >> "${root}/rf.out" 2>&1
+$C delegate --agent devin --files rf0.txt --task "add rf0 selfmerge" >> "${root}/rf.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/rf-wait1.json"
+id1=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/rf-wait1.json")
+$C review "$id1" accept --note "ok" >> "${root}/rf.out" 2>&1
+$C wait --timeout 60 > "${root}/rf-wait2.json"
+id2=$(node -e 'const w=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(w.review.id)' "${root}/rf-wait2.json")
+$C review "$id2" accept --note "ok" >> "${root}/rf.out" 2>&1
+$C jobs > "${root}/rf-jobs.json"
+echo "RF report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "backlog refill goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 120000), "the refill goal finishes: " + JSON.stringify(status().goal));
+{
+  const rf = status();
+  const rf1 = rf.jobs.filter((j) => j.goal === rf.goal.id && j.files.includes("rf1.txt"));
+  assert.equal(rf1.length, 1, "the backlog item became exactly one job: " + JSON.stringify(rf.jobs.map((j) => [j.id, j.task, j.status])));
+  assert.equal(rf1[0].task, "write the refill notes"); assert.equal(rf1[0].status, "accepted");
+  assert.match(fs.readFileSync(path.join(repo, ".constance", "backlog.md"), "utf8"), /write the refill notes.*\(job \d+\)/, "the backlog item is tagged with the job id");
+  assert.ok(rf.log.some((l) => l.kind === "note" && /Ready queue refilled from the backlog/.test(l.text)), "the refill is logged");
+}
+
+// Batch review: `batchreview` prints one prompt for up to five merged,
+// unreviewed jobs; `--apply` parses the verdict reply — ok confirms the merge,
+// fail reverts it through the same path `review` send-back uses.
+fs.rmSync(path.join(root, "go"), { force: true });
+fs.writeFileSync(path.join(bin, "claude"), `#!/bin/bash
+C="node ${CLI}"
+$C delegate --agent devin --files bk1.txt --task "add bk1 selfmerge" >> "${root}/bk.out" 2>&1
+$C delegate --agent devin --files bk2.txt --task "add bk2 selfmerge" >> "${root}/bk.out" 2>&1
+touch "${root}/go"
+$C wait --timeout 60 > "${root}/bk-wait1.json"
+$C wait --timeout 60 > "${root}/bk-wait2.json"
+$C jobs > "${root}/bk-jobs-pre.json"
+$C batchreview > "${root}/bk-prompt.txt" 2>&1
+node -e 'const js=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).jobs;const m=js.filter(j=>j.status==="merged").map(j=>j.id);require("fs").writeFileSync(process.argv[2],m[0]+" ok\\n"+m[1]+" fail: sloppy diff\\n")' "${root}/bk-jobs-pre.json" "${root}/bk-verdicts.txt"
+$C batchreview --apply "${root}/bk-verdicts.txt" >> "${root}/bk.out" 2>&1
+$C jobs > "${root}/bk-jobs.json"
+echo "BK report: done."
+`, { mode: 0o755 });
+writeData();
+assert.equal(run("start", "--dir", repo, "--goal", "batch review goal").status, 0);
+assert.ok(await until(() => status().goal && status().goal.status === "done", 120000), "the batch review goal finishes: " + JSON.stringify(status().goal));
+{
+  const bk = status();
+  const prompt = fs.readFileSync(path.join(root, "bk-prompt.txt"), "utf8");
+  assert.match(prompt, /Review these 2 merged jobs/, "the batch prompt covers both: " + prompt.slice(0, 200));
+  assert.match(prompt, /<job id> ok/);
+  const mine = bk.jobs.filter((j) => j.goal === bk.goal.id && ["bk1.txt", "bk2.txt"].some((f) => j.files.includes(f)));
+  assert.equal(mine.length, 2);
+  const ok = mine.find((j) => j.files.includes("bk1.txt")), bad = mine.find((j) => j.files.includes("bk2.txt"));
+  assert.equal(ok.status, "accepted", "the ok verdict confirmed the merge");
+  assert.equal(bad.status, "sent back"); assert.ok(bad.revertedAt, "the fail verdict reverted the merge");
+  assert.ok(fs.existsSync(path.join(repo, "bk1.txt")), "the confirmed job's file stayed");
+  assert.ok(!fs.existsSync(path.join(repo, "bk2.txt")), "the reverted job's file is gone");
+  const pend = JSON.parse(fs.readFileSync(path.join(tabs, "constance", "reviews.json"), "utf8"));
+  assert.deepEqual(pend.pending.filter((p) => mine.some((j) => j.id === p.job)), [], "no batch job left pending");
+  assert.ok(pend.reviewed.some((p) => p.job === ok.id && p.verdict === "ok"), "the ok verdict is recorded");
+  assert.ok(pend.reviewed.some((p) => p.job === bad.id && p.verdict === "reverted"), "the revert is recorded");
+  assert.ok(bk.log.some((l) => l.kind === "review" && /batch review: sloppy diff/.test(l.text)), "the batch verdicts are logged");
 }
 fs.rmSync(root, { recursive: true, force: true });
 console.log("constance: tests passed");

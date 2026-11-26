@@ -15,8 +15,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const DAY = 86400000;
-
 const num = (v) => {
   if (typeof v === "boolean" || typeof v !== "number" || !Number.isFinite(v) || v < 0) return 0;
   return v;
@@ -68,7 +66,11 @@ export function messageTokens(usage) {
 export function addMcodeMessages(text, acc, nowMs = Date.now()) {
   const today = new Date(nowMs);
   today.setHours(0, 0, 0, 0);
-  const weekStart = today.getTime() - 6 * DAY;
+  // Calendar days, not fixed 86400000 ms steps: across a DST change a local
+  // day is 23 or 25 hours, and ms steps would skip or repeat a date.
+  const weekStart = new Date(today);
+  weekStart.setDate(weekStart.getDate() - 6);
+  const weekStartDay = dayString(weekStart);
   for (const line of String(text || "").split("\n")) {
     if (!line.trim()) continue;
     let entry;
@@ -85,7 +87,7 @@ export function addMcodeMessages(text, acc, nowMs = Date.now()) {
     if (!day) continue;
     acc.days[day] = (acc.days[day] || 0) + tokens;
     const model = String(message.model || entry.model || "").trim() || "unknown";
-    if (new Date(day + "T00:00:00").getTime() >= weekStart) {
+    if (day >= weekStartDay) {
       acc.models[model] = (acc.models[model] || 0) + tokens;
     }
   }
@@ -130,7 +132,9 @@ export function mcodeUsageFromSessions(root, nowMs = Date.now()) {
   today.setHours(0, 0, 0, 0);
   const days = [];
   for (let i = 29; i >= 0; i--) {
-    const date = dayString(new Date(today.getTime() - i * DAY));
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const date = dayString(d);
     days.push({ date, tokens: acc.days[date] || 0 });
   }
   return { days, models: acc.models, limits: [] };

@@ -95,4 +95,31 @@ assert.equal(canResume(P(cached), cached), false, "a reading the collector could
 assert.equal(canResume(P({ limits: [] }), { limits: [] }), false, "no reading can't");
 assert.equal(canResume(P(claude(1, 3 * H, 0.3, 6 * D)), claude(1, 3 * H, 0.3, 6 * D)), false, "a stop can't");
 assert.equal(canResume({ mode: "delegate", reason: "Session at 95%: you chose Keep going, so she delegates" }, cached), true, "Keep going is the owner's call");
+
+// pace()'s optional 4th argument names the brain whose limits she reads. It changes only
+// who gets named in the wall stop and the no-readings reason; every mode, window, until
+// and every other reason is identical for both names on the same input.
+const agy = (c, t = now) => pace(c, t, dir, { name: "Antigravity" });
+const sameInputs = [
+  claude(0.2, 2.5 * H, 0.3, 4 * D),   // normal
+  claude(0.5, 4 * H, 0.3, 4 * D),    // delegate, too fast
+  claude(STOP_AT, 3 * H, 0.3, 6 * D),// stop far from the reset
+  claude(0.92, 0.5 * H, 0.3, 4 * D), // delegate, reset close
+];
+for (const input of sameInputs) {
+  const a = P(input), b = agy(input);
+  assert.deepEqual(b, a, "Antigravity changes nothing but the name where the name appears");
+}
+assert.equal(P(null).reason, "Claude's own limits can't be read, so she plays it safe and delegates.", "the default name stays Claude");
+assert.equal(agy(null).reason, "Antigravity's own limits can't be read, so she plays it safe and delegates.");
+writeWall(dir, { until: now + 90 * 60e3, stated: true, text: "x" }, now);
+const wallClaude = P(claude(0.1, 3 * H, 0.1, 6 * D));
+const wallAgy = agy(claude(0.1, 3 * H, 0.1, 6 * D));
+assert.equal(wallClaude.title, "Claude's limit", "default wall title names Claude");
+assert.match(wallClaude.reason, /^Claude said it hit its limit; paused until /);
+assert.equal(wallAgy.title, "Antigravity's limit");
+assert.match(wallAgy.reason, /^Antigravity said it hit its limit; paused until /);
+assert.equal(wallAgy.until, wallClaude.until);
+assert.equal(wallAgy.mode, wallClaude.mode);
+fs.rmSync(wallFile(dir));
 console.log("constance-pace: tests passed");

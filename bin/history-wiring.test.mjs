@@ -29,6 +29,15 @@ const localDate = (ms) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
 
+// Calendar-day arithmetic in local time, like shiftDate in usage-history.mjs:
+// subtracting fixed 24 h steps lands on the wrong date across a DST change.
+// `hour` exists for timestamps that must stay inside the intended day.
+const localDay = (n, hour = 0) => {
+  const d = new Date();
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - n, hour).getTime();
+};
+const daysAgoDate = (n) => localDate(localDay(n));
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "history-wiring-"));
 const home = path.join(tmp, "home");
 const xdg = path.join(tmp, "xdg");
@@ -57,9 +66,9 @@ fs.writeFileSync(path.join(outDir, "live-models.json"),
 // The seeded Omarchy record: today 200, yesterday 100 messageCounts; every
 // other day in the 7-day window reports an implicit 0.
 const today = localDate(Date.now());
-const yesterday = localDate(Date.now() - 86400000);
-const twoDaysAgo = localDate(Date.now() - 2 * 86400000);
-const tenDaysAgo = localDate(Date.now() - 10 * 86400000);
+const yesterday = daysAgoDate(1);
+const twoDaysAgo = daysAgoDate(2);
+const tenDaysAgo = daysAgoDate(10);
 fs.writeFileSync(path.join(usageDir, "kimi.json"), JSON.stringify({
   tierLabel: "Go",
   ready: true,
@@ -78,7 +87,7 @@ fs.mkdirSync(wireDir, { recursive: true });
 const rec = (daysAgo, inputOther, output) => JSON.stringify({
   type: "usage.record", agentId: "a1", model: "kimi-k2",
   usage: { inputOther, output, inputCacheRead: 0, inputCacheCreation: 0 },
-  time: Date.now() - daysAgo * 86400000,
+  time: localDay(daysAgo, 12),
 });
 fs.writeFileSync(path.join(wireDir, "wire.jsonl"),
   `${rec(10, 1000, 500)}\n${rec(2, 700, 77)}\n`);
@@ -124,7 +133,7 @@ for (const a of data.agents) {
   assert.ok(Array.isArray(a.history), `${a.id}: history is a list`);
   assert.equal(a.history.length, 30, `${a.id}: exactly 30 days`);
   assert.equal(a.history[29].date, today, `${a.id}: series ends today`);
-  assert.equal(a.history[0].date, localDate(Date.now() - 29 * 86400000), `${a.id}: series starts 29 days ago`);
+  assert.equal(a.history[0].date, daysAgoDate(29), `${a.id}: series starts 29 days ago`);
   for (const h of a.history) {
     assert.deepEqual(Object.keys(h).sort(), ["date", "tokens"], `${a.id}: only date+tokens kept`);
     assert.match(h.date, /^\d{4}-\d{2}-\d{2}$/, `${a.id}: ISO date`);

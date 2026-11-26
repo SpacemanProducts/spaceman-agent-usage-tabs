@@ -29,13 +29,22 @@ function migrate(before) {
   return out;
 }
 
+const isIter = (x) => x != null && typeof x[Symbol.iterator] === "function";
+
 // A multi-account agent is watched per account too, each named by its label.
+// Malformed collector records (non-iterable agents, null entries) are treated as none.
 function watchedAgents(agents) {
   const watched = [];
-  for (const a of agents || []) {
+  if (!isIter(agents)) return watched;
+  for (const a of agents) {
+    if (!a || typeof a !== "object") continue;
     watched.push(a);
-    if ((a.accounts || []).length > 1)
-      for (const acc of a.accounts) watched.push({ ...a, id: `${a.id}:${acc.id}`, name: `${a.name} (${acc.label})`, limits: acc.limits, accounts: undefined });
+    const accounts = isIter(a.accounts) ? a.accounts : [];
+    if (accounts.length > 1)
+      for (const acc of accounts) {
+        if (!acc || typeof acc !== "object") continue;
+        watched.push({ ...a, id: `${a.id}:${acc.id}`, name: `${a.name} (${acc.label})`, limits: acc.limits, accounts: undefined });
+      }
   }
   return watched;
 }
@@ -46,7 +55,8 @@ export function planAlerts(agents, before, threshold, now = Date.now()) {
   const toSend = [];
   const watched = watchedAgents(agents);
   for (const a of watched) {
-    for (const l of a.limits || []) {
+    for (const l of isIter(a.limits) ? a.limits : []) {
+      if (!l || typeof l !== "object") continue;
       if (!WATCHED.test(String(l.title)) || typeof l.percent !== "number") continue;
       const key = `${a.id}|${l.title}`;
       const resetMs = resetMsOf(l.resetsAt);
@@ -55,7 +65,12 @@ export function planAlerts(agents, before, threshold, now = Date.now()) {
       if (rec && ((resetMs && rec.resetMs && resetMs - rec.resetMs > TOLERANCE_MS) || l.percent <= threshold - REARM_DROP)) {
         delete memory[key]; rec = undefined;
       }
-      const fired = rec?.levels || {};
+      // A stored resetMs that is neither null nor a finite number is corrupt: it can never
+      // match a window, so a real reset time re-arms the meter — its fired levels don't
+      // count this pass, and markFired then records a proper resetMs, keeping the window
+      // once-per-window. (null stays muted: it means the meter had no readable reset time.)
+      const rearmed = !!(rec && rec.resetMs != null && !Number.isFinite(rec.resetMs) && resetMs !== null);
+      const fired = rearmed ? {} : rec?.levels || {};
       if (l.percent >= LIMIT_AT) { if (!fired.limit) toSend.push({ agent: a, limit: l, key, level: "limit", resetMs }); }
       else if (l.percent > threshold) { if (!fired.warn) toSend.push({ agent: a, limit: l, key, level: "warn", resetMs }); }
     }
@@ -71,8 +86,10 @@ export function planAlerts(agents, before, threshold, now = Date.now()) {
 // Call once a notification was really sent (a failed send is not remembered, so it retries).
 // Hitting the limit also covers the warning for that window, so the two never fire back to back.
 export function markFired(memory, item, now = Date.now()) {
-  const rec = memory[item.key] || { resetMs: item.resetMs, levels: {} };
+  let rec = memory[item.key];
+  if (!rec || typeof rec !== "object") rec = { resetMs: item.resetMs, levels: {} };
   if (item.resetMs) rec.resetMs = item.resetMs;
+  if (!rec.levels || typeof rec.levels !== "object") rec.levels = {};
   rec.levels[item.level] = now;
   if (item.level === "limit" && !rec.levels.warn) rec.levels.warn = now;
   memory[item.key] = rec;
@@ -96,7 +113,8 @@ export function planHandoffTriggers(agents, before, now = Date.now()) {
   const memory = { ...(before || {}) };
   const toFire = [];
   for (const a of watchedAgents(agents)) {
-    for (const l of a.limits || []) {
+    for (const l of isIter(a.limits) ? a.limits : []) {
+      if (!l || typeof l !== "object") continue;
       if (!/session/i.test(String(l.title)) || typeof l.percent !== "number") continue;
       const key = `handoff|${a.id}|${l.title}`;
       const resetMs = resetMsOf(l.resetsAt);

@@ -46,20 +46,29 @@ export function createDiagnostics({ logFile, stateFile, now = () => Date.now() }
     },
     flush() {
       if (!problems.size || !logFile) return 0;
-      let state = {}; try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")) || {}; } catch {}
-      const t = now(); const lines = [];
+      let state = {};
+      try {
+        const parsed = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+        state = parsed && typeof parsed === "object" ? parsed : {};
+      } catch {}
+      const t0 = now();
+      const t = Number.isFinite(t0) ? t0 : Date.now();
+      const lines = [];
+      const bigIntSafe = (k, v) => (typeof v === "bigint" ? v.toString() : v);
       for (const [id, list] of problems) for (const p of list) {
         const key = `${id}|${p.message}`;
         if (state[key] && t - state[key] < REPEAT_MS) continue;
         state[key] = t;
-        lines.push(JSON.stringify({ at: new Date(t).toISOString(), agent: id, problem: p.message, details: p.details ?? null }));
+        lines.push(JSON.stringify({ at: new Date(t).toISOString(), agent: id, problem: p.message, details: p.details ?? null }, bigIntSafe));
       }
       for (const k of Object.keys(state)) if (t - state[k] > 24 * REPEAT_MS) delete state[k];
       if (lines.length) {
         let existing = []; try { existing = fs.readFileSync(logFile, "utf8").split("\n").filter(Boolean); } catch {}
         const all = existing.concat(lines).slice(-MAX_LOG_LINES);
-        fs.mkdirSync(path.dirname(logFile), { recursive: true });
-        fs.writeFileSync(logFile, all.join("\n") + "\n", { mode: 0o600 });
+        try {
+          fs.mkdirSync(path.dirname(logFile), { recursive: true });
+          fs.writeFileSync(logFile, all.join("\n") + "\n", { mode: 0o600 });
+        } catch {}
       }
       try { fs.writeFileSync(stateFile, JSON.stringify(state), { mode: 0o600 }); } catch {}
       return lines.length;

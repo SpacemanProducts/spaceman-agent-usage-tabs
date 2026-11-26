@@ -6,6 +6,7 @@
 // or home-folder details can leak into it.
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 
 const EMAIL = /[^\s@]+@[^\s@]+\.[^\s@]+/;
 const PATHY = /(^\/|\/home\/)/;
@@ -79,10 +80,19 @@ export function remoteSummary(status) {
 }
 
 // Writes the summary via tmp + rename so a sync never picks up half a file.
+// The tmp name is unique per call (pid + random): worker threads share the
+// pid, so a pid-only name lets concurrent writers rename each other's tmp.
 export function writeRemoteStatus(status, file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
   fs.writeFileSync(tmp, remoteSummary(status));
-  fs.renameSync(tmp, file);
+  try {
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {}
+    throw err;
+  }
   return file;
 }

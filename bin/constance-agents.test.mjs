@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { judge, judgeAll, launchCommand, accountEnv, LAUNCH, DEVIN_FREE_UNTIL, RED } from "./constance-agents.mjs";
+import { judge, judgeAll, launchCommand, accountEnv, preferOrder, kiloPaidVerdict, reviewText, KILO_NOTE, LAUNCH, DEVIN_FREE_UNTIL, RED } from "./constance-agents.mjs";
+import { isFreeModel, pickFreeModel, kiloArgs, costCheck } from "./kilo-free.mjs";
 const now = Date.UTC(2026, 10, 23, 12);
 const at = { now, generatedAt: now - 60e3 };
 const ag = (id, extra = {}) => ({ id, name: id, installed: true, signedIn: true, limits: [{ title: "Weekly", percent: 0.2 }], ...extra });
@@ -75,6 +76,10 @@ const acct = (id, label, percent, extra = {}) => ({ id, label, limits: [{ title:
 }
 assert.equal(judge(ag("grok"), { now, generatedAt: now - 20 * 60e3 }).reason, "usage reading is out of date");
 assert.equal(judge(ag("kimi"), at).reason, "no headless launch known");
+// freebuff has no headless mode at all, so it gets its own honest reason, not "no headless launch known".
+assert.equal(judge(ag("freebuff"), at).reason, "interactive only: no headless mode (see docs/agents-freebuff-kilo.md)");
+assert.equal(judge(ag("freebuff", { installed: false }), at).reason, "not installed", "not installed still wins");
+assert.equal(judge(ag("kilo"), at).available, true, "kilo is a launchable free worker");
 assert.equal(judge(ag("qwen", { usageType: "byok_no_limits" }), at).available, false);
 assert.equal(judge(ag("devin"), at).available, true, "Devin while SWE-2 Flash is free");
 assert.match(judge(ag("devin"), { now: DEVIN_FREE_UNTIL, generatedAt: DEVIN_FREE_UNTIL }).reason, /would charge/, "Devin after its free window: skipped");
@@ -85,13 +90,78 @@ for (const id of Object.keys(LAUNCH)) assert.ok(launchCommand(id, "do it; rm -rf
 assert.ok(launchCommand("devin", "x").includes("swe-2-flash-medium"));
 const here = fs.readFileSync(new URL("./agent-here.sh", import.meta.url), "utf8");
 for (const [id, l] of Object.entries(LAUNCH)) {
-  const m = here.match(new RegExp(`^\\s*${l.cli.replace(/[-]/g, "\\-")}(\\|[a-z]+)?\\) echo "([^"]*)"`, "m"));
-  assert.ok(m, `${id}: agent-here.sh has a skip flag for ${l.cli}`);
-  assert.equal(m[2], l.skip, `${id}: same skip flag as Start`);
+  // kilo is worker-only: agent-here.sh's interactive picker doesn't know it yet.
+  if (id !== "kilo") {
+    const m = here.match(new RegExp(`^\\s*${l.cli.replace(/[-]/g, "\\-")}(\\|[a-z]+)?\\) echo "([^"]*)"`, "m"));
+    assert.ok(m, `${id}: agent-here.sh has a skip flag for ${l.cli}`);
+    assert.equal(m[2], l.skip, `${id}: same skip flag as Start`);
+  }
   for (const f of l.skip.split(" ")) assert.ok(launchCommand(id, "p").includes(f), `${id} launch carries ${f}`);
 }
+// kilo's launch is `kilo run` pinned to the free router, prompt last, no --dir
+// (the worker already runs with its worktree as cwd).
+assert.deepEqual(launchCommand("kilo", "do it"), ["kilo", "run", "--format", "json", "--auto", "-m", "kilo/kilo-auto/free", "do it"]);
+assert.equal(launchCommand("freebuff", "x"), null, "freebuff has no launch");
 // The Devin free date is the collector's.
 const collect = fs.readFileSync(new URL("./collect.mjs", import.meta.url), "utf8");
 const d = collect.match(/DEVIN_FLASH_FREE_UNTIL = Date\.UTC\(([^)]*)\)/)[1].split(",").map(Number);
 assert.equal(Date.UTC(...d), DEVIN_FREE_UNTIL, "same Devin free date as bin/collect.mjs");
+
+// ---- preferOrder: Devin first while available, kilo right after it, rest in order.
+{
+  const rows = [{ id: "grok" }, { id: "devin" }, { id: "kilo" }, { id: "codex" }];
+  assert.deepEqual(preferOrder(rows).map((r) => r.id), ["devin", "kilo", "grok", "codex"], "devin then kilo, scorecard order ignored for them");
+  assert.equal(rows[0].id, "grok", "preferOrder doesn't mutate its input");
+  // Devin out: kilo takes the lead — that is exactly what KILO_NOTE says it is for.
+  const noDevin = [{ id: "devin", available: false }, { id: "grok" }, { id: "kilo" }];
+  assert.deepEqual(preferOrder(noDevin).map((r) => r.id), ["kilo", "devin", "grok"]);
+  // An unavailable kilo doesn't jump ahead of available agents.
+  const noKilo = [{ id: "kilo", available: false }, { id: "grok" }, { id: "devin" }];
+  assert.deepEqual(preferOrder(noKilo).map((r) => r.id), ["devin", "kilo", "grok"]);
+  // Bare ids and non-arrays are handled.
+  assert.deepEqual(preferOrder(["grok", "devin", "amp"]).map(String), ["devin", "grok", "amp"]);
+  assert.deepEqual(preferOrder(null), []);
+  assert.equal(KILO_NOTE, "free models only; use when Devin's copy slots are full or Devin is out");
+}
+
+// ---- kiloPaidVerdict: fail the job on a paid model or any reported cost.
+{
+  assert.equal(kiloPaidVerdict('{"type":"step_finish","part":{"modelID":"kilo-auto/free","providerID":"kilo","cost":0}}\n'), null, "free model, zero cost: clean");
+  assert.equal(kiloPaidVerdict("not json at all"), null);
+  assert.equal(kiloPaidVerdict(""), null);
+  const paid = kiloPaidVerdict('{"providerID":"openai","modelID":"gpt-5"}\n');
+  assert.equal(paid.fail, true);
+  assert.equal(paid.note, "kilo used a paid model or reported cost > 0: non-free model openai/gpt-5");
+  const cost = kiloPaidVerdict('{"cost":0.02}\n');
+  assert.equal(cost.fail, true);
+  assert.match(cost.note, /^kilo used a paid model or reported cost > 0: cost 0\.02 reported$/);
+}
+
+// ---- kilo-free with real `kilo models` ids (provider-prefixed).
+{
+  assert.equal(isFreeModel("kilo/kilo-auto/free"), true);
+  assert.equal(isFreeModel("kilo/openrouter/free"), true);
+  assert.equal(isFreeModel("kilo/anthropic/claude-sonnet-4"), false, "prefixed paid id is not free");
+  // pickFreeModel prefers the prefixed auto router, still accepts the bare id.
+  assert.equal(pickFreeModel(["kilo/openrouter/free", "kilo/kilo-auto/free"]), "kilo/kilo-auto/free");
+  assert.equal(pickFreeModel(["kilo-auto/free", "kilo/openrouter/free"]), "kilo-auto/free", "bare auto id still wins over other free models");
+  assert.equal(pickFreeModel(["kilo/kilo-auto/free", "kilo-auto/free"]), "kilo/kilo-auto/free", "prefixed id preferred when both present");
+  assert.equal(pickFreeModel(["kilo/anthropic/claude-sonnet-4", "kilo/openrouter/free"]), "kilo/openrouter/free");
+  assert.equal(pickFreeModel(["kilo/anthropic/claude-sonnet-4", "kilo/openai/gpt-5"]), null);
+  // kiloArgs pins the launch to the real prefixed id.
+  assert.deepEqual(kiloArgs("do it", "kilo/kilo-auto/free"),
+    ["run", "--format", "json", "--auto", "-m", "kilo/kilo-auto/free", "do it"]);
+  // costCheck treats the prefixed and bare auto ids as the same free model.
+  assert.equal(costCheck('{"type":"step_finish","part":{"providerID":"kilo","modelID":"kilo-auto/free","cost":0}}\n'), null);
+  assert.equal(costCheck('{"type":"step_finish","part":{"modelID":"kilo-auto/free","cost":0}}\n'), null);
+  assert.equal(costCheck('{"type":"step_finish","part":{"providerID":"kilo","modelID":"kilo-auto/free","cost":0.01}}\n').paid, true);
+}
+
+// ---- reviewText: freebuff gets ad-stripped, everyone else passes through.
+{
+  const dirty = "real output\nSponsored: try freebuff.com for more\nmore real output";
+  assert.equal(reviewText("freebuff", dirty), "real output\nmore real output", "sponsor line removed");
+  assert.equal(reviewText("grok", dirty), dirty, "other agents' text is untouched");
+  assert.equal(reviewText("freebuff", "plain report\nwith two lines"), "plain report\nwith two lines", "ad-free freebuff text is unchanged");
+}
 console.log("constance-agents: tests passed");

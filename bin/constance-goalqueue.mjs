@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { checklist } from "./constance-checklist.mjs";
 
 const fileOf = (dir) => path.join(dir, "goal-queue.json");
+const lockOf = (dir) => fileOf(dir) + ".lock";
 
 export function readGoalQueue(dir) {
   try {
@@ -18,14 +19,94 @@ export function readGoalQueue(dir) {
   } catch { return { goals: [], paused: "" }; }
 }
 
+// change() is read-modify-write across processes (the driver, the panel's C commands,
+// goal-queue edits), so it runs under a small lock file next to goal-queue.json: an
+// O_EXCL create holding this pid, a short poll while a live holder finishes, and a
+// stale break only when the recorded pid is dead. An empty lock file gets the same
+// grace mergelock gives an ownerless dir — the pid write lands a tick after the create.
+// Both the stale break and the release move the lock aside by rename before touching
+// it: rm'ing `lock` directly after a check can delete a fresh holder's lock that was
+// created in between (the lost-update race mergelock's comments describe).
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const pidAlive = (pid) => {
+  if (!(pid > 0)) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+};
+const LOCK_STALE_MS = 30000;
+const lockStale = (file, now = Date.now()) => {
+  let pid = 0, mtime = 0;
+  try {
+    pid = Number(fs.readFileSync(file, "utf8").trim()) || 0;
+    mtime = fs.statSync(file).mtimeMs;
+  } catch { return true; } // unreadable/gone: safe to break
+  if (pid > 0) return !pidAlive(pid);
+  return now - mtime > LOCK_STALE_MS;
+};
+function withQueueLock(dir, fn, { waitMs = 10000, pollMs = 25 } = {}) {
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = lockOf(dir), until = Date.now() + waitMs;
+  for (;;) {
+    let fd;
+    try {
+      fd = fs.openSync(lock, "wx");
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      break;
+    } catch (e) {
+      try { if (fd !== undefined) fs.closeSync(fd); } catch {}
+      if (e.code !== "EEXIST") throw e;
+      if (lockStale(lock)) {
+        // Take the corpse aside atomically: rename(2) moves exactly the file that was
+        // checked, so a lock created after the check can't be deleted by our rm.
+        const aside = `${lock}.gone-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        try {
+          fs.renameSync(lock, aside);
+        } catch (e2) {
+          if (e2.code !== "ENOENT") throw e2;
+          continue; // already gone: just retry the create
+        }
+        // The path may have changed hands between the stale check and the rename: a
+        // live lock moved aside by mistake goes back if `lock` is still free, and a
+        // corpse is deleted. (Same dance as constance-mergelock.mjs.)
+        if (!lockStale(aside)) {
+          if (!fs.existsSync(lock)) { try { fs.renameSync(aside, lock); } catch {} }
+        } else {
+          try { fs.rmSync(aside, { force: true }); } catch {}
+        }
+        continue;
+      }
+      if (Date.now() > until) throw new Error("another queue change is still running");
+      sleepSync(pollMs);
+    }
+  }
+  try { return fn(); } finally {
+    // Release the same way: move whatever sits at `lock` aside, delete it only when it
+    // is ours, otherwise put it back — a read-then-rm could delete a new holder's lock.
+    try {
+      const aside = `${lock}.rel-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      fs.renameSync(lock, aside);
+      if (Number(fs.readFileSync(aside, "utf8").trim()) === process.pid) {
+        fs.rmSync(aside, { force: true });
+      } else if (!fs.existsSync(lock)) {
+        try { fs.renameSync(aside, lock); } catch {}
+      }
+    } catch {}
+  }
+}
+
 function save(dir, q) {
   fs.mkdirSync(dir, { recursive: true });
   const f = fileOf(dir), tmp = f + "." + process.pid + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(q, null, 2) + "\n");
-  fs.renameSync(tmp, f);
+  try {
+    fs.renameSync(tmp, f);
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+    throw e;
+  }
   return q;
 }
-const change = (dir, fn) => { const q = readGoalQueue(dir); const r = fn(q); save(dir, q); return r; };
+const change = (dir, fn) => withQueueLock(dir, () => { const q = readGoalQueue(dir); const r = fn(q); save(dir, q); return r; });
 
 export function addGoal(dir, { text, dir: folder }, now = Date.now()) {
   const t = String(text || "").trim();
@@ -42,7 +123,7 @@ export function editGoal(dir, id, { text, dir: folder } = {}) {
   return change(dir, (q) => {
     const g = q.goals.find((x) => x.id === id);
     if (!g) throw new Error(`No queued goal ${id}.`);
-    if (text !== undefined) { const t = String(text).trim(); if (!t) throw new Error("A goal can't be empty."); g.text = t; }
+    if (text !== undefined && text !== null) { const t = String(text).trim(); if (!t) throw new Error("A goal can't be empty."); g.text = t; }
     if (folder) g.dir = folder;
     return g;
   });
@@ -54,7 +135,8 @@ export function moveGoal(dir, id, to) {
     const i = q.goals.findIndex((g) => g.id === id);
     if (i < 0) throw new Error(`No queued goal ${id}.`);
     const n = q.goals.length;
-    let j = to === "up" ? i - 1 : to === "down" ? i + 1 : to === "top" ? 0 : Number(to);
+    let j = to === "up" ? i - 1 : to === "down" ? i + 1 : to === "top" ? 0
+      : typeof to === "number" || (typeof to === "string" && to.trim() !== "") ? Number(to) : NaN;
     if (!Number.isInteger(j)) throw new Error("Move it up, down, top or to a position.");
     j = Math.max(0, Math.min(n - 1, j));
     const [g] = q.goals.splice(i, 1); q.goals.splice(j, 0, g);
@@ -96,4 +178,39 @@ export function needsOwner(goal, jobs = [], { practice = false } = {}) {
     if (list.total > 1 && left.length) why.push(`item${left.length > 1 ? "s" : ""} ${left.join(", ")} of the checklist not done`);
   }
   return why;
+}
+
+// What a finished goal does to the queue, split by who has to act: `stop` is only for things that
+// truly need the owner (the queue pauses and says why); `notes` are the rest, worth logging but not
+// worth stopping the queue for. Same rules and wording as needsOwner(), plus merged jobs (they wait
+// for her background review) which needsOwner never sees because its caller maps them to accepted.
+export function queueStops(goal, jobs = [], { practice = false } = {}) {
+  if (!goal) return { stop: [], notes: [] };
+  const stop = [], notes = [];
+  if (goal.status === "stopped") stop.push("you stopped her");
+  if (goal.needsOwner) stop.push(String(goal.needsOwner));
+  const mine = jobs.filter((j) => j.goal === goal.id);
+  const ids = (f) => mine.filter(f).map((j) => j.id);
+  const many = (n) => (n > 1 ? "s" : "");
+  const conflict = ids((j) => j.status === "conflict");
+  if (conflict.length) stop.push(`job${many(conflict.length)} ${conflict.join(", ")} hit a merge conflict`);
+  if (goal.status === "failed") {
+    const why = "she couldn't finish the goal";
+    notes.push(typeof goal.failReason === "string" && goal.failReason.length ? `${why}: ${goal.failReason}` : why);
+  }
+  const unreviewed = ids((j) => j.status === "finished" && !String(j.summary || "").startsWith("(practice run"));
+  if (unreviewed.length) notes.push(`job${many(unreviewed.length)} ${unreviewed.join(", ")} never got reviewed`);
+  const open = ids((j) => ["running", "waiting", "held"].includes(j.status));
+  if (open.length) notes.push(`job${many(open.length)} ${open.join(", ")} still running`);
+  const merged = ids((j) => j.status === "merged");
+  if (merged.length) notes.push(`job${many(merged.length)} ${merged.join(", ")} merged and still waiting for review`);
+  if (!practice && goal.status === "done") {
+    // Merged jobs already landed in the repo: count them as accepted for the checklist, the way
+    // afterGoal() hands needsOwner() asAccepted(s.jobs).
+    const forChecklist = jobs.map((j) => (j.status === "merged" ? { ...j, status: "accepted" } : j));
+    const list = checklist(goal, forChecklist);
+    const left = list.items.filter((x) => x.state !== "done").map((x) => x.n);
+    if (list.total > 1 && left.length) notes.push(`item${many(left.length)} ${left.join(", ")} of the checklist not done`);
+  }
+  return { stop, notes };
 }

@@ -22,8 +22,11 @@ import { fileURLToPath } from "node:url";
 //     stays signed-out via the dead DBUS address and empty AGY_DIR).
 //   - --notify 101 keeps the alert threshold above 100% and --volume 0 mutes
 //     the cha-ching; the reset-celebration notify-send is still observable.
-// Cases marked BUG expose crashes or quirks in the current code; they assert
-// the behaviour as it is today, not the behaviour we would want.
+// Wrong-typed Omarchy fields (limits not a list, null limit entries,
+// recentDays not iterable, null modelUsage values) used to crash the whole
+// collector; the cases below are regression tests for the fix — collect
+// exits 0, Devin keeps its tab, and no limit/token number is shown that the
+// record didn't really carry.
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const COLLECT = path.join(HERE, "collect.mjs");
@@ -181,59 +184,72 @@ for (const [label, raw, wantStatus] of [
   console.log(`ok: devin.json is ${label}`);
 }
 
-// BUG: fromBuiltin trusts r.limits to be a list — it logs a diagnostic for a
-// non-list and then calls .filter on it anyway, so collect.mjs dies with a
-// TypeError and writes no data.json at all (one malformed record takes down
-// every agent's refresh, not just Devin's).
+// Regression: fromBuiltin used to trust r.limits to be a list — it logged a
+// diagnostic for a non-list and then called .filter on it anyway, so one
+// malformed record took down every agent's refresh (no data.json at all).
+// Wrong-typed fields now count as missing: the run exits 0, Devin keeps its
+// tab, the bad field is diagnosed in collector.log, and no meter appears
+// that the record didn't carry.
 for (const bad of [{}, "x", 5, true]) {
   const ctx = setup();
   const r = run(ctx, { ready: true, limits: bad });
-  assert.notEqual(r.status, 0, `limits=${JSON.stringify(bad)} should crash the collector`);
-  assert.match(r.stderr, /TypeError|filter/, "the crash is the .filter call on a non-list");
-  assert.equal(data(ctx), null, "a crashed run leaves no fresh data.json");
+  assert.equal(r.status, 0, `limits=${JSON.stringify(bad)} must not crash the collector:\n${r.stderr}`);
+  const d = devinOf(data(ctx));
+  assert.ok(d, "devin keeps its tab");
+  assert.equal(d.signedIn, true);
+  assert.deepEqual(d.limits, [], "a non-list limits field yields no meters");
+  assert.match(readIf(path.join(ctx.outDir, "collector.log")), /limits that aren't a list/, "the bad field is diagnosed");
   cleanup(ctx);
-  console.log(`ok: limits=${JSON.stringify(bad)} crashes (BUG)`);
+  console.log(`ok: limits=${JSON.stringify(bad)} is ignored, not fatal`);
 }
 
-// BUG: same class — a null element inside limits is dereferenced
-// (l.percent) before any shape check, killing the whole run.
+// Regression: a null (or otherwise non-object) element inside limits was
+// dereferenced (l.percent) before any shape check, killing the whole run.
+// Bad entries are now filtered out while real limits survive.
 {
   const ctx = setup();
-  const r = run(ctx, { ready: true, limits: [{ title: "Session", percent: 0.5 }, null] });
-  assert.notEqual(r.status, 0, "a null limit entry should crash the collector");
-  assert.match(r.stderr, /TypeError/, "null.percent throws");
+  const r = run(ctx, { ready: true, limits: [{ title: "Session", percent: 0.5 }, null, "junk", { title: "Weekly", percent: 0.25 }] });
+  assert.equal(r.status, 0, `collect failed:\n${r.stderr}`);
+  const d = devinOf(data(ctx));
+  assert.ok(d, "devin keeps its tab");
+  assert.deepEqual(d.limits.map((l) => [l.title, l.percent]), [["Session", 0.5], ["Weekly", 0.25]],
+    "null and non-object entries are dropped, real limits kept");
   cleanup(ctx);
-  console.log("ok: null limit entry crashes (BUG)");
+  console.log("ok: null limit entry is skipped");
 }
 
-// BUG: recentDays is iterated with for..of after only a truthiness check —
-// a non-iterable (or a null element, whose .date is read) crashes the run.
-for (const [label, recentDays] of [["object", {}], ["number", 5], ["null element", [null]], ["string element", ["x"]]]) {
+// Regression: recentDays was iterated with for..of after only a truthiness
+// check — a non-iterable (or a null element, whose .date is read) crashed
+// the run, and a string element was silently absorbed into a bucket
+// daysFrom() never reads. Non-list values are now diagnosed and ignored;
+// bad elements are skipped, so no day series or token count is fabricated.
+for (const [label, recentDays] of [["object", {}], ["number", 5], ["null element", [null]], ["string element", ["x"]], ["no date", [{ messageCount: 9 }]]]) {
   const ctx = setup();
   const r = run(ctx, { ready: true, recentDays });
-  const crashes = label !== "string element"; // "x".date is undefined, not a throw
-  if (crashes) {
-    // BUG: non-iterable recentDays / null elements crash the whole collector.
-    assert.notEqual(r.status, 0, `recentDays=${label} should crash the collector`);
-    assert.match(r.stderr, /TypeError|iterable/, "for..of on a non-iterable throws");
-  } else {
-    // A string element is silently absorbed: d.date is undefined, so it lands
-    // on the "undefined" bucket that daysFrom() never reads. Harmless but odd.
-    assert.equal(r.status, 0, `recentDays=${label}: collect failed:\n${r.stderr}`);
-  }
+  assert.equal(r.status, 0, `recentDays=${label} must not crash the collector:\n${r.stderr}`);
+  const d = devinOf(data(ctx));
+  assert.ok(d, `recentDays=${label}: devin tab present`);
+  assert.deepEqual(d.days, [], `recentDays=${label}: no day series is fabricated`);
+  assert.equal(d.hasTokens, false, `recentDays=${label}: no token numbers the record didn't carry`);
+  if (label === "object" || label === "number")
+    assert.match(readIf(path.join(ctx.outDir, "collector.log")), /recentDays that aren't a list/, `${label}: the bad field is diagnosed`);
   cleanup(ctx);
-  console.log(`ok: recentDays ${label}${crashes ? " crashes (BUG)" : " is absorbed"}`);
+  console.log(`ok: recentDays ${label} yields no days`);
 }
 
-// BUG: modelRows() does +b.inputTokens on each modelUsage value — a null
-// value throws, a missing record is fine.
+// Regression: modelRows() did +b.inputTokens on each modelUsage value — a
+// null value threw. Nulls now read as zeros, so the run survives and no
+// tokens appear that the record didn't carry.
 {
   const ctx = setup();
   const r = run(ctx, { ready: true, modelUsage: { "swe-2-flash": null } });
-  assert.notEqual(r.status, 0, "a null modelUsage value should crash the collector");
-  assert.match(r.stderr, /TypeError/, "null.inputTokens throws");
+  assert.equal(r.status, 0, `collect failed:\n${r.stderr}`);
+  const d = devinOf(data(ctx));
+  assert.ok(d, "devin keeps its tab");
+  assert.ok(Array.isArray(d.models));
+  assert.ok(d.models.every((m) => !m.total), "a null modelUsage value reports zero tokens, not a crash");
   cleanup(ctx);
-  console.log("ok: null modelUsage value crashes (BUG)");
+  console.log("ok: null modelUsage value reads as zero");
 }
 
 // ------------------------------------------------------- limits: the kitchen sink
@@ -265,8 +281,8 @@ for (const [label, recentDays] of [["object", {}], ["number", 5], ["null element
       { label: "5h session", percent: 0.4 },                      // no title -> titleFor(label) -> "Session"
       { label: "Monthly quota", percent: 0.3 },                   // -> "Monthly"
       { title: "OldZero", percent: 0, resetsAt: PAST },           // 0% + past reset: kept verbatim (quirk)
-      { title: "NumericReset", percent: 0.5, resetsAt: 123 },     // Date.parse(123) is a past date -> expired
-      { title: "BadDate", percent: 0.5, resetsAt: "not-a-date" }, // unparseable -> kept, flagged in dataWarning
+      { title: "NumericReset", percent: 0.5, resetsAt: 123 },     // non-string -> ""
+      { title: "BadDate", percent: 0.5, resetsAt: "not-a-date" }, // not ISO -> ""
       { title: 5, percent: 0.5 },                                 // non-string title passes through
     ],
   };
@@ -296,17 +312,17 @@ for (const [label, recentDays] of [["object", {}], ["number", 5], ["null element
   assert.equal(one("Fine print").percent, 0.5, "QUIRK: fromBuiltin keeps only title/percent/resetsAt, so planLimitsOnly's detail check never fires for Omarchy records");
   assert.equal(one("OldZero").resetsAt, PAST, "QUIRK: a 0% meter keeps its stale past resetsAt");
   const numReset = one("NumericReset");
-  assert.equal(numReset.percent, 0);
+  assert.equal(numReset.percent, 0.5, "a non-ISO resetsAt no longer expires the meter");
   assert.equal(numReset.resetsAt, "");
-  assert.equal(numReset.note, RESET_NOTE, "QUIRK: resetsAt:123 parses as a date (year 123) and expires the meter");
+  assert.equal(numReset.note, undefined, "no expiry note without a parseable reset time");
   const badDate = one("BadDate");
-  assert.equal(badDate.resetsAt, "not-a-date", "an unparseable resetsAt is passed through");
+  assert.equal(badDate.resetsAt, "", "a non-ISO resetsAt is dropped, not passed through");
   assert.equal(one(5).percent, 0.5, "a numeric title survives as a number");
   assert.equal(d.plan, "Pro");
   assert.equal(d.planNote, undefined, "the free note only applies to free-ish plans");
   assert.equal(d.signedIn, true);
   assert.equal(d.status, "");
-  assert.ok(d.dataWarning, "negative days / bad reset times set the one-line warning");
+  assert.equal(d.dataWarning, "", "non-ISO resetsAt is dropped before diagnostics, so nothing is flagged");
   cleanup(ctx);
   console.log("ok: limits edge cases");
 }
