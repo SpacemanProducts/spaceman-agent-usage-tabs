@@ -1219,7 +1219,7 @@ delete env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS;
   for (const j of jobsNow) if (j.tmp && ["finished", "accepted", "sent back", "stopped"].includes(j.status)) assert.ok(!fs.existsSync(j.tmp), `job ${j.id}'s temp folder is gone`);
 }
 
-// Leverage, Milk Opus and remote status: status carries the meter and the
+// Leverage, Lead Chef intensity and remote status: status carries the meter and the
 // policy, a finished goal's history line keeps the same leverage object, her
 // first prompt carried the milk lines, and `remote` writes a phone-safe file
 // with no paths in it.
@@ -1253,10 +1253,10 @@ delete env.CONSTANCE_SELFMERGE_SUITE_DELAY_MS;
   assert.ok(ratios.every((r) => r.devinTokens === null || Number.isFinite(r.devinTokens)), "ratio reports parse: " + JSON.stringify(ratios[0]));
   // Her first prompt carried the milk lines (after her lessons, before the rules).
   const ga = fs.readFileSync(path.join(root, "claude-args-guard"), "utf8");
-  assert.match(ga, /Milk Opus is at 25 \(milk\)/, "the milk line is in her goal prompt");
+  assert.match(ga, /Lead Chef intensity is at 25 \(milk\)/, "the milk line is in her goal prompt");
   assert.match(ga, /Sandbox and guardrails stay on at every setting\./);
-  assert.ok(ga.indexOf("Lessons from your earlier goals") < ga.indexOf("Milk Opus is at"), "milk comes after her lessons");
-  assert.ok(ga.indexOf("Milk Opus is at") < ga.indexOf("Rules for this project"), "milk comes before the project rules");
+  assert.ok(ga.indexOf("Lessons from your earlier goals") < ga.indexOf("Lead Chef intensity is at"), "milk comes after her lessons");
+  assert.ok(ga.indexOf("Lead Chef intensity is at") < ga.indexOf("Rules for this project"), "milk comes before the project rules");
 }
 
 // Wiring: the repo brief heads every worker prompt (and is cached in her state
