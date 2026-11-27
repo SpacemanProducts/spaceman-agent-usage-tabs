@@ -106,7 +106,7 @@ try {
   assert.equal(milkStep(37.4).value, 25, "37.4 rounds to 37 -> Lean");
   assert.equal(milkStep(37.5).value, 50, "37.5 rounds to 38 -> Balanced");
   assert.equal(milkStep(62.5).value, 75, "62.5 rounds to 63 -> Thorough");
-  assert.equal(milkStep(87.5).value, 100, "87.5 rounds to 88 -> Max Opus");
+  assert.equal(milkStep(87.5).value, 100, "87.5 rounds to 88 -> Max lead");
   assert.equal(milkStep(-12.5).value, 0, "negative rounds then clamps to 0");
   // Non-finite extremes: +Infinity snaps to the top step, -Infinity/NaN to 0.
   assert.equal(milkStep(Infinity).value, 100);
@@ -185,7 +185,7 @@ try {
     assert.equal(lines[3], MILK_LAST_LINE, `last line is the guardrails line at ${v}`);
     assert.equal(prompt.endsWith("\n"), false, `no trailing newline at ${v}`);
     const p = milkPolicy(v);
-    assert.ok(lines[0].includes(`Milk Opus is at ${p.value}`), `first line value at ${v}`);
+    assert.ok(lines[0].includes(`Lead Chef intensity is at ${p.value}`), `first line value at ${v}`);
     assert.ok(lines[0].includes(`(${p.band})`), `first line band at ${v}`);
     assert.ok(lines[0].includes(p.step), `first line step at ${v}`);
     assert.ok(lines[0].includes(DEPTH_WORDS[p.reviewDepth]), `first line depth wording at ${v}`);
@@ -198,12 +198,12 @@ try {
   }
   // Step-name boundaries inside the prompt: a value between steps still names
   // the snapped step, not the raw number's nearest label by luck.
-  assert.match(milkPrompt(37), /Milk Opus is at 25 \(milk\) · Lean/, "37 prompts as Lean");
-  assert.match(milkPrompt(88), /Milk Opus is at 100 \(quality\) · Max Opus/, "88 prompts as Max Opus");
+  assert.match(milkPrompt(37), /Lead Chef intensity is at 25 \(milk\) · Lean/, "37 prompts as Lean");
+  assert.match(milkPrompt(88), /Lead Chef intensity is at 100 \(quality\) · Max lead/, "88 prompts as Max lead");
   // Junk input prompts as Max delegation (0), still with the guardrails line.
   for (const v of [null, "abc", {}, NaN]) {
     const prompt = milkPrompt(v);
-    assert.ok(prompt.includes("Milk Opus is at 0"), `junk ${String(v)} prompts at 0`);
+    assert.ok(prompt.includes("Lead Chef intensity is at 0"), `junk ${String(v)} prompts at 0`);
     assert.ok(prompt.trimEnd().endsWith(MILK_LAST_LINE), `junk ${String(v)} keeps guardrails line`);
   }
   // Prompt is deterministic: same input, identical string.

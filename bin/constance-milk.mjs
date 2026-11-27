@@ -1,11 +1,11 @@
-// The "Milk Opus" slider (settings.json `constanceMilk`, 0..100): how much of the work
+// The "Lead Chef intensity" slider (settings.json `constanceMilk`, 0..100): how much of the work
 // Constance keeps for herself on the owner's paid plan versus hands to the free agents.
 // Five labeled steps; values between steps snap to the nearest one.
 //   0   Max delegation: the free agents do nearly everything; she only plans and checks.
 //   25  Lean:           she also reads the reports closely and plans once up front.
 //   50  Balanced:       she skims the diffs of risky files and re-checks the plan.
 //   75  Thorough:       she reads every diff and re-plans each wave; may edit hard parts.
-//   100 Max Opus:       she plans carefully, re-plans after each wave, reads every diff.
+//   100 Max lead:       she plans carefully, re-plans after each wave, reads every diff.
 // Sandbox and guardrails are on at every setting — the slider never weakens them.
 export const DEFAULT_MILK = 25;
 export const MILK_LAST_LINE = "Sandbox and guardrails stay on at every setting.";
@@ -18,7 +18,7 @@ export const MILK_STEPS = [
   { name: "Lean", value: 25, description: "she reads the reports closely and plans once up front" },
   { name: "Balanced", value: 50, description: "she skims the diffs of risky files and re-checks the plan between waves" },
   { name: "Thorough", value: 75, description: "she reads every diff, re-plans each wave and may edit the hard parts herself" },
-  { name: "Max Opus", value: 100, description: "she plans carefully, re-plans after each wave and reads every diff" },
+  { name: "Max lead", value: 100, description: "she plans carefully, re-plans after each wave and reads every diff" },
 ];
 
 // The slider value from settings: an integer 0..100, DEFAULT_MILK when missing or not a
@@ -63,7 +63,7 @@ const PLANNING = [
 // is how deep she reads a finished job: "report" = the agent's report and the diff stat
 // only, open the diff only on a guard notice or a report that doesn't add up; "skim" =
 // also read the diff of risky files; "full" = read every diff. `maxFilesPerTask` caps how
-// many files one job may touch. `selfEdit` (Thorough and Max Opus only) lets her do the
+// many files one job may touch. `selfEdit` (Thorough and Max lead only) lets her do the
 // hard parts herself.
 export function milkPolicy(v) {
   const step = milkStep(v);
@@ -86,7 +86,7 @@ export function milkPolicy(v) {
 export function milkPrompt(v) {
   const p = milkPolicy(v);
   const lines = [
-    `Milk Opus is at ${p.value} (${p.band}) · ${p.step}: ${p.reviewDepth === "report" ? "trust the free agents' reports and only open a diff when something doesn't add up" : p.reviewDepth === "skim" ? "skim the diffs of risky files" : "read every diff yourself"}.`,
+    `Lead Chef intensity is at ${p.value} (${p.band}) · ${p.step}: ${p.reviewDepth === "report" ? "trust the free agents' reports and only open a diff when something doesn't add up" : p.reviewDepth === "skim" ? "skim the diffs of risky files" : "read every diff yourself"}.`,
     `Planning: ${p.planning}. Keep each job to at most ${p.maxFilesPerTask} files.`,
     p.selfEdit ? "You may do the hard parts yourself." : "Leave the editing to the free agents.",
     MILK_LAST_LINE,
