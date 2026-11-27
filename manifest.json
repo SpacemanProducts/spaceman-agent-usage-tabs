@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "spaceman.agent-usage-tabs",
   "name": "Cook Meter",
-  "version": "1.57.0",
+  "version": "1.57.1",
   "author": "SpacemanProducts",
   "license": "MIT",
   "description": "Cook Meter: know exactly when you can go cook. A tab per AI coding agent with limits, resets and a celebration when a reset lands.",
