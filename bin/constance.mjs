@@ -353,7 +353,7 @@ function checkStuck() {
         try { takeOver(j.id, { auto: true, reason: `it looked stuck: ${j.stuck.reason}` }); auto = "handed to Opus automatically"; }
         catch (e) { store.log({ kind: "note", job: j.id, agent: j.agent, text: `not handed to Opus automatically: ${e.message}` }); }
       }
-      tellOwner(`Job ${j.id} looks stuck`, `${who}: ${j.stuck.reason}. ${auto ? "Milk Opus is high, so it was " + auto + "." : j.handedFrom ? "Opus already has it; you may want to stop it." : "Open her panel and press Give it to Opus."}`);
+      tellOwner(`Job ${j.id} looks stuck`, `${who}: ${j.stuck.reason}. ${auto ? "Lead Chef intensity is high, so it was " + auto + "." : j.handedFrom ? "Opus already has it; you may want to stop it." : "Open her panel and press Give it to Opus."}`);
     }
   } catch (e) { store.log({ kind: "note", text: `Stuck check skipped: ${e.message}` }); }
 }
