@@ -34,14 +34,19 @@ const allIdx = qml.indexOf("id: copyAllChip");
 assert.ok(allIdx > sumIdx, "Copy all still comes after Copy summary");
 assert.ok(qml.slice(allIdx, allIdx + 400).includes("anchors.right: parent.right"), "Copy all stays at the right edge");
 
-// B) Brain picker above the Milk Opus slider: two MiniChips writing constanceBrain.
+// B) Brain picker above the Milk Opus slider: a MiniChip per brain id writing constanceBrain.
 assert.ok(qml.includes('text: "Brain"'), "Brain row title exists");
-assert.ok(qml.includes('label: "Claude Code"'), "Claude Code chip exists");
-assert.ok(qml.includes('label: "Antigravity"'), "Antigravity chip exists");
-assert.ok(qml.includes('on: root.constanceBrain === "claude"'), "claude chip shows picked state");
-assert.ok(qml.includes('on: root.constanceBrain === "antigravity"'), "antigravity chip shows picked state");
-assert.ok(qml.includes('root.writeSetting(["constanceBrain", "claude"])'), "claude chip writes constanceBrain");
-assert.ok(qml.includes('root.writeSetting(["constanceBrain", "antigravity"])'), "antigravity chip writes constanceBrain");
+for (const [label, id] of [
+  ["Claude Code", "claude"],
+  ["Antigravity", "antigravity"],
+  ["Grok", "grok"],
+  ["Codex", "codex"],
+  ["Copilot", "copilot"],
+]) {
+  assert.ok(qml.includes(`label: "${label}"`), `${label} chip exists`);
+  assert.ok(qml.includes(`on: root.constanceBrain === "${id}"`), `${id} chip shows picked state`);
+  assert.ok(qml.includes(`root.writeSetting(["constanceBrain", "${id}"])`), `${id} chip writes constanceBrain`);
+}
 assert.ok(qml.indexOf('label: "Claude Code"') < qml.indexOf("id: milkTitle"), "picker sits above the Milk slider");
 
 // The picked value: userSettings first, then the setting, default "claude" — like constanceMilk.

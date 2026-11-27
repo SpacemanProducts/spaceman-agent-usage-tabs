@@ -1206,8 +1206,9 @@ Panel {
     var d = s.description === undefined || s.description === null ? "" : " — " + String(s.description)
     return String(s.name || "") + d
   }
-  // The Brain picker (settings.json constanceBrain, "claude" or "antigravity"): which agent's
-  // model she thinks with. status.brain reports the live pick; every field is optional, and
+  // The Brain picker (settings.json constanceBrain, "claude", "antigravity", "grok", "codex" or
+  // "copilot"): which agent's model she thinks with. status.brain reports the live pick; every
+  // field is optional, and
   // ok === false means the wanted brain can't run, with why saying so in one calm line.
   readonly property string constanceBrain: userSettings.constanceBrain !== undefined
     ? String(userSettings.constanceBrain) : String(root.setting("constanceBrain", "claude"))
@@ -3015,6 +3016,24 @@ Panel {
                     tip: "She thinks with Antigravity (the agy CLI login)"
                     on: root.constanceBrain === "antigravity"
                     onClicked: root.writeSetting(["constanceBrain", "antigravity"])
+                  }
+                  MiniChip {
+                    label: "Grok"
+                    tip: "She thinks with Grok (the grok CLI login)"
+                    on: root.constanceBrain === "grok"
+                    onClicked: root.writeSetting(["constanceBrain", "grok"])
+                  }
+                  MiniChip {
+                    label: "Codex"
+                    tip: "She thinks with Codex (the codex CLI login)"
+                    on: root.constanceBrain === "codex"
+                    onClicked: root.writeSetting(["constanceBrain", "codex"])
+                  }
+                  MiniChip {
+                    label: "Copilot"
+                    tip: "She thinks with Copilot (the copilot CLI login)"
+                    on: root.constanceBrain === "copilot"
+                    onClicked: root.writeSetting(["constanceBrain", "copilot"])
                   }
                 }
                 Text {
