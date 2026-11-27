@@ -259,10 +259,10 @@ assert.equal(brainWall("Antigravity", "quota exceeded", NOW, []), null,
 assert.equal(brainWall({ id: "antigravity" }, "quota exceeded", NOW, []).until, NOW + 3600e3);
 
 // milkLabel: only the exact id switches the label.
-assert.equal(milkLabel("Antigravity"), "Milk Opus");
-assert.equal(milkLabel(""), "Milk Opus");
-assert.equal(milkLabel(null), "Milk Opus");
-assert.equal(milkLabel({ id: "antigravity" }), "Milk Opus", "milkLabel takes an id string, not a brain object");
+assert.equal(milkLabel("Antigravity"), "Lead Chef intensity");
+assert.equal(milkLabel(""), "Lead Chef intensity");
+assert.equal(milkLabel(null), "Lead Chef intensity");
+assert.equal(milkLabel({ id: "antigravity" }), "Lead Chef intensity", "milkLabel takes an id string, not a brain object");
 
 fs.rmSync(home, { recursive: true, force: true });
 console.log("constance-brain.deep.test.mjs: all assertions passed");
