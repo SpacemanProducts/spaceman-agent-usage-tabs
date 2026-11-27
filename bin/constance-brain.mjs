@@ -197,7 +197,5 @@ export function brainWall(brain, report, now = Date.now(), limits = []) {
 }
 
 export function milkLabel(brainId) {
-  if (brainId === "antigravity") return "Milk Antigravity";
-  if (Object.hasOwn(BRAINS, brainId) && brainId !== "claude") return `Milk ${BRAINS[brainId].name}`;
-  return "Milk Opus";
+  return "Lead Chef intensity";
 }

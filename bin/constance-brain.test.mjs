@@ -159,9 +159,9 @@ const w5 = brainWall(BRAINS.antigravity, "resource exhausted", now, []);
 assert.equal(w5.until, now + 60 * 60e3, "object brain arg works, unstated fallback");
 
 // milkLabel
-assert.equal(milkLabel("claude"), "Milk Opus");
-assert.equal(milkLabel("antigravity"), "Milk Antigravity");
-assert.equal(milkLabel("bogus"), "Milk Opus");
+assert.equal(milkLabel("claude"), "Lead Chef intensity");
+assert.equal(milkLabel("antigravity"), "Lead Chef intensity");
+assert.equal(milkLabel("bogus"), "Lead Chef intensity");
 
 // ---- grok, codex, copilot brains ----
 
@@ -302,9 +302,9 @@ assert.equal(brainWall("grok", "the limit is a good thing", now, []).text, "the 
 assert.equal(brainWall(BRAINS.grok, "429 too many requests", now, []).until, now + 60 * 60e3);
 
 // milkLabel covers every brain id.
-assert.equal(milkLabel("grok"), "Milk Grok");
-assert.equal(milkLabel("codex"), "Milk Codex");
-assert.equal(milkLabel("copilot"), "Milk Copilot");
-assert.equal(milkLabel("claude"), "Milk Opus");
+assert.equal(milkLabel("grok"), "Lead Chef intensity");
+assert.equal(milkLabel("codex"), "Lead Chef intensity");
+assert.equal(milkLabel("copilot"), "Lead Chef intensity");
+assert.equal(milkLabel("claude"), "Lead Chef intensity");
 
 console.log("constance-brain.test.mjs: all assertions passed");
