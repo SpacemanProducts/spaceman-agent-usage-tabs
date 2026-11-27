@@ -13,7 +13,7 @@ process.env.HOME = home;
 // one-line plain description.
 assert.equal(MILK_STEPS.length, 5, "five steps");
 assert.deepEqual(MILK_STEPS.map((s) => s.value), [0, 25, 50, 75, 100], "step values");
-assert.deepEqual(MILK_STEPS.map((s) => s.name), ["Max delegation", "Lean", "Balanced", "Thorough", "Max Opus"], "step names");
+assert.deepEqual(MILK_STEPS.map((s) => s.name), ["Max delegation", "Lean", "Balanced", "Thorough", "Max lead"], "step names");
 for (const s of MILK_STEPS) {
   assert.ok(s.description && s.description.length > 10, `description for ${s.name}`);
 }
@@ -42,9 +42,9 @@ const snaps = [
   [0, "Max delegation"], [10, "Max delegation"], [12, "Max delegation"],
   [13, "Lean"], [24, "Lean"], [25, "Lean"], [37, "Lean"], [38, "Balanced"],
   [49, "Balanced"], [50, "Balanced"], [62, "Balanced"], [63, "Thorough"],
-  [74, "Thorough"], [75, "Thorough"], [87, "Thorough"], [88, "Max Opus"],
-  [99, "Max Opus"], [100, "Max Opus"],
-  [-5, "Max delegation"], [150, "Max Opus"], ["abc", "Max delegation"],
+  [74, "Thorough"], [75, "Thorough"], [87, "Thorough"], [88, "Max lead"],
+  [99, "Max lead"], [100, "Max lead"],
+  [-5, "Max delegation"], [150, "Max lead"], ["abc", "Max delegation"],
 ];
 for (const [v, name] of snaps) {
   assert.equal(milkStep(v).name, name, `milkStep(${String(v)})`);
@@ -57,7 +57,7 @@ const cases = [
   [25, "Lean", "milk", "report", 5, "one plan up front, then let the queue run", false],
   [50, "Balanced", "balanced", "skim", 4, "plan up front and re-check the plan once between waves", false],
   [75, "Thorough", "quality", "full", 3, "plan each wave carefully and adjust the plan as results come in", true],
-  [100, "Max Opus", "quality", "full", 2, "plan carefully and re-plan after each wave", true],
+  [100, "Max lead", "quality", "full", 2, "plan carefully and re-plan after each wave", true],
 ];
 for (const [v, stepName, bandName, depth, maxFiles, planning, selfEdit] of cases) {
   const p = milkPolicy(v);
@@ -83,7 +83,7 @@ for (let i = 0; i < MILK_STEPS.length - 1; i++) {
 // And the five planning texts are all distinct.
 assert.equal(new Set(cases.map((c) => c[5])).size, 5, "five distinct planning texts");
 
-// selfEdit only for Thorough and Max Opus.
+// selfEdit only for Thorough and Max lead.
 for (const v of [0, 25, 50]) assert.equal(milkPolicy(v).selfEdit, false, `no selfEdit at ${v}`);
 for (const v of [75, 100]) assert.equal(milkPolicy(v).selfEdit, true, `selfEdit at ${v}`);
 
@@ -105,13 +105,13 @@ for (const v of [-5, 150, "abc", NaN, undefined]) {
 for (const [v, stepName] of cases.map((c) => [c[0], c[1]])) {
   const prompt = milkPrompt(v);
   const first = prompt.split("\n")[0];
-  assert.ok(first.includes(`Milk Opus is at ${v}`), `prompt names the value at ${v}`);
+  assert.ok(first.includes(`Lead Chef intensity is at ${v}`), `prompt names the value at ${v}`);
   assert.ok(first.includes(stepName), `prompt names the step ${stepName} at ${v}`);
   assert.ok(prompt.includes(MILK_LAST_LINE), `prompt carries the guardrails line at ${v}`);
   assert.equal(prompt.trimEnd().endsWith(MILK_LAST_LINE), true, `last line at ${v}`);
 }
 assert.match(milkPrompt(0), /Leave the editing to the free agents/, "delegation leaves editing to the agents");
-assert.match(milkPrompt(100), /hard parts yourself/, "max opus does the hard parts herself");
+assert.match(milkPrompt(100), /hard parts yourself/, "max lead does the hard parts herself");
 assert.match(milkPrompt(75), /hard parts yourself/, "thorough may edit hard parts herself");
 assert.match(milkPrompt(50), /Leave the editing to the free agents/, "balanced leaves editing to the agents");
 
