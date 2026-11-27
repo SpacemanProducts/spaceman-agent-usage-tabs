@@ -1,6 +1,6 @@
 // The stage bar (preparing red, checklist yellow, review green) and the Rev Meter.
 import assert from "node:assert/strict";
-import { stageProgress, revMeter, STAGE_HUE, DEFAULT_PREP_MS, TARGET_PER_PCT } from "./constance-meters.mjs";
+import { stageProgress, revMeter, leadTokens, STAGE_HUE, DEFAULT_PREP_MS, TARGET_PER_PCT } from "./constance-meters.mjs";
 
 const now = 1e12, min = 60e3;
 const goal = { id: "g1", status: "running", startedAt: now };
@@ -43,4 +43,18 @@ const m = revMeter({ running: 1, slots: 2, perPct: 5e6, workerTokens: 10e6, lead
 assert.equal(m.score, 5e6 / TARGET_PER_PCT); assert.ok(Math.abs(m.share - 1 / 6) < 1e-9);
 assert.equal(revMeter({ perPct: NaN }).score, null);
 assert.equal(revMeter({ workerTokens: null, leadTokens: 5 }).share, null, "never half a guess");
+
+// leadTokens: the brain's own sessions on the goal's folder inside its run.
+const g = { id: "g1", status: "running", dir: "/p", startedAt: now, finishedAt: now + 10 * min };
+const rec = (extra) => ({ agent: "grok", unit: "tokens", folder: "/p", start: now + min, amount: 100, ...extra });
+assert.equal(leadTokens(g, [rec({}), rec({ amount: 50 })], "grok"), 150);
+assert.equal(leadTokens(g, [rec({ agent: "claude" }), rec({ agent: "copilot" })], "grok"), null, "other agents don't count");
+assert.equal(leadTokens(g, [rec({ folder: "/other" }), rec({ unit: "requests" }), rec({ agent: "claude" })], "grok"), null, "other folders and units don't count");
+assert.equal(leadTokens(g, [rec({ start: now - 1 }), rec({ start: now + 11 * min }), rec({ agent: "claude" })], "grok"), null, "starts outside the run don't count");
+assert.equal(leadTokens(g, [rec({ amount: -5 }), rec({ amount: NaN })], "grok"), null, "bad amounts don't count");
+assert.equal(leadTokens({ ...g, finishedAt: undefined }, [rec({ start: now + 99 * min })], "grok"), 100, "an open goal counts later starts");
+assert.equal(leadTokens(g, [], "grok"), null);
+assert.equal(leadTokens(g, [rec({})]), null, "no agentId");
+assert.equal(leadTokens(null, [rec({})], "grok"), null);
+assert.equal(leadTokens({ ...g, dir: "" }, [rec({})], "grok"), null);
 console.log("constance-meters: tests passed");

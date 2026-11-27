@@ -59,3 +59,20 @@ export function revMeter({ running = 0, lanes = 0, slots = 0, perPct = null, wor
   const grade = busy === 0 ? "idle" : needle >= 0.85 && (score === null || score >= 1) ? "redline" : needle >= 0.4 || score >= 1 ? "cooking" : "warming up";
   return { needle, busy, slots, score, share, grade };
 }
+
+// Her own brain sessions' tokens on this goal: folder-usage records for `agentId`
+// in the goal's folder that started while it ran (each brain step spawns one
+// there). null when there is no goal or agentId or nothing matched — the Rev
+// Meter's lead share stays hidden rather than guessing.
+export function leadTokens(goal, records, agentId) {
+  if (!goal || !agentId || !goal.dir || !Number.isFinite(goal.startedAt)) return null;
+  const until = Number.isFinite(goal.finishedAt) ? goal.finishedAt : Infinity;
+  let total = 0, seen = false;
+  for (const r of records || []) {
+    if (!r || r.agent !== agentId || r.unit !== "tokens" || r.folder !== goal.dir) continue;
+    const start = Number(r.start), amount = Number(r.amount);
+    if (!Number.isFinite(start) || start < goal.startedAt || start > until || !Number.isFinite(amount) || amount < 0) continue;
+    seen = true; total += amount;
+  }
+  return seen ? total : null;
+}

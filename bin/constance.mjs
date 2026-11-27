@@ -60,6 +60,7 @@ import { createWorktree, mergeBranch, dropWorktree, repoBranch, worktreeFor, bra
 import { tokenMeter, matchJobs, snapshots, readRecords, usageFile, refreshInBackground, refreshNow } from "./constance-tokens.mjs";
 import { parseItems, parseItemArg, checklist } from "./constance-checklist.mjs";
 import { cards, nowLine, history, goalRecord, meters } from "./constance-board.mjs";
+import { leadTokens as leadTokenTotal } from "./constance-meters.mjs";
 import { readGoalQueue, addGoal, removeGoal, editGoal, moveGoal, takeNext, pauseQueue, resumeQueue, queueStops, holdQueue, releaseQueue } from "./constance-goalqueue.mjs";
 import { stuckCheck, expectedMs, activitySignature, observe, dueForCheck, IDLE_MS, CHECK_GAP_MS } from "./constance-stuck.mjs";
 import { OPUS, opusCommand, autoTakeoverOn, takeoverProblem, opusBlocked, lastLines, partialDiff, readTail, takeoverPrompt } from "./constance-takeover.mjs";
@@ -2202,23 +2203,6 @@ function prepHistory(s, log) {
   return out;
 }
 
-// Her own Claude sessions' tokens on this goal: folder-usage records for agent
-// "claude" in the goal's folder that started while it ran (each brain step
-// spawns one there). null when there is no goal or nothing matched — the Rev
-// Meter's lead share stays hidden rather than guessing.
-function leadTokensOf(goal, records) {
-  if (!goal || !goal.dir || !Number.isFinite(goal.startedAt)) return null;
-  const until = Number.isFinite(goal.finishedAt) ? goal.finishedAt : Infinity;
-  let total = 0, seen = false;
-  for (const r of records || []) {
-    if (!r || r.agent !== "claude" || r.unit !== "tokens" || r.folder !== goal.dir) continue;
-    const start = Number(r.start), amount = Number(r.amount);
-    if (!Number.isFinite(start) || start < goal.startedAt || start > until || !Number.isFinite(amount) || amount < 0) continue;
-    seen = true; total += amount;
-  }
-  return seen ? total : null;
-}
-
 // The week's pace wire (constance-weekwire.mjs): where the week stands and the
 // drifted intensity her prompt runs on. The drift state persists in her state
 // dir, rewritten only when it actually moved (a fresh `at` stamp alone doesn't
@@ -2248,7 +2232,7 @@ function boardView(s, d, records) {
   // measured worker/lead token split — each null when it can't be known.
   const goalTokens = tokenMeter({ jobs: s.jobs, goal: s.goal, records }).goal;
   const workerTokens = goalTokens && (goalTokens.total > 0 || goalTokens.cantTell === 0) ? goalTokens.total : null;
-  const leadTokens = leadTokensOf(s.goal, records);
+  const leadTokens = leadTokenTotal(s.goal, records, brainNow().id);
   const busyJobs = s.jobs.filter((j) => ["running", "waiting"].includes(j.status));
   const lanes = busyJobs.filter((j) => j.lane).length;
   const running = busyJobs.length - lanes;
