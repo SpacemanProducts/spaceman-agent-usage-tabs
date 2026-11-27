@@ -155,14 +155,12 @@ try {
 
   // ================================================================ applyBrain
   {
-    for (const good of ["claude", "antigravity", " CLAUDE ", "\tAntiGravity\n", "cLaUdE"]) {
+    for (const good of ["claude", "antigravity", "grok", "codex", "copilot", " CLAUDE ", "\tAntiGravity\n", "cLaUdE", " GROK "]) {
       const want = good.trim().toLowerCase();
       assert.deepEqual(applyBrain({}, good), { constanceBrain: want }, `accepts ${JSON.stringify(good)}`);
     }
-    for (const bad of ["grok", "", "  ", "claude,antigravity", "claude ", null, undefined, 0, {}]) {
-      // "claude " trims to "claude" -> accepted; skip it here.
-      if (bad === "claude ") continue;
-      assert.throws(() => applyBrain({}, bad), /constanceBrain must be claude or antigravity/, `rejects ${String(bad)}`);
+    for (const bad of ["cursor", "nope", "", "  ", "claude,antigravity", null, undefined, 0, {}]) {
+      assert.throws(() => applyBrain({}, bad), /constanceBrain must be one of claude, antigravity, grok, codex, copilot/, `rejects ${String(bad)}`);
     }
     assert.deepEqual(applyBrain({}, "claude "), { constanceBrain: "claude" }, "trailing space trims");
     // Non-object base collapses, including arrays.
