@@ -6,7 +6,7 @@
 //     gets exactly one note.
 //  2. WITH constanceKeyringAgents ["antigravity"]: fake agy runs instead (its argv
 //     carries --model claude-opus-4-6 and the role inside the -p prompt), status.brain
-//     reports Antigravity/"Milk Antigravity"/"Claude Opus 4.6", pace only sees the
+//     reports Antigravity/"Lead Chef intensity"/"Claude Opus 4.6", pace only sees the
 //     Claude/GPT pool (Weekly 0.2 — the 95% Gemini bar can't stop her), and agy is
 //     unavailable as a worker: "it is her brain right now".
 //  3. An agy that prints "RESOURCE_EXHAUSTED: quota exceeded" and exits 1 pauses the
@@ -135,7 +135,7 @@ assert.ok(await until(() => { writeData(); const g = status().goal; return g && 
   const st = status();
   assert.equal(st.brain.id, "antigravity");
   assert.equal(st.brain.ok, true);
-  assert.equal(st.brain.milkLabel, "Milk Antigravity");
+  assert.equal(st.brain.milkLabel, "Lead Chef intensity");
   assert.equal(st.brain.model, "Claude Opus 4.6", "the caption model is the top model's name");
   assert.notEqual(st.pace.mode, "stop", "the 95% Gemini bar can't stop her: " + JSON.stringify(st.pace));
   assert.ok((st.pace.windows || []).every((w) => w.title === "Weekly"), "pace sees the Claude/GPT pool only: " + JSON.stringify(st.pace.windows));
