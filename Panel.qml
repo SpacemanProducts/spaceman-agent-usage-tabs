@@ -1104,6 +1104,12 @@ Panel {
     var n = root.constanceRev ? Number(root.constanceRev.needle) : NaN
     return isFinite(n) ? Math.max(0, Math.min(1, n)) : 0
   }
+  // The lead's share of this goal's tokens (board.rev.share, bin/constance-meters.mjs):
+  // a real 0..1 fraction, NaN when there is no reading — the underline and its caption hide.
+  readonly property real constanceRevShare: {
+    var s = root.constanceRev ? Number(root.constanceRev.share) : NaN
+    return isFinite(s) && s >= 0 && s <= 1 ? s : NaN
+  }
   // Grade always; the score only when the meter could measure it (never null shown).
   readonly property string constanceRevCaption: {
     var r = root.constanceRev
@@ -1185,7 +1191,7 @@ Panel {
         { name: "Lean", value: 25, description: "she reads the reports closely and plans once up front" },
         { name: "Balanced", value: 50, description: "she skims the diffs of risky files and re-checks the plan between waves" },
         { name: "Thorough", value: 75, description: "she reads every diff, re-plans each wave and may edit the hard parts herself" },
-        { name: "Max Opus", value: 100, description: "she plans carefully, re-plans after each wave and reads every diff" }
+        { name: "Max lead", value: 100, description: "she plans carefully, re-plans after each wave and reads every diff" }
       ]
   // The step a slider value belongs to: nearest step wins, a tie goes to the lower one.
   function constanceMilkStepAt(v) {
@@ -1223,8 +1229,17 @@ Panel {
     }
     return ""
   }
-  // The slider's lead-in: the brain's own milkLabel when status.brain carries one, else text: "Milk Opus".
-  readonly property string constanceMilkLabel: (constance.brain && constance.brain.milkLabel) || "Milk Opus"
+  // The slider's lead-in: the brain's own milkLabel when status.brain carries one, else text: "Lead Chef intensity".
+  readonly property string constanceMilkLabel: (constance.brain && constance.brain.milkLabel) || "Lead Chef intensity"
+  // The lead's own name and exact model (status.brain), e.g. "Lead: Claude Code · opus".
+  // Hidden when either is missing — never a placeholder.
+  readonly property string constanceLeadCaption: {
+    var b = root.constanceBrainInfo
+    if (!b) return ""
+    var n = b.name === undefined || b.name === null || b.name === "" ? "" : String(b.name)
+    var m = b.model === undefined || b.model === null || b.model === "" ? "" : String(b.model)
+    return n === "" || m === "" ? "" : "Lead: " + n + " · " + m
+  }
   // The weekly pace wire (status.board.week, bin/constance-weekwire.mjs): where the week
   // stands against the even spread, and the drifted intensity she runs on — the Milk Opus
   // slider stays the setting it drifts from. Null without a weekly reading; the line hides.
@@ -3079,6 +3094,17 @@ Panel {
                     font.pixelSize: Style.font.caption
                   }
                 }
+                // Who leads and on which exact model (status.brain); hidden when either is missing.
+                Text {
+                  visible: root.constanceLeadCaption !== ""
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  text: root.constanceLeadCaption
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
                 Item {
                   id: milkSlide
                   width: parent.width
@@ -3135,7 +3161,26 @@ Panel {
                     }
                     onCanceled: pending = -1
                   }
-                  PanelToolTip { visible: milkArea.containsMouse; text: root.constanceMilkLabel + " " + root.constanceMilk + " (" + root.constanceMilkBand + "): less Opus hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
+                  PanelToolTip { visible: milkArea.containsMouse; text: root.constanceMilkLabel + " " + root.constanceMilk + " (" + root.constanceMilkBand + "): more delegation hands almost everything to the free agents, more quality has her read every diff herself. Sandbox and guardrails stay on either way."; fontFamily: root.fontFamily }
+                }
+                // The lead's share of this goal's tokens (board.rev.share): a thin underline
+                // under the track and one caption, both only when the share is a real 0..1 number.
+                Rectangle {
+                  visible: isFinite(root.constanceRevShare)
+                  width: parent.width * (isFinite(root.constanceRevShare) ? root.constanceRevShare : 0)
+                  height: Style.space(2)
+                  radius: height / 2
+                  color: root.soft(root.foreground, 0.35)
+                }
+                Text {
+                  visible: isFinite(root.constanceRevShare)
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  text: "lead uses " + Math.round(root.constanceRevShare * 100) + "% of this goal's tokens"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
                 }
                 // The step the knob sits on: name plus its one-line description. While
                 // dragging it follows milkArea.pending; otherwise the saved value.
@@ -3155,7 +3200,7 @@ Panel {
                     id: milkLess
                     anchors.left: parent.left
                     textFormat: Text.PlainText
-                    text: "less Opus"
+                    text: "more delegation"
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption

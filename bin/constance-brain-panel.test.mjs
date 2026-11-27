@@ -1,6 +1,6 @@
 // Constance's screen: the "Copy summary" chip in the LOG header (copies
-// `constance.mjs summary` to the clipboard) and the Brain picker above the Milk
-// Opus slider (constanceBrain "claude"/"antigravity" chips, status.brain caption,
+// `constance.mjs summary` to the clipboard) and the Brain picker above the Lead
+// Chef intensity slider (constanceBrain "claude"/"antigravity" chips, status.brain caption,
 // milkLabel slider title). Source-level checks on Panel.qml — nothing touches the
 // real home folder; there is no CLI run in this test.
 import assert from "node:assert/strict";
@@ -34,7 +34,7 @@ const allIdx = qml.indexOf("id: copyAllChip");
 assert.ok(allIdx > sumIdx, "Copy all still comes after Copy summary");
 assert.ok(qml.slice(allIdx, allIdx + 400).includes("anchors.right: parent.right"), "Copy all stays at the right edge");
 
-// B) Brain picker above the Milk Opus slider: a MiniChip per brain id writing constanceBrain.
+// B) Brain picker above the Lead Chef intensity slider: a MiniChip per brain id writing constanceBrain.
 assert.ok(qml.includes('text: "Brain"'), "Brain row title exists");
 for (const [label, id] of [
   ["Claude Code", "claude"],
@@ -64,11 +64,28 @@ assert.ok(qml.includes("String(b.model)"), "caption uses brain.model");
 assert.ok(qml.includes("wrapMode: Text.WordWrap"), "caption wraps");
 assert.ok(qml.includes("text: root.constanceBrainCaption"), "caption text is bound");
 
-// The Milk slider title and tooltip lead with brain.milkLabel, falling back to "Milk Opus".
+// The Milk slider title and tooltip lead with brain.milkLabel, falling back to "Lead Chef intensity".
 assert.ok(qml.includes("constance.brain.milkLabel"), "milkLabel is read from status.brain");
-assert.ok(qml.includes('|| "Milk Opus"'), "Milk Opus is the fallback");
+assert.ok(qml.includes('|| "Lead Chef intensity"'), "Lead Chef intensity is the fallback");
+assert.ok(!qml.includes('|| "Milk Opus"'), "the Milk Opus fallback is gone");
 assert.ok(qml.includes("text: root.constanceMilkLabel"), "slider title uses the brain-aware label");
 assert.ok(qml.includes('root.constanceMilkLabel + " " + root.constanceMilk'), "tooltip leads with the same label");
+
+// The lead caption under the slider title: the brain's name and exact model,
+// hidden when either is missing.
+assert.match(qml, /readonly property string constanceLeadCaption:/, "constanceLeadCaption exists");
+assert.ok(qml.includes('"Lead: "'), "lead caption prefix");
+assert.ok(qml.includes("root.constanceBrainInfo"), "lead caption reads constance.brain");
+assert.ok(qml.includes('n === "" || m === "" ? ""'), "lead caption hides when name or model is missing");
+assert.ok(qml.includes("text: root.constanceLeadCaption"), "lead caption Text is bound");
+assert.ok(qml.includes('visible: root.constanceLeadCaption !== ""'), "lead caption visibility guard");
+
+// The share underline under the slider track: visible only when board.rev.share
+// is a finite number in 0..1; nothing shows when share is null.
+assert.match(qml, /readonly property real constanceRevShare:/, "constanceRevShare exists");
+assert.ok(qml.includes("isFinite(s) && s >= 0 && s <= 1"), "share must be finite and in 0..1");
+assert.ok(qml.includes("visible: isFinite(root.constanceRevShare)"), "underline visibility guard");
+assert.ok(qml.includes("% of this goal's tokens"), "share caption wording");
 
 const opens = (qml.match(/\{/g) || []).length;
 const closes = (qml.match(/\}/g) || []).length;
