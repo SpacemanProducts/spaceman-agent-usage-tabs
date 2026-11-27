@@ -41,10 +41,14 @@ assert.ok(qml.includes("font.bold: true"), "tile numbers are bold");
 // The old checklist progress line is gone (the done tile replaced it).
 assert.ok(!qml.includes("root.constanceBoard.checklist.line"), "checklist line text is hidden");
 
-// The Milk Opus slider: labels, band word, five-step snapping, step caption,
+// The Lead Chef intensity slider: labels, band word, five-step snapping, step caption,
 // saving through settings-set.
-assert.ok(qml.includes('text: "Milk Opus"'), "slider title exists");
-assert.ok(qml.includes('text: "less Opus"'), "less-Opus end label exists");
+assert.ok(qml.includes('|| "Lead Chef intensity"'), "slider title falls back to Lead Chef intensity");
+assert.ok(qml.includes('text: "more delegation"'), "more-delegation end label exists");
+assert.ok(!qml.includes('text: "less Opus"'), "the less-Opus label is gone");
+assert.ok(qml.includes("more delegation hands almost everything"), "tooltip uses lead-neutral wording");
+assert.ok(qml.includes('name: "Max lead"'), "top step is named Max lead");
+assert.ok(!qml.includes('name: "Max Opus"'), "the Max Opus step name is gone");
 assert.ok(qml.includes('text: "more quality · " + root.constanceMilkBand'), "more-quality end shows the band word");
 assert.ok(qml.includes('text: "Sandbox and guardrails always on."'), "guardrails line exists");
 assert.match(qml, /readonly property int constanceMilk:/, "constanceMilk property exists");
@@ -63,6 +67,24 @@ assert.match(qml, /readonly property var constanceMilkStep:/, "the current step 
 assert.match(qml, /milkArea\.pending >= 0 \? milkArea\.pending : root\.constanceMilk/, "dragging shows the pending step");
 assert.match(qml, /readonly property string constanceMilkStepText:/, "step name + description text exists");
 assert.ok(qml.includes("text: root.constanceMilkStepText"), "the caption Text under the slider uses it");
+
+// The lead caption under the slider title: name + exact model from status.brain,
+// hidden when either is missing.
+assert.match(qml, /readonly property string constanceLeadCaption:/, "constanceLeadCaption exists");
+assert.ok(qml.includes('"Lead: "'), "lead caption has the Lead prefix");
+assert.ok(qml.includes("root.constanceBrainInfo"), "lead caption reads status.brain");
+assert.ok(qml.includes("text: root.constanceLeadCaption"), "lead caption Text is bound");
+assert.ok(qml.includes('visible: root.constanceLeadCaption !== ""'), "lead caption hides when empty");
+
+// The share underline under the slider track and its caption show only when
+// board.rev.share is a finite number in 0..1; nothing shows when share is null.
+assert.match(qml, /readonly property real constanceRevShare:/, "constanceRevShare exists");
+assert.match(qml, /root\.constanceRev \? Number\(root\.constanceRev\.share\) : NaN/, "share comes from constanceRev.share");
+assert.ok(qml.includes("isFinite(s) && s >= 0 && s <= 1"), "share must be finite and in 0..1");
+assert.ok(qml.includes("visible: isFinite(root.constanceRevShare)"), "underline and caption share the visibility guard");
+assert.ok(qml.includes("parent.width * (isFinite(root.constanceRevShare) ? root.constanceRevShare : 0)"), "underline width is the share of the track width");
+assert.ok(qml.includes('"lead uses "'), "share caption text exists");
+assert.ok(qml.includes("% of this goal's tokens"), "share caption wording");
 // status.milk carries the current step's name and description plus the steps list.
 assert.match(mjs, /function milkStatus\(\)/, "status builds milk via milkStatus()");
 assert.match(mjs, /milk: milkStatus\(\)/, "statusPayload uses milkStatus()");
